@@ -1,0 +1,16 @@
+{
+  "name": "zodrs-node",
+  "version": "0.1.0",
+  "private": true,
+  "napi": {
+    "binaryName": "zodrs_node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "wasm32-wasip1-threads"
+    ]
+  },
+  "devDependencies": {
+    "@emnapi/core": "2.0.0-alpha.3",
+    "@emnapi/runtime": "2.0.0-alpha.3"
+  }
+}
