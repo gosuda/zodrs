@@ -3,9 +3,24 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "run": "tsx ./index.ts"
+    "run": "tsx ./index.ts",
+    "string": "tsx ./string.ts",
+    "number": "tsx ./number.ts",
+    "object": "tsx ./object.ts",
+    "object-safe": "tsx ./object-safe.ts",
+    "datetime": "tsx ./datetime.ts",
+    "union": "tsx ./union.ts",
+    "discriminated-union": "tsx ./discriminated-union.ts",
+    "array": "tsx ./array.ts",
+    "init": "tsx ./init.ts"
   },
   "devDependencies": {
-    "mitata": "1.0.34"
+    "@types/node": "^22.10.5",
+    "arktype": "^2.1.19",
+    "mitata": "1.0.34",
+    "tsx": "^4.19.0",
+    "valibot": "^1.3.1",
+    "zodrs": "workspace:*",
+    "zod4": "npm:zod@4.4.3"
   }
 }

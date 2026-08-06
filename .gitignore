@@ -37,3 +37,4 @@ omp-sessions/
 
 # === EMPIRICAL ===
 # none beyond template coverage
+packages/bench/results/
