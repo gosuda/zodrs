@@ -63,10 +63,16 @@ export default defineConfig({
       {
         root: new URL("./differential", import.meta.url).pathname,
         test: {
-          name: "differential",
-          include: ["**/*.test.ts"],
-          environment: "node",
-        },
+                  name: "differential",
+                  include: ["**/*.test.ts"],
+                  environment: "node",
+                  // The byte-path invariant is pinned to the native addon tier.
+                  env: {
+                    ZODRS_LOADER: "native",
+                  },
+                  // 100k cases per plan §4; measured well under this at 20k.
+                  testTimeout: 1_200_000,
+                },
       },
     ],
   },
