@@ -177,11 +177,10 @@ export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array 
     case 2: {
       if (native.verdict.payload === null) throw new Error("Native validator omitted issue payload");
       let raw = parseRawIssues(native.verdict.payload);
-      // Canonical Zod strips `input` unless reportInput:true; only back-fill then.
-      if (context?.reportInput) {
-        const original: unknown = JSON.parse(source.text);
-        raw = raw.map((entry) => backFillInput(entry, original));
-      }
+      // Message resolution needs `input` ("received X"); finalizeIssue strips
+      // it from delivered issues unless reportInput is set. Back-fill always.
+      const original: unknown = JSON.parse(source.text);
+      raw = raw.map((entry) => backFillInput(entry, original));
       throw makeError<output<T>>(raw, context);
     }
     case 3:

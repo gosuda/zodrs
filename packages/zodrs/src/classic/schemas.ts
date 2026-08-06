@@ -404,12 +404,14 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     if (this._zod.node.checks.length > 0) {
       throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
     }
+    const otherNode = other._zod.node;
     const baseShape = this._zod.node.kind === "object" ? this._zod.node.shape : {};
-    const otherShape = other._zod.node.shape;
+    const otherShape = otherNode.shape;
     const merged: Record<string, SchemaNode> = {};
     for (const key of Object.keys(baseShape)) defineLazyNode(merged, key, () => requireNode(baseShape, key));
     for (const key of Object.keys(otherShape)) defineLazyNode(merged, key, () => requireNode(otherShape, key));
-    return fromNode(cloneNode(this._zod.node, { shape: merged }), this);
+    // Incoming object's catchall, mode, and refinements override the receiver's.
+    return fromNode(cloneNode(this._zod.node, { shape: merged, catchall: otherNode.catchall, mode: otherNode.mode, checks: otherNode.checks }), this);
   }
   pick<K extends keyof Output & string>(mask: Readonly<Partial<Record<K, boolean>>>): $ZodType<Pick<Output, K>, Pick<Input, Extract<K, keyof Input>>> {
     if (this._zod.node.kind !== "object") throw new TypeError("pick() is only valid on object schemas");
@@ -433,18 +435,31 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     for (const key of Object.keys(baseShape)) if (!mask[key as K]) defineLazyNode(shape, key, () => requireNode(baseShape, key));
     return fromNode(cloneNode(this._zod.node, { shape }), this);
   }
-  partial(): $ZodType<Partial<Output>, Partial<Input>> {
+  partial(mask?: Readonly<Partial<Record<keyof Output & string, boolean>>>): $ZodType<Partial<Output>, Partial<Input>> {
     if (this._zod.node.kind !== "object") throw new TypeError("partial() is only valid on object schemas");
+    if (this._zod.node.checks.length > 0) throw new Error(".partial() cannot be used on object schemas containing refinements");
     const baseShape = this._zod.node.shape;
+    if (mask) for (const key of Object.keys(mask)) {
+      if (!Object.prototype.hasOwnProperty.call(baseShape, key)) throw new Error(`Unrecognized key: "${key}"`);
+    }
     const shape: Record<string, SchemaNode> = {};
-    for (const key of Object.keys(baseShape)) defineLazyNode(shape, key, () => node({ kind: "optional", inner: requireNode(baseShape, key) }));
+    for (const key of Object.keys(baseShape)) {
+      if (mask && !mask[key as keyof Output & string]) { defineLazyNode(shape, key, () => requireNode(baseShape, key)); continue; }
+      defineLazyNode(shape, key, () => node({ kind: "optional", inner: requireNode(baseShape, key) }));
+    }
     return fromNode(cloneNode(this._zod.node, { shape }), this);
   }
-  required(): $ZodType<Required<Output>, Required<Input>> {
+  required(mask?: Readonly<Partial<Record<keyof Output & string, boolean>>>): $ZodType<Required<Output>, Required<Input>> {
     if (this._zod.node.kind !== "object") throw new TypeError("required() is only valid on object schemas");
     const baseShape = this._zod.node.shape;
+    if (mask) for (const key of Object.keys(mask)) {
+      if (!Object.prototype.hasOwnProperty.call(baseShape, key)) throw new Error(`Unrecognized key: "${key}"`);
+    }
     const shape: Record<string, SchemaNode> = {};
-    for (const key of Object.keys(baseShape)) defineLazyNode(shape, key, () => { const inner = requireNode(baseShape, key); return inner.kind === "optional" ? inner.inner : inner; });
+    for (const key of Object.keys(baseShape)) {
+      if (mask && !mask[key as keyof Output & string]) { defineLazyNode(shape, key, () => requireNode(baseShape, key)); continue; }
+      defineLazyNode(shape, key, () => { const inner = requireNode(baseShape, key); return inner.kind === "optional" ? inner.inner : inner; });
+    }
     return fromNode(cloneNode(this._zod.node, { shape }), this);
   }
   passthrough(): this { return this.objectMode("passthrough"); }

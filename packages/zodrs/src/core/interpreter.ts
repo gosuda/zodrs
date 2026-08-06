@@ -305,7 +305,7 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
       if (!isObject(input)) { issue(context, node, path, { expected: "object", code: "invalid_type" }, input); return FAIL; }
       const result: Record<string, unknown> = {};
       let failed = false;
-      const known: Record<string, true> = {};
+      const known: Record<string, true> = Object.create(null) as Record<string, true>;
       for (const [key, child] of Object.entries(node.shape)) {
         known[key] = true;
         const present = Object.prototype.hasOwnProperty.call(input, key);
@@ -585,7 +585,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     return first === FAIL ? FAIL : runAsync(node.b, first, context, path);
   }
   if (node.kind === "object" && isObject(input)) {
-    const result: Record<string, unknown> = {}; let failed = false; const known: Record<string, true> = {};
+    const result: Record<string, unknown> = {}; let failed = false; const known: Record<string, true> = Object.create(null) as Record<string, true>;
     for (const [key, child] of Object.entries(node.shape)) { known[key] = true; const present = Object.prototype.hasOwnProperty.call(input, key); const parsed = await runAsync(child, present ? input[key] : undefined, context, [...path, key]); if (parsed === FAIL) failed = true; else if (present || parsed !== undefined) result[key] = parsed; }
     for (const key of Object.keys(input).filter((entry) => !known[entry])) {
       if (node.catchall) { const parsed = await runAsync(node.catchall, input[key], context, [...path, key]); if (parsed === FAIL) failed = true; else result[key] = parsed; }
