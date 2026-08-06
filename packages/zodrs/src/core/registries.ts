@@ -65,7 +65,7 @@ export class $ZodRegistry<
   }
 
   get<S extends Schema>(schema: S): $replace<Meta, S> | undefined {
-    // Child schemas inherit their parent's metadata, except `id`.
+    // Child schemas made by `.clone()` inherit their parent's metadata, except `id`.
     const parent = schema._zod.parent;
     if (parent) {
       const inherited: Record<string, unknown> = { ...((this.get(parent as Schema) ?? {}) as Record<string, unknown>) };

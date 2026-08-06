@@ -24,7 +24,7 @@ import { globalRegistry } from "../core/registries.js";
 import type { $ZodRegistry, $replace, GlobalMeta } from "../core/registries.js";
 import { createStandardProps } from "../core/standard-schema.js";
 import type { StandardSchemaV1 } from "../core/standard-schema.js";
-import { escapeRegex, isObject } from "../core/util.js";
+import { escapeRegex, FAIL, isObject } from "../core/util.js";
 import type { JSONType, MaybeAsync, NoUndefined, Primitive } from "../core/util.js";
 
 export type output<T extends $ZodType> = T["_zod"]["output"];
@@ -50,7 +50,7 @@ export type AnyCheckInput = $ZodCheck | RuntimeCheck | CheckFn;
 export type SchemaInternals<Output, Input> = RuntimeSchema<Output, Input>["_zod"] & {
   readonly node: SchemaNode;
   readonly parent?: $ZodType | undefined;
-  readonly def: SchemaNode;
+  readonly def: SchemaDef;
 };
 
 export type ErrorParam = string | {
@@ -106,10 +106,23 @@ function runtimeCheck(check: RuntimeCheck["check"], params?: ErrorParam): $ZodCh
 function checksOf(values: readonly ($ZodCheck | RuntimeCheck | ((payload: { value: unknown; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): RuntimeCheck[] {
   return values.map((value) => {
     if (typeof value === "function") {
-      const fn: HostFunction = async (input, context) => value({ value: input, issues: context.issues as $ZodIssue[] });
+      const fn: HostFunction = (input, context) => value({ value: input, issues: context.issues as $ZodIssue[] });
       return { check: { c: "host_runtime", op: "check", fn } };
     }
-    return "_zod" in value ? value._zod : value;
+    if (value instanceof $ZodType) {
+      // A passed SCHEMA becomes a host check that runs the schema's raw validator so
+      // any produced issues stay in raw (unfinalized) form for the outer context.
+      const fn: HostFunction = (input, context) => {
+        const sub: ValidationContext = { ...context, issues: null };
+        const result = value._zod.validate(input, sub);
+        if (result === FAIL) {
+          for (const raw of sub.issues ?? []) context.addIssue(raw);
+        }
+      };
+      return { check: { c: "host_runtime", op: "check", fn } };
+    }
+    if (value && typeof value === "object" && "_zod" in value) return (value as $ZodCheck)._zod;
+    return value as RuntimeCheck;
   });
 }
 
@@ -129,10 +142,49 @@ function withCheck<Output, Input>(schema: $ZodType<Output, Input>, check: $ZodCh
   return fromNode(cloneNode(schema._zod.node, { checks: [...schema._zod.node.checks, runtime] }), schema);
 }
 
+/** Zod v4-style `.def` facade: the raw `SchemaNode` plus a `type` string (the
+ * kind) and lazy structural accessors that surface child schemas as full
+ * `$ZodType` instances. Non-generic so phantom `$ZodType<Output,Input>` types
+ * are unaffected. The intersection with `SchemaNode` keeps `_zod.def`
+ * compatible with code that reads raw node fields (kind, checks, inner, …). */
+export type SchemaDef = SchemaNode & {
+  readonly type: string;
+  readonly keyType?: $ZodType;
+  readonly valueType?: $ZodType;
+  readonly entries?: Readonly<Record<string, string | number>>;
+  readonly discriminator?: string;
+  readonly innerType?: $ZodType;
+  readonly in?: $ZodType;
+  readonly out?: $ZodType;
+};
+
+/** Build a lazy `SchemaDef` facade for a node. The node's own enumerable props
+ * are copied via `Object.assign` (kind, checks, inner, a, b, mode, pattern,
+ * values, …); accessors are defined as lazy getters that only construct child
+ * schemas on first access, so `makeDef` never recurses during construction. */
+function makeDef(node: SchemaNode): SchemaDef {
+  const facade = Object.assign({}, node, { type: node.kind }) as SchemaDef;
+  Object.defineProperties(facade, {
+    keyType: { enumerable: true, configurable: true, get: () => node.kind === "record" || node.kind === "map" ? childSchema(node.key) : never() },
+    valueType: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "record" || n.kind === "map" || n.kind === "set" ? childSchema(n.value) : never(); } },
+    element: { enumerable: true, configurable: true, get: () => node.kind === "array" ? childSchema(node.element) : never() },
+    shape: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "object" ? Object.fromEntries(Object.entries(n.shape).map(([k, child]) => [k, childSchema(child)])) : {}; } },
+    catchall: { enumerable: true, configurable: true, get: () => { const n = node; if (n.kind !== "object") return undefined; if (n.catchall) return childSchema(n.catchall); if (n.mode === "strict") return never(); if (n.mode === "passthrough") return unknown(); return undefined; } },
+    entries: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "enum" ? Object.fromEntries(n.values.map((v) => [v, v] as const)) : undefined; } },
+    discriminator: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "discunion" ? n.key : undefined; } },
+    innerType: { enumerable: true, configurable: true, get: () => { const n = node; if (n.kind === "optional" || n.kind === "exactOptional" || n.kind === "nullable" || n.kind === "nonoptional" || n.kind === "readonly" || n.kind === "promise" || n.kind === "default" || n.kind === "prefault" || n.kind === "catch") return childSchema(n.inner); if (n.kind === "host" && n.inner) return childSchema(n.inner); return undefined; } },
+    in: { enumerable: true, configurable: true, get: () => node.kind === "pipe" ? childSchema(node.a) : never() },
+    out: { enumerable: true, configurable: true, get: () => node.kind === "pipe" ? childSchema(node.b) : never() },
+    options: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "union" || n.kind === "discunion" ? n.options.map(childSchema) : []; } },
+    items: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "tuple" ? n.items.map(childSchema) : []; } },
+  });
+  return facade;
+}
+
 export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema<Output, Input> {
   readonly _zod: SchemaInternals<Output, Input>;
-  readonly def: SchemaNode;
-  readonly _def: SchemaNode;
+  readonly def: SchemaDef;
+  readonly _def: SchemaDef;
   readonly type: SchemaNode["kind"];
   readonly "~standard": StandardSchemaV1.Props<Input, Output>;
 
@@ -143,21 +195,24 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     let cachedPlan: SchemaInternals<Output, Input>["plan"] | undefined;
     let cachedValidate: SchemaInternals<Output, Input>["validate"] | undefined;
     let cachedValidateAsync: SchemaInternals<Output, Input>["validateAsync"] | undefined;
+    const defFacade = makeDef(schemaNode);
     this._zod = {
       output: undefined as Output,
       input: undefined as Input,
       node: schemaNode,
-      def: schemaNode,
-      parent,
+      def: defFacade,
       get validate() { return (cachedValidate ??= CODEGEN_AVAILABLE && !config().jitless ? createCodegenValidator(schemaNode) : createInterpreter(schemaNode)); },
       get validateAsync() { return (cachedValidateAsync ??= createAsyncInterpreter(schemaNode)); },
       get plan() { return (cachedPlan ??= compilePlan(schemaNode)); },
       nativeHandle: null,
     };
-    this.def = schemaNode;
-    this._def = schemaNode;
+    this.def = defFacade;
+    this._def = defFacade;
     this.type = schemaNode.kind;
-    this["~standard"] = createStandardProps<Input, Output>({ safeParse: this.safeParse, safeParseAsync: this.safeParseAsync });
+    this["~standard"] = createStandardProps<Input, Output>({
+      safeParse: (value) => this.safeParse(value),
+      safeParseAsync: (value) => this.safeParseAsync(value),
+    });
     schemaByNode.set(schemaNode, this);
     const prototype = $ZodType.prototype;
     for (const key of Object.getOwnPropertyNames(prototype)) {
@@ -208,10 +263,10 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     return this.check(runtimeCheck({ c: "host_runtime", op: "overwrite", fn: host })) as this;
   }
 
-  optional(): $ZodType<Output | undefined, Input | undefined> { return fromNode(node({ kind: "optional", inner: this._zod.node }), this); }
-  exactOptional(): $ZodType<Output | undefined, Input | undefined> { return this.optional(); }
-  nonoptional(params?: ErrorParam): $ZodType<Exclude<Output, undefined>, Input> { return fromNode(node({ kind: "nonoptional", inner: this._zod.node }, { error: errorMap(params) }), this); }
-  nullable(): $ZodType<Output | null, Input | null> { return fromNode(node({ kind: "nullable", inner: this._zod.node }), this); }
+  optional(): $ZodType<Output | undefined, Input | undefined> { return fromNode(node({ kind: "optional", inner: this._zod.node })); }
+  exactOptional(): $ZodType<Output | undefined, Input | undefined> { return fromNode(node({ kind: "exactOptional", inner: this._zod.node })); }
+  nonoptional(params?: ErrorParam): $ZodType<Exclude<Output, undefined>, Input> { return fromNode(node({ kind: "nonoptional", inner: this._zod.node }, { error: errorMap(params) })); }
+  nullable(): $ZodType<Output | null, Input | null> { return fromNode(node({ kind: "nullable", inner: this._zod.node })); }
   nullish(): $ZodType<Output | null | undefined, Input | null | undefined> { return this.nullable().optional(); }
   array(): $ZodType<Output[], Input[]> { return array(this); }
   or<T extends SomeType>(option: T): $ZodType<Output | output<T>, Input | input<T>> { return union([this, option]); }
@@ -221,19 +276,19 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     // Match Zod: `.transform` is `pipe(this, transform(fn))`, so the result is a
     // ZodPipe whose `.out` is a standalone ZodTransform node.
     const transformNode = node({ kind: "host", inner: null, fn: host, op: "transform" });
-    return fromNode(node({ kind: "pipe", a: this._zod.node, b: transformNode }), this);
+    return fromNode(node({ kind: "pipe", a: this._zod.node, b: transformNode }));
   }
   default(value: NoUndefined<Output> | (() => NoUndefined<Output>)): $ZodType<Exclude<Output, undefined>, Input | undefined> {
-    return fromNode(node({ kind: "default", inner: this._zod.node, value, dynamic: typeof value === "function" }), this);
+    return fromNode(node({ kind: "default", inner: this._zod.node, value, dynamic: typeof value === "function" }));
   }
   prefault(value: Input | (() => Input)): $ZodType<Output, Input | undefined> {
-    return fromNode(node({ kind: "prefault", inner: this._zod.node, value, dynamic: typeof value === "function" }), this);
+    return fromNode(node({ kind: "prefault", inner: this._zod.node, value, dynamic: typeof value === "function" }));
   }
   catch(value: Output | ((context: { readonly error: unknown; readonly input: unknown }) => Output)): $ZodType<Output, Input> {
-    return fromNode(node({ kind: "catch", inner: this._zod.node, value, dynamic: typeof value === "function" }), this);
+    return fromNode(node({ kind: "catch", inner: this._zod.node, value, dynamic: typeof value === "function" }));
   }
-  pipe<T extends SomeType>(target: T): $ZodType<output<T>, Input> { return fromNode(node({ kind: "pipe", a: this._zod.node, b: target._zod.node }), this); }
-  readonly(): $ZodType<Readonly<Output>, Input> { return fromNode(node({ kind: "readonly", inner: this._zod.node }), this); }
+  pipe<T extends SomeType>(target: T): $ZodType<output<T>, Input> { return fromNode(node({ kind: "pipe", a: this._zod.node, b: target._zod.node })); }
+  readonly(): $ZodType<Readonly<Output>, Input> { return fromNode(node({ kind: "readonly", inner: this._zod.node })); }
 
   describe(description: string): this { const copy = this.clone(); globalRegistry.add(copy, { description }); return copy; }
   get description(): string | undefined { return globalRegistry.get(this)?.description; }
@@ -331,6 +386,13 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     // extension (`get self() { return z.array(Self) }`) don't hit a TDZ.
     const baseShape = this._zod.node.shape;
     const extShape = extension as Readonly<Record<string, SomeType>>;
+    if (this._zod.node.checks.length > 0) {
+      for (const key of Object.keys(extShape)) {
+        if (Object.prototype.hasOwnProperty.call(baseShape, key)) {
+          throw new Error("Cannot overwrite keys on object schemas containing refinements. Use `.safeExtend()` instead.");
+        }
+      }
+    }
     const merged: Record<string, SchemaNode> = {};
     for (const key of Object.keys(baseShape)) defineLazyNode(merged, key, () => requireNode(baseShape, key));
     for (const key of Object.keys(extShape)) defineLazyNode(merged, key, () => resolveShapeNode(extShape, key));
@@ -339,6 +401,9 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   safeExtend<Extension extends Shape>(extension: Extension): $ZodType<Output & ObjectOutput<Extension>, Input & ObjectInput<Extension>> { return this.extend(extension); }
   merge<T extends SomeType>(other: T): $ZodType<Output & output<T>, Input & input<T>> {
     if (other._zod.node.kind !== "object") throw new TypeError("merge() requires an object schema");
+    if (this._zod.node.checks.length > 0) {
+      throw new Error(".merge() cannot be used on object schemas containing refinements. Use .safeExtend() instead.");
+    }
     const baseShape = this._zod.node.kind === "object" ? this._zod.node.shape : {};
     const otherShape = other._zod.node.shape;
     const merged: Record<string, SchemaNode> = {};
@@ -348,14 +413,22 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   }
   pick<K extends keyof Output & string>(mask: Readonly<Partial<Record<K, boolean>>>): $ZodType<Pick<Output, K>, Pick<Input, Extract<K, keyof Input>>> {
     if (this._zod.node.kind !== "object") throw new TypeError("pick() is only valid on object schemas");
+    if (this._zod.node.checks.length > 0) throw new Error(".pick() cannot be used on object schemas containing refinements");
     const baseShape = this._zod.node.shape;
+    for (const key of Object.keys(mask)) {
+      if (!Object.prototype.hasOwnProperty.call(baseShape, key)) throw new Error(`Unrecognized key: "${key}"`);
+    }
     const shape: Record<string, SchemaNode> = {};
     for (const key of Object.keys(baseShape)) if (mask[key as K]) defineLazyNode(shape, key, () => requireNode(baseShape, key));
     return fromNode(cloneNode(this._zod.node, { shape }), this);
   }
   omit<K extends keyof Output & string>(mask: Readonly<Partial<Record<K, boolean>>>): $ZodType<Omit<Output, K>, Omit<Input, Extract<K, keyof Input>>> {
     if (this._zod.node.kind !== "object") throw new TypeError("omit() is only valid on object schemas");
+    if (this._zod.node.checks.length > 0) throw new Error(".omit() cannot be used on object schemas containing refinements");
     const baseShape = this._zod.node.shape;
+    for (const key of Object.keys(mask)) {
+      if (!Object.prototype.hasOwnProperty.call(baseShape, key)) throw new Error(`Unrecognized key: "${key}"`);
+    }
     const shape: Record<string, SchemaNode> = {};
     for (const key of Object.keys(baseShape)) if (!mask[key as K]) defineLazyNode(shape, key, () => requireNode(baseShape, key));
     return fromNode(cloneNode(this._zod.node, { shape }), this);
@@ -529,7 +602,16 @@ export function literal<const T extends Primitive>(value: T | readonly T[], para
 export function enum_<const T extends readonly string[]>(values: T, params?: ErrorParam): $ZodType<T[number], T[number]>;
 export function enum_<const T extends Readonly<Record<string, string | number>>>(values: T, params?: ErrorParam): $ZodType<T[keyof T], T[keyof T]>;
 export function enum_(values: readonly string[] | Readonly<Record<string, string | number>>, params?: ErrorParam): $ZodType<string | number, string | number> {
-  const entries = Array.isArray(values) ? values : [...new Set(Object.values(values).filter((value) => typeof value === "string" || typeof value === "number"))];
+  let entries: (string | number)[];
+  if (Array.isArray(values)) {
+    entries = [...values];
+  } else {
+    // Drop TS enum reverse-mappings: a numeric-valued member `Foo = 0` also creates
+    // a `0 -> "Foo"` back-edge; exclude keys that are the string form of a numeric value.
+    const record = values as Readonly<Record<string, string | number>>;
+    const numericValues = Object.values(record).filter((value) => typeof value === "number");
+    entries = Object.entries(record).filter(([key]) => !numericValues.includes(Number(key))).map(([, value]) => value);
+  }
   return fromNode(node({ kind: "enum", values: entries }, { error: errorMap(params) }));
 }
 export const nativeEnum: typeof enum_ = enum_;
@@ -571,6 +653,11 @@ export function object<const S extends Shape = Record<never, SomeType>>(shape?: 
 }
 export function strictObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return object(shape, params).strict(); }
 export function looseObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return object(shape, params).passthrough(); }
+export function keyof<S extends SomeType>(schema: S): $ZodType<string, string> {
+  const current = schema._zod.node;
+  if (current.kind !== "object") throw new TypeError("keyof() is only valid on object schemas");
+  return enum_(Object.keys(current.shape));
+}
 export function array<T extends SomeType>(element: T, params?: ErrorParam): ZodArray<T> { return fromNode(node({ kind: "array", element: element._zod.node }, { error: errorMap(params) })); }
 export function tuple<const T extends readonly SomeType[], Rest extends SomeType | null = null>(items: T, restOrParams?: Rest | ErrorParam, params?: ErrorParam): ZodTuple<T, Rest> {
   const rest = restOrParams instanceof $ZodType ? restOrParams : null;
@@ -602,8 +689,26 @@ export function xor<const T extends readonly SomeType[]>(options: T, params?: Er
   return fromNode(node({ kind: "host", inner: null, fn, op: "refine" }, { error: errorMap(params) }));
 }
 export function intersection<A extends SomeType, B extends SomeType>(left: A, right: B): ZodIntersection<A, B> { return fromNode(node({ kind: "intersection", left: left._zod.node, right: right._zod.node })); }
-export function record<K extends SomeType, V extends SomeType>(key: K, value: V, params?: ErrorParam): ZodRecord<K, V> { return fromNode(node({ kind: "record", key: key._zod.node, value: value._zod.node }, { error: errorMap(params) })); }
+export function record<V extends SomeType>(value: V, params?: ErrorParam): ZodRecord<ZodString, V>;
+export function record<K extends SomeType, V extends SomeType>(key: K, value: V, params?: ErrorParam): ZodRecord<K, V>;
+export function record<K extends SomeType, V extends SomeType>(keyOrValue: K | V, valueOrParams?: V | ErrorParam, params?: ErrorParam): ZodRecord<K, V> {
+  // v3-compat single-arg form: `z.record(valueType)` defaults keyType to z.string().
+  if (valueOrParams === undefined || typeof valueOrParams === "string" || !("_zod" in (valueOrParams as object))) {
+    const value = keyOrValue as V;
+    const maybeParams = (valueOrParams === undefined ? params : valueOrParams) as ErrorParam;
+    return fromNode(node({ kind: "record", key: node({ kind: "string" }), value: value._zod.node }, { error: errorMap(maybeParams) }));
+  }
+  const key = keyOrValue as K;
+  const value = valueOrParams as V;
+  return fromNode(node({ kind: "record", key: key._zod.node, value: value._zod.node }, { error: errorMap(params) }));
+}
 export function map<K extends SomeType, V extends SomeType>(key: K, value: V, params?: ErrorParam): ZodMap<K, V> { return fromNode(node({ kind: "map", key: key._zod.node, value: value._zod.node }, { error: errorMap(params) })); }
+export function partialRecord<K extends SomeType, V extends SomeType>(keyType: K, valueType: V, params?: ErrorParam): ZodRecord<K, V> {
+  return fromNode(node({ kind: "record", key: keyType._zod.node, value: valueType._zod.node, partial: true }, { error: errorMap(params) }));
+}
+export function looseRecord<K extends SomeType, V extends SomeType>(keyType: K, valueType: V, params?: ErrorParam): ZodRecord<K, V> {
+  return fromNode(node({ kind: "record", key: keyType._zod.node, value: valueType._zod.node, mode: "loose" }, { error: errorMap(params) }));
+}
 export function set<T extends SomeType>(value: T, params?: ErrorParam): ZodSet<T> { return fromNode(node({ kind: "set", value: value._zod.node }, { error: errorMap(params) })); }
 export function optional<T extends SomeType>(inner: T): ZodOptional<T> { return inner.optional(); }
 export function nullable<T extends SomeType>(inner: T): ZodNullable<T> { return inner.nullable(); }
@@ -664,7 +769,19 @@ export function codec<A extends SomeType, B extends SomeType>(inputSchema: A, ou
   readonly encode: (value: input<B>, context: RefinementCtx<input<B>>) => MaybeAsync<output<A>>;
 }): $ZodType<output<B>, input<A>> {
   const decodeHost: HostFunction = (value, context) => handlers.decode(value as output<A>, context as RefinementCtx<output<A>>);
-  return fromNode(node({ kind: "pipe", codec: true, a: inputSchema._zod.node, b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: decodeHost, op: "codec_decode" }), b: outputSchema._zod.node }) }));
+  const encodeHost: HostFunction = (value, context) => handlers.encode(value as input<B>, context as RefinementCtx<input<B>>);
+  return fromNode(node({ kind: "pipe", codec: true, a: inputSchema._zod.node, b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: decodeHost, op: "codec_decode" }), b: outputSchema._zod.node }), encodeHost }));
+}
+export function invertCodec<T extends SomeType>(codec: T): $ZodType<input<T>, output<T>> {
+  const def = codec._zod.node;
+  if (def.kind !== "pipe" || !def.codec || !def.encodeHost) throw new TypeError("invertCodec() requires a codec schema");
+  const inner = def.b;
+  if (inner.kind !== "pipe") throw new TypeError("invertCodec() requires a codec schema");
+  const decodeHostNode = inner.a;
+  if (decodeHostNode.kind !== "host") throw new TypeError("invertCodec() requires a codec schema");
+  const encodeNode = node({ kind: "host", inner: null, fn: def.encodeHost, op: "codec_encode" });
+  const reversedInner = node({ kind: "pipe", a: encodeNode, b: def.a });
+  return fromNode(node({ kind: "pipe", codec: true, a: inner.b, b: reversedInner, encodeHost: decodeHostNode.fn }));
 }
 
 export const coerce: {
@@ -751,6 +868,10 @@ export function sha1(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "
 export function sha256(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString { return formatted("sha256", params, typeof params === "object" ? { enc: params.enc } : undefined); }
 export function sha384(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString { return formatted("sha384", params, typeof params === "object" ? { enc: params.enc } : undefined); }
 export function sha512(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString { return formatted("sha512", params, typeof params === "object" ? { enc: params.enc } : undefined); }
+export type HashAlgorithm = "md5" | "sha1" | "sha256" | "sha384" | "sha512";
+export function hash<Alg extends HashAlgorithm>(alg: Alg, params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString {
+  return formatted(alg, params, typeof params === "object" ? { enc: params.enc } : undefined);
+}
 export function stringFormat(name: string, validator: RegExp | ((value: string) => MaybeAsync<unknown>), params?: ErrorParam): ZodString {
   return validator instanceof RegExp ? string().regex(validator, params) : string().refine(validator, params);
 }
@@ -793,4 +914,25 @@ export function json(params?: ErrorParam): SomeType {
     || Array.isArray(value) && value.every(valid)
     || isObject(value) && Object.values(value).every(valid);
   return custom<JSONType>(valid, params);
+}
+
+export function setErrorMap(map: $ZodErrorMap): void { config({ customError: map }); }
+export function getErrorMap(): $ZodErrorMap | undefined { return config().customError; }
+
+export function describe<T extends SomeType>(schema: T, description: string): T {
+  const copy = schema.clone();
+  globalRegistry.add(copy, { description });
+  return copy;
+}
+export function meta<T extends SomeType>(schema: T, data: $replace<GlobalMeta, T>): T {
+  const copy = schema.clone();
+  globalRegistry.add(copy, data);
+  return copy;
+}
+
+/** Wraps a schema so parsing always succeeds, yielding `true` when the inner
+ * schema validates and `false` otherwise (mirrors Zod's `z.success`). */
+export function success<T extends SomeType>(inner: T): $ZodType<boolean, input<T>> {
+  const fn: HostFunction = (value) => inner.safeParse(value).success;
+  return fromNode(node({ kind: "host", inner: null, fn, op: "transform" }));
 }

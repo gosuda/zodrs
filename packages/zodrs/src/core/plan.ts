@@ -128,11 +128,14 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
     case "set":
       return { k: "set", value: emit(schema.value, state), checks: emitChecks(schema.checks, state) };
     case "optional":
+    case "exactOptional":
     case "nullable":
     case "nonoptional":
     case "readonly":
     case "promise":
-      return { k: schema.kind, inner: emit(schema.inner, state) };
+      // exactOptional is input-side optional on the wire (the Rust byte path does not
+      // run refines); the TS backends distinguish it via the in-memory node kind.
+      return { k: schema.kind === "exactOptional" ? "optional" : schema.kind, inner: emit(schema.inner, state) };
     case "lazy":
       return { k: "lazy", inner: emit(schema.getter(), state) };
     case "default":

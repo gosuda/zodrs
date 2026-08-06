@@ -109,11 +109,19 @@ export interface DiscriminatedUnionNode extends NodeCommon {
   readonly map: ReadonlyMap<Primitive, SchemaNode>;
 }
 export interface IntersectionNode extends NodeCommon { readonly kind: "intersection"; readonly left: SchemaNode; readonly right: SchemaNode }
-export interface RecordNode extends NodeCommon { readonly kind: "record"; readonly key: SchemaNode; readonly value: SchemaNode }
+export interface RecordNode extends NodeCommon {
+  readonly kind: "record";
+  readonly key: SchemaNode;
+  readonly value: SchemaNode;
+  /** "strict" errors on non-matching keys; "loose" passes them through unchanged. */
+  readonly mode?: "strict" | "loose";
+  /** partialRecord: keys are partial (Record value becomes Partial). Runtime-neutral marker. */
+  readonly partial?: boolean;
+}
 export interface MapNode extends NodeCommon { readonly kind: "map"; readonly key: SchemaNode; readonly value: SchemaNode }
 export interface SetNode extends NodeCommon { readonly kind: "set"; readonly value: SchemaNode }
 export interface WrapperNode extends NodeCommon {
-  readonly kind: "optional" | "nullable" | "nonoptional" | "readonly" | "promise";
+  readonly kind: "optional" | "exactOptional" | "nullable" | "nonoptional" | "readonly" | "promise";
   readonly inner: SchemaNode;
 }
 export interface LazyNode extends NodeCommon { readonly kind: "lazy"; readonly getter: () => SchemaNode }
@@ -123,7 +131,7 @@ export interface FallbackNode extends NodeCommon {
   readonly value: unknown | DynamicValue;
   readonly dynamic: boolean;
 }
-export interface PipeNode extends NodeCommon { readonly kind: "pipe"; readonly a: SchemaNode; readonly b: SchemaNode; readonly codec?: boolean }
+export interface PipeNode extends NodeCommon { readonly kind: "pipe"; readonly a: SchemaNode; readonly b: SchemaNode; readonly codec?: boolean; readonly encodeHost?: HostFunction }
 export interface TemplateLiteralNode extends NodeCommon { readonly kind: "templateLiteral"; readonly pattern: RegExp }
 export interface HostNode extends NodeCommon { readonly kind: "host"; readonly inner: SchemaNode | null; readonly fn: HostFunction; readonly op: HostOperation }
 

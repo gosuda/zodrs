@@ -38,6 +38,17 @@ const PATTERNS: Readonly<Record<string, RegExp>> = {
 
 const DATE = /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))$/;
 
+function timeSource(params: Readonly<Record<string, unknown>>): string {
+  const precision = typeof params["precision"] === "number" ? params["precision"] : null;
+  const hhmm = "(?:[01]\\d|2[0-3]):[0-5]\\d";
+  if (typeof precision === "number") {
+    if (precision === -1) return hhmm;
+    if (precision === 0) return `${hhmm}:[0-5]\\d`;
+    return `${hhmm}:[0-5]\\d\\.\\d{${precision}}`;
+  }
+  return `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
+}
+
 function hashPattern(format: string, encoding: string): RegExp | undefined {
   const lengths: Readonly<Record<string, readonly [number, number, string]>> = {
     md5: [32, 22, "=="], sha1: [40, 27, "="], sha256: [64, 43, "="], sha384: [96, 64, ""], sha512: [128, 86, "=="],
@@ -62,16 +73,15 @@ export function testFormat(format: FormatId, input: string, params: Readonly<Rec
   if (format === "jwt") return input.split(".").length === 3;
   if (format === "date") return DATE.test(input);
   if (format === "time") {
-    const precision = typeof params["precision"] === "number" ? params["precision"] : null;
-    const base = "(?:[01]\\d|2[0-3]):[0-5]\\d";
-    const tail = precision === -1 ? "" : precision === 0 ? ":[0-5]\\d" : precision === null ? "(?::[0-5]\\d(?:\\.\\d+)?)?" : `:[0-5]\\d\\.\\d{${precision}}`;
-    return new RegExp(`^${base}${tail}$`).test(input);
+    return new RegExp(`^${timeSource(params)}$`).test(input);
   }
   if (format === "datetime") {
     const [date, time] = input.split("T");
     if (!date || !time || !DATE.test(date)) return false;
-    const offset = params["offset"] === true ? "(?:Z|[+-](?:[01]\\d|2[0-3]):[0-5]\\d)" : params["local"] === true ? "(?:Z)?" : "Z";
-    return new RegExp(`^(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?${offset}$`).test(time);
+    const opts = ["Z"];
+    if (params["local"] === true) opts.push("");
+    if (params["offset"] === true) opts.push("(?:[+-](?:[01]\\d|2[0-3]):[0-5]\\d)");
+    return new RegExp(`^${timeSource(params)}(?:${opts.join("|")})$`).test(time);
   }
   if (format === "mac") {
     const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";

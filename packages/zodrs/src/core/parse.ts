@@ -146,6 +146,22 @@ function inputAtPath(root: unknown, path: readonly PropertyKey[]): unknown {
   return current;
 }
 
+/** Back-fill `input` on an issue and, recursively, on any nested sub-issues. */
+function backFillInput(raw: $ZodRawIssue, original: unknown): $ZodRawIssue {
+  const withInput = { ...raw, input: inputAtPath(original, raw.path ?? []) } as $ZodRawIssue;
+  if (Array.isArray(withInput.errors)) {
+    const errors = withInput.errors.map((branch: unknown) => Array.isArray(branch)
+      ? branch.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original))
+      : branch);
+    return { ...withInput, errors } as $ZodRawIssue;
+  }
+  if (Array.isArray(withInput.issues)) {
+    const issues = withInput.issues.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original));
+    return { ...withInput, issues } as $ZodRawIssue;
+  }
+  return withInput;
+}
+
 export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array | ArrayBuffer | string, context?: ParseContext): output<T> {
   const source = bytesAndText(value);
   const plan = schema._zod.plan;
@@ -160,15 +176,20 @@ export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array 
       return JSON.parse(native.verdict.payload) as output<T>;
     case 2: {
       if (native.verdict.payload === null) throw new Error("Native validator omitted issue payload");
-      const original: unknown = JSON.parse(source.text);
-      const raw = parseRawIssues(native.verdict.payload).map((entry) => ({
-        ...entry,
-        input: inputAtPath(original, entry.path ?? []),
-      }) as $ZodRawIssue);
-      throw makeError<output<T>>(raw, { ...context, reportInput: true });
+      let raw = parseRawIssues(native.verdict.payload);
+      // Canonical Zod strips `input` unless reportInput:true; only back-fill then.
+      if (context?.reportInput) {
+        const original: unknown = JSON.parse(source.text);
+        raw = raw.map((entry) => backFillInput(entry, original));
+      }
+      throw makeError<output<T>>(raw, context);
     }
     case 3:
-      throw new Error("Internal invariant: native backend received a non-JSON-eligible plan");
+      // Status 3: the native parser rejected input that JS handles differently
+      // (BOM, lone-surrogate escapes, 1e400→Infinity, NaN/Infinity literals, truncated
+      // JSON). Fall back to JSON.parse + the TS validator — identical observable result.
+      // JSON.parse throwing SyntaxError propagates as-is.
+      return parse(schema, JSON.parse(source.text), context);
     default:
       throw new Error(`Native validator returned unknown status ${native.verdict.status}`);
   }

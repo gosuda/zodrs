@@ -11,6 +11,63 @@ export interface ValidationContext extends ParseContext {
 }
 
 export type Validator = (input: unknown, context: ValidationContext) => unknown | FailType;
+
+/** Mirrors `_zod.values`: the finite key set for enum/literal/union-of-those, else undefined. */
+function keyValues(node: SchemaNode): (string | number)[] | undefined {
+  switch (node.kind) {
+    case "enum": return [...node.values];
+    case "literal": {
+      const out: (string | number)[] = [];
+      for (const value of node.values) { if (typeof value === "string" || typeof value === "number") out.push(value); else return undefined; }
+      return out;
+    }
+    case "union": {
+      const out: (string | number)[] = [];
+      for (const option of node.options) { const inner = keyValues(option); if (!inner) return undefined; out.push(...inner); }
+      return out;
+    }
+    case "pipe": return keyValues(node.a); // input-side values (e.g. literal().transform())
+    case "optional": case "nullable": case "readonly": case "nonoptional": case "default": case "prefault": case "catch": case "exactOptional": return keyValues(node.inner);
+    case "lazy": return keyValues(node.getter());
+    default: return undefined;
+  }
+}
+
+/**
+ * Mirrors Zod's `_zod.optin === "optional"` — a slot whose INPUT may be absent.
+ * Set by `optional`, `default`, `prefault`, `catch`, `transform`; propagates through
+ * single-inner wrappers (nullable/readonly/nonoptional/pipe.b) and unions.
+ */
+function isOptinOptional(node: SchemaNode | null | undefined): boolean {
+  if (!node) return false;
+  switch (node.kind) {
+    case "optional": case "exactOptional": case "default": case "prefault": case "catch": return true;
+    case "host": return node.inner ? isOptinOptional(node.inner) : true; // transform-like
+    case "nullable": case "readonly": case "nonoptional": return isOptinOptional(node.inner);
+    case "union": return node.options.some((option) => isOptinOptional(option));
+    case "lazy": return isOptinOptional(node.getter());
+    case "pipe": return isOptinOptional(node.a); // input-may-be-absent flows from the input side
+    default: return false;
+  }
+}
+
+/**
+ * Mirrors `_zod.optout === "optional"` — a slot whose OUTPUT may be absent, so a tuple
+ * may trim it. Set ONLY by `optional`; propagates through single-inner wrappers and unions.
+ * `default`/`prefault`/`undefined`/`exactOptional` do NOT set it (their output is defined).
+ */
+function isOptoutOptional(node: SchemaNode | null | undefined): boolean {
+  if (!node) return false;
+  switch (node.kind) {
+    case "optional": case "exactOptional": return true;
+    case "nullable": case "readonly": case "nonoptional": case "default": case "prefault": case "catch": return isOptoutOptional(node.inner);
+    case "host": return isOptoutOptional(node.inner);
+    case "union": return node.options.some((option) => isOptoutOptional(option));
+    case "lazy": return isOptoutOptional(node.getter());
+    case "pipe": return isOptoutOptional(node.b);
+    default: return false;
+  }
+}
 export type AsyncValidator = (input: unknown, context: ValidationContext) => Promise<unknown | FailType>;
 
 export class $ZodAsyncError extends Error {
@@ -43,7 +100,9 @@ function makeRefinementContext(context: ValidationContext, node: SchemaNode, pat
   return {
     value,
     get issues(): $ZodRawIssue[] {
-      return context.issues ?? [];
+      // Live array: a check that does `ctx.issues.push(...)` must persist into the
+      // parse context, so initialize (not a throwaway copy) on first access.
+      return (context.issues ??= []);
     },
     addIssue(raw: $ZodRawIssue | string): void {
       if (typeof raw === "string") {
@@ -284,14 +343,45 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
     }
     case "tuple": {
       if (!Array.isArray(input)) { issue(context, node, path, { expected: "tuple", code: "invalid_type" }, input); return FAIL; }
-      if (!node.rest && input.length > node.items.length) { issue(context, node, path, { code: "too_big", maximum: node.items.length, inclusive: true, origin: "array" }, input); return FAIL; }
+      // First index of a trailing run of optin/optout-optional items. Below these
+      // indices the input/output tail is required, so short input collapses to one
+      // too_small rather than element-level errors.
+      let optinStart = node.items.length;
+      let optoutStart = node.items.length;
+      for (let index = node.items.length - 1; index >= 0; index -= 1) {
+        const item = node.items[index];
+        if (item && isOptinOptional(item)) optinStart = index; else break;
+      }
+      for (let index = node.items.length - 1; index >= 0; index -= 1) {
+        const item = node.items[index];
+        if (item && isOptoutOptional(item)) optoutStart = index; else break;
+      }
+      if (!node.rest && input.length < optinStart) { issue(context, node, path, { code: "too_small", minimum: optinStart, inclusive: true, origin: "array" }, input); return FAIL; }
+      const oversized = !node.rest && input.length > node.items.length;
+      if (oversized) { issue(context, node, path, { code: "too_big", maximum: node.items.length, inclusive: true, origin: "array" }, input); }
       const result: unknown[] = [];
-      let failed = false;
-      for (let index = 0; index < Math.max(input.length, node.items.length); index += 1) {
-        const child = node.items[index] ?? node.rest;
+      let failed = oversized;
+      for (let index = 0; index < node.items.length; index += 1) {
+        const child = node.items[index];
         if (!child) continue;
         const childResult = runSync(child, input[index], context, [...path, index]);
-        if (childResult === FAIL) failed = true; else result.push(childResult);
+        if (childResult === FAIL) {
+          // Swallow only when BOTH input & output may be absent at this tail position.
+          if (index >= input.length && index >= optinStart && index >= optoutStart) { result.length = index; break; }
+          failed = true;
+        } else {
+          result[index] = childResult;
+        }
+      }
+      if (!failed && node.rest) {
+        for (let index = node.items.length; index < input.length; index += 1) {
+          const childResult = runSync(node.rest, input[index], context, [...path, index]);
+          if (childResult === FAIL) failed = true; else result[index] = childResult;
+        }
+      }
+      // Trim trailing slots that resolved undefined for absent input on optout-optional items.
+      for (let index = result.length - 1; index >= input.length; index -= 1) {
+        if (result[index] === undefined && isOptoutOptional(node.items[index])) result.length = index; else break;
       }
       if (failed) { if (node.checks.length > 0) applyChecksSync(node, input, context, path); return FAIL; }
       output = result;
@@ -327,14 +417,53 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
     }
     case "record": {
       if (!isObject(input)) { issue(context, node, path, { expected: "record", code: "invalid_type" }, input); return FAIL; }
-      const result: Record<string, unknown> = {};
+      const result: Record<PropertyKey, unknown> = {};
       let failed = false;
-      for (const [key, value] of Object.entries(input)) {
+      const enumerated = node.partial ? undefined : keyValues(node.key);
+      if (enumerated) {
+        // Exhaustive key set: validate each expected input key (absent → invalid_type at [key]),
+        // apply the key schema to derive the output key, then report leftover keys as unrecognized.
+        const expected = new Set<string>(enumerated.map((value) => String(value)));
+        for (const key of enumerated) {
+          const stringKey = String(key);
+          const keyContext: ValidationContext = { ...context, issues: null };
+          const parsedKey = runSync(node.key, key, keyContext, []);
+          if (parsedKey === FAIL) {
+            issue(context, node, [...path, stringKey], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key);
+            failed = true;
+            continue;
+          }
+          const outKey = String(parsedKey);
+          const parsed = runSync(node.value, (input as Record<PropertyKey, unknown>)[stringKey], context, [...path, key]);
+          if (parsed === FAIL) failed = true; else result[outKey] = parsed;
+        }
+        const extra = Object.keys(input).filter((key) => !expected.has(key));
+        if (extra.length > 0) { issue(context, node, path, { code: "unrecognized_keys", keys: extra }, input); failed = true; }
+        if (failed) return FAIL;
+        output = result;
+        break;
+      }
+      // Reflect.ownKeys for Symbol keys; skip non-enumerable to match z.object(); __proto__ is data.
+      for (const key of Reflect.ownKeys(input)) {
+        if (key === "__proto__") continue;
+        if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+        const value = (input as Record<PropertyKey, unknown>)[key];
         const keyContext: ValidationContext = { ...context, issues: null };
-        const parsedKey = runSync(node.key, key, keyContext, [...path, key]);
-        if (parsedKey === FAIL) { issue(context, node, [...path, key], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key); failed = true; continue; }
+        let parsedKey = runSync(node.key, key, keyContext, [...path, key]);
+        // Numeric-string fallback: a numeric key that failed as a string may pass as a number.
+        if (parsedKey === FAIL && typeof key === "string" && key !== "" && !Number.isNaN(Number(key))) {
+          const retry: ValidationContext = { ...context, issues: null };
+          const numeric = runSync(node.key, Number(key), retry, [...path, key]);
+          if (numeric !== FAIL) { parsedKey = numeric; keyContext.issues = retry.issues; }
+        }
+        if (parsedKey === FAIL) {
+          if (node.mode === "loose") { result[key] = value; continue; } // pass non-matching keys through unchanged
+          issue(context, node, [...path, key], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key);
+          failed = true;
+          continue;
+        }
         const parsed = runSync(node.value, value, context, [...path, key]);
-        if (parsed === FAIL) failed = true; else result[String(parsedKey)] = parsed;
+        if (parsed === FAIL) failed = true; else result[parsedKey as PropertyKey] = parsed;
       }
       if (failed) return FAIL;
       output = result;
@@ -377,9 +506,10 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
       }
       if (failed) return FAIL; output = result; break;
     }
-    case "optional": if (input === undefined) return undefined; else return runSync(node.inner, input, context, path);
-    case "nullable": if (input === null) return null; else return runSync(node.inner, input, context, path);
-    case "nonoptional": if (input === undefined) { issue(context, node, path, { code: "invalid_type", expected: "nonoptional" }, input); return FAIL; } else return runSync(node.inner, input, context, path);
+    case "optional": if (input === undefined) return applyChecksSync(node, undefined, context, path); { const parsedOpt = runSync(node.inner, input, context, path); return parsedOpt === FAIL ? FAIL : applyChecksSync(node, parsedOpt, context, path); }
+    case "exactOptional": { const parsedExact = runSync(node.inner, input, context, path); return parsedExact === FAIL ? FAIL : applyChecksSync(node, parsedExact, context, path); }
+    case "nullable": if (input === null) return null; { const parsedNul = runSync(node.inner, input, context, path); return parsedNul === FAIL ? FAIL : applyChecksSync(node, parsedNul, context, path); }
+    case "nonoptional": if (input === undefined) { issue(context, node, path, { code: "invalid_type", expected: "nonoptional" }, input); return FAIL; } else { const parsedNon = runSync(node.inner, input, context, path); return parsedNon === FAIL ? FAIL : applyChecksSync(node, parsedNon, context, path); }
     case "readonly": { const parsed = runSync(node.inner, input, context, path); if (parsed === FAIL) return FAIL; if (typeof parsed === "object" && parsed !== null) Object.freeze(parsed); return parsed; }
     case "lazy": return runSync(node.getter(), input, context, path);
     case "promise": if (!isPromise(input)) { issue(context, node, path, { expected: "promise", code: "invalid_type" }, input); return FAIL; } return Promise.resolve(input).then((value) => runAsync(node.inner, value, { ...context, async: true }, path));
@@ -390,17 +520,24 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
       return result === undefined ? (node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value)) : result;
     }
     case "prefault": { const value = input === undefined ? node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value) : input; return runSync(node.inner, value, context, path); }
-    case "catch": { const local: ValidationContext = { ...context, issues: null }; const parsed = runSync(node.inner, input, local, path); return parsed === FAIL ? node.dynamic ? (node.value as (context?: { error?: unknown; input: unknown }) => unknown)({ error: local.issues, input }) : node.value : parsed; }
+    case "catch": { const local: ValidationContext = { ...context, issues: null }; const parsed = runSync(node.inner, input, local, path); return parsed === FAIL ? node.dynamic ? (node.value as (context?: { error?: unknown; input: unknown }) => unknown)({ error: { issues: local.issues ?? [] }, input }) : node.value : parsed; }
     case "pipe": { const first = runSync(node.a, input, context, path); if (first === FAIL) return FAIL; const second = runSync(node.b, first, context, path); return second === FAIL ? FAIL : (node.checks.length === 0 ? second : applyChecksSync(node, second, context, path)); }
     case "templateLiteral": if (typeof input !== "string" || !node.pattern.test(input)) { issue(context, node, path, { code: "invalid_format", format: "template_literal", pattern: node.pattern.source }, input); return FAIL; } output = input; break;
     case "host": {
       const base = node.inner ? runSync(node.inner, input, context, path) : input;
       if (base === FAIL) return FAIL;
+      const before = context.issues?.length ?? 0;
       const refinement = makeRefinementContext(context, node, path, base);
       const result = node.fn(base, refinement);
       if (isPromise(result)) throw new $ZodAsyncError();
-      if (node.op === "refine" && !result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
-      if (node.op === "superRefine" || node.op === "check") return context.issues ? FAIL : base;
+      if (node.op === "refine") {
+        if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
+        output = base; // a passing refinement is transparent: yield the input value, not the predicate result
+        break;
+      }
+      if (node.op === "superRefine" || node.op === "check") return (context.issues?.length ?? 0) > before ? FAIL : base;
+      // transform / preprocess / overwrite / codec_*: a fn that reported issues fails
+      if ((context.issues?.length ?? 0) > before) return FAIL;
       output = result;
       break;
     }
@@ -433,9 +570,14 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
   if (node.kind === "host") {
     const base = node.inner ? await runAsync(node.inner, input, context, path) : input;
     if (base === FAIL) return FAIL;
+    const before = context.issues?.length ?? 0;
     const result = await node.fn(base, makeRefinementContext(context, node, path, base));
-    if (node.op === "refine" && !result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
-    if (node.op === "superRefine" || node.op === "check") return context.issues ? FAIL : base;
+    if (node.op === "refine") {
+      if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
+      return base;
+    }
+    if (node.op === "superRefine" || node.op === "check") return (context.issues?.length ?? 0) > before ? FAIL : base;
+    if ((context.issues?.length ?? 0) > before) return FAIL;
     return result;
   }
   if (node.kind === "pipe") {
@@ -459,14 +601,54 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     if (failed) { if (node.checks.length > 0) await applyChecksAsync(node, input, context, path); return FAIL; }
     return applyChecksAsync(node, result, context, path);
   }
+  if (node.kind === "tuple" && Array.isArray(input)) {
+    let optinStart = node.items.length;
+    let optoutStart = node.items.length;
+    for (let index = node.items.length - 1; index >= 0; index -= 1) {
+      const item = node.items[index];
+      if (item && isOptinOptional(item)) optinStart = index; else break;
+    }
+    for (let index = node.items.length - 1; index >= 0; index -= 1) {
+      const item = node.items[index];
+      if (item && isOptoutOptional(item)) optoutStart = index; else break;
+    }
+    if (!node.rest && input.length < optinStart) { issue(context, node, path, { code: "too_small", minimum: optinStart, inclusive: true, origin: "array" }, input); return FAIL; }
+    const oversized = !node.rest && input.length > node.items.length;
+    if (oversized) { issue(context, node, path, { code: "too_big", maximum: node.items.length, inclusive: true, origin: "array" }, input); }
+    const result: unknown[] = [];
+    let failed = oversized;
+    for (let index = 0; index < node.items.length; index += 1) {
+      const child = node.items[index];
+      if (!child) continue;
+      const parsed = await runAsync(child, input[index], context, [...path, index]);
+      if (parsed === FAIL) {
+        if (index >= input.length && index >= optinStart && index >= optoutStart) { result.length = index; break; }
+        failed = true;
+      } else {
+        result[index] = parsed;
+      }
+    }
+    if (!failed && node.rest) {
+      for (let index = node.items.length; index < input.length; index += 1) {
+        const parsed = await runAsync(node.rest, input[index], context, [...path, index]);
+        if (parsed === FAIL) failed = true; else result[index] = parsed;
+      }
+    }
+    for (let index = result.length - 1; index >= input.length; index -= 1) {
+      if (result[index] === undefined && isOptoutOptional(node.items[index])) result.length = index; else break;
+    }
+    if (failed) { if (node.checks.length > 0) await applyChecksAsync(node, input, context, path); return FAIL; }
+    return applyChecksAsync(node, result, context, path);
+  }
   if (node.kind === "union") {
     const errors: $ZodRawIssue[][] = [];
     for (const option of node.options) { const branch: ValidationContext = { ...context, issues: null }; const parsed = await runAsync(option, input, branch, path); if (parsed !== FAIL) return applyChecksAsync(node, parsed, context, path); errors.push(branch.issues ?? []); }
     issue(context, node, path, { code: "invalid_union", errors }, input); return FAIL;
   }
-  if (node.kind === "optional" && input !== undefined) return runAsync(node.inner, input, context, path);
-  if (node.kind === "nullable" && input !== null) return runAsync(node.inner, input, context, path);
-  if (node.kind === "nonoptional" && input !== undefined) return runAsync(node.inner, input, context, path);
+  if (node.kind === "optional") { if (input === undefined) return applyChecksAsync(node, undefined, context, path); const parsed = await runAsync(node.inner, input, context, path); return parsed === FAIL ? FAIL : applyChecksAsync(node, parsed, context, path); }
+  if (node.kind === "exactOptional") { const parsed = await runAsync(node.inner, input, context, path); return parsed === FAIL ? FAIL : applyChecksAsync(node, parsed, context, path); }
+  if (node.kind === "nullable") { if (input === null) return applyChecksAsync(node, null, context, path); const parsed = await runAsync(node.inner, input, context, path); return parsed === FAIL ? FAIL : applyChecksAsync(node, parsed, context, path); }
+  if (node.kind === "nonoptional") { if (input === undefined) { issue(context, node, path, { code: "invalid_type", expected: "nonoptional" }, input); return FAIL; } const parsed = await runAsync(node.inner, input, context, path); return parsed === FAIL ? FAIL : applyChecksAsync(node, parsed, context, path); }
   if (node.kind === "readonly") { const parsed = await runAsync(node.inner, input, context, path); if (parsed !== FAIL && typeof parsed === "object" && parsed !== null) Object.freeze(parsed); return parsed; }
   if (node.kind === "lazy") return runAsync(node.getter(), input, context, path);
   if (node.kind === "promise" && isPromise(input)) return runAsync(node.inner, await input, context, path);
@@ -477,7 +659,47 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     return result === undefined ? (node.dynamic ? await (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value)) : result;
   }
   if (node.kind === "prefault") { const value = input === undefined ? node.dynamic ? await (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value) : input; return runAsync(node.inner, value, context, path); }
-  if (node.kind === "catch") { const local: ValidationContext = { ...context, issues: null }; const parsed = await runAsync(node.inner, input, local, path); return parsed === FAIL ? node.dynamic ? await (node.value as (context?: { error?: unknown; input: unknown }) => MaybeAsync<unknown>)({ error: local.issues, input }) : node.value : parsed; }
+  if (node.kind === "catch") { const local: ValidationContext = { ...context, issues: null }; const parsed = await runAsync(node.inner, input, local, path); return parsed === FAIL ? node.dynamic ? await (node.value as (context?: { error?: unknown; input: unknown }) => MaybeAsync<unknown>)({ error: { issues: local.issues ?? [] }, input }) : node.value : parsed; }
+  if (node.kind === "record" && isObject(input)) {
+    const result: Record<PropertyKey, unknown> = {}; let failed = false;
+    const enumerated = node.partial ? undefined : keyValues(node.key);
+    if (enumerated) {
+      const expected = new Set<string>(enumerated.map((value) => String(value)));
+      for (const key of enumerated) {
+        const stringKey = String(key);
+        const keyContext: ValidationContext = { ...context, issues: null };
+        const parsedKey = await runAsync(node.key, key, keyContext, []);
+        if (parsedKey === FAIL) { issue(context, node, [...path, stringKey], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key); failed = true; continue; }
+        const parsed = await runAsync(node.value, (input as Record<PropertyKey, unknown>)[stringKey], context, [...path, key]);
+        if (parsed === FAIL) failed = true; else result[String(parsedKey)] = parsed;
+      }
+      const extra = Object.keys(input).filter((key) => !expected.has(key));
+      if (extra.length > 0) { issue(context, node, path, { code: "unrecognized_keys", keys: extra }, input); failed = true; }
+      return failed ? FAIL : applyChecksAsync(node, result, context, path);
+    }
+    for (const key of Reflect.ownKeys(input)) {
+      if (key === "__proto__") continue;
+      if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
+      const value = (input as Record<PropertyKey, unknown>)[key];
+      const keyContext: ValidationContext = { ...context, issues: null };
+      let parsedKey = await runAsync(node.key, key, keyContext, []);
+      if (parsedKey === FAIL && typeof key === "string" && key !== "" && !Number.isNaN(Number(key))) {
+        const retry: ValidationContext = { ...context, issues: null };
+        const numeric = await runAsync(node.key, Number(key), retry, []);
+        if (numeric !== FAIL) { parsedKey = numeric; keyContext.issues = retry.issues; }
+      }
+      if (parsedKey === FAIL) {
+        if (node.mode === "loose") { result[key] = value; continue; }
+        issue(context, node, [...path, key], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key);
+        failed = true;
+        continue;
+      }
+      const parsed = await runAsync(node.value, value, context, [...path, key]);
+      if (parsed === FAIL) failed = true; else result[parsedKey as PropertyKey] = parsed;
+    }
+    if (failed) { if (node.checks.length > 0) await applyChecksAsync(node, input, context, path); return FAIL; }
+    return applyChecksAsync(node, result, context, path);
+  }
   if (node.kind === "map" && input instanceof Map) {
     const result = new Map<unknown, unknown>(); let failed = false;
     for (const [key, value] of input) {
