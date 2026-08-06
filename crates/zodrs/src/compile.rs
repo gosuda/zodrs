@@ -55,9 +55,13 @@ pub(crate) struct ObjectDispatch {
 
 impl ObjectDispatch {
     pub fn find(&self, key: &str) -> Option<usize> {
-        let first = *key.as_bytes().first()?;
-        // memchr-backed pre-screen, then an exact binary search.
-        memchr::memchr(first, &self.first_bytes)?;
+        // memchr first-byte pre-screen, skipped for the empty key (which has
+        // no first byte); then an exact binary search.
+        if let Some(&first) = key.as_bytes().first()
+            && memchr::memchr(first, &self.first_bytes).is_none()
+        {
+            return None;
+        }
         self.sorted_keys
             .binary_search_by(|(candidate, _)| candidate.as_str().cmp(key))
             .ok()
@@ -65,7 +69,6 @@ impl ObjectDispatch {
     }
 }
 
-/// Precompiled data corresponding to one `Check` slot.
 #[derive(Debug)]
 pub(crate) enum CompiledCheck {
     Regex(Regex),

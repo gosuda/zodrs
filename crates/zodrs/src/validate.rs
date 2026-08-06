@@ -2,16 +2,19 @@
 //! pass, tracking the single `dirty` flag that decides the verdict status.
 //!
 //! `dirty` is set by key stripping, applied defaults, `overwrite` transforms,
-//! coercion, and any object whose retained input key order differed from its
-//! canonical schema key order. When a valid parse stayed clean the input bytes
-//! are already canonical (`status: 0`); when it went dirty the canonical output
-//! is rebuilt into `payload` (`status: 1`). Invalid parses emit the raw issue
-//! array (`status: 2`). A non-JSON-eligible plan — or input the SIMD parser
-//! rejects — returns `status: 3`, telling the caller to fall back to the JS
-//! path (which reproduces any `JSON.parse` `SyntaxError` exactly).
+//! coercion, duplicate object keys collapsed to last-wins, and any object whose
+//! retained input key order differed from its canonical schema key order. When
+//! a valid parse stayed clean the input bytes are already canonical
+//! (`status: 0`); when it went dirty the canonical output is rebuilt into
+//! `payload` (`status: 1`). Invalid parses emit the raw issue array
+//! (`status: 2`). A non-JSON-eligible plan — or input the SIMD parser rejects —
+//! returns `status: 3`, telling the caller to fall back to the JS path (which
+//! reproduces any `JSON.parse` `SyntaxError` exactly).
+
+use std::collections::HashMap;
 
 use serde_json::Value as Json;
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Object, Value};
 
 use crate::compile::{CompiledCheck, CompiledPlan, LiteralValue, NodeDispatch};
 use crate::formats::FormatValidator;
@@ -101,6 +104,9 @@ impl<'p> Validator<'p> {
     fn invalid_type(&mut self, expected: &str) {
         self.push(Issue::new("invalid_type", &self.path).with("expected", Json::from(expected)));
     }
+    fn invalid_value(&mut self, values: Vec<Json>) {
+        self.push(Issue::new("invalid_value", &self.path).with("values", Json::Array(values)));
+    }
 
     /// Validate `value` against node `id`, appending issues on failure.
     #[allow(
@@ -151,10 +157,8 @@ impl<'p> Validator<'p> {
 
             PlanNode::Literal { values } | PlanNode::Enum { values } => {
                 if !values.iter().any(|lit| json_eq(value, lit)) {
-                    self.push(
-                        Issue::new("invalid_value", &self.path)
-                            .with("values", Json::Array(values.clone())),
-                    );
+                    let values = values.clone();
+                    self.invalid_value(values);
                 }
             }
 
@@ -164,12 +168,13 @@ impl<'p> Validator<'p> {
                 let Some(arr) = value.as_array() else {
                     return self.invalid_type("array");
                 };
-                self.array_checks(id, arr.len(), "array");
+                // Canonical order: element issues before length checks.
                 for (i, elem) in arr.as_slice().iter().enumerate() {
                     self.path.push(idx(i));
                     self.check(element, elem);
                     self.path.pop();
                 }
+                self.array_checks(id, arr.len(), "array");
             }
             PlanNode::Tuple { items, rest } => {
                 let items = items.clone();
@@ -224,9 +229,10 @@ impl<'p> Validator<'p> {
             PlanNode::Record { key, value: val } => {
                 let (key_id, val_id) = (*key, *val);
                 let Some(obj) = value.as_object() else {
-                    return self.invalid_type("object");
+                    // z.record rejects non-objects (arrays included) as `record`.
+                    return self.invalid_type("record");
                 };
-                for (k, entry) in obj {
+                for (k, entry) in collapse_object(obj) {
                     // Record key validation (invalid_key on failure).
                     let key_val: Value = sonic_rs::from_str(&json_string(k)).unwrap_or_default();
                     let before = self.issues.len();
@@ -295,6 +301,81 @@ impl<'p> Validator<'p> {
                 }
             }
             PlanNode::Host { .. } => {} // unreachable: host poisons eligibility
+        }
+    }
+
+    /// Emit the issue a node produces for a missing (JS `undefined`) input, per
+    /// canonical zod semantics: `invalid_type` for most kinds, `invalid_value`
+    /// for literal/enum, and a recursive `invalid_union` for unions. Nodes that
+    /// accept absence (optional / any / unknown / void / default-bearing) emit
+    /// nothing.
+    fn check_missing(&mut self, id: NodeId) {
+        match self.node(id) {
+            PlanNode::Optional { .. }
+            | PlanNode::Any
+            | PlanNode::Unknown
+            | PlanNode::Void
+            | PlanNode::Undefined
+            | PlanNode::Default { .. }
+            | PlanNode::Prefault { .. }
+            | PlanNode::Catch { .. }
+            | PlanNode::Host { .. } => {}
+            PlanNode::String { .. } | PlanNode::TemplateLiteral { .. } => {
+                self.invalid_type("string");
+            }
+            PlanNode::Number { .. } => self.invalid_type("number"),
+            PlanNode::Boolean { .. } => self.invalid_type("boolean"),
+            PlanNode::BigInt { .. } => self.invalid_type("bigint"),
+            PlanNode::Date { .. } => self.invalid_type("date"),
+            PlanNode::Symbol => self.invalid_type("symbol"),
+            PlanNode::File { .. } => self.invalid_type("file"),
+            PlanNode::Null => self.invalid_type("null"),
+            PlanNode::Nan => self.invalid_type("nan"),
+            PlanNode::Never => self.invalid_type("never"),
+            PlanNode::Object { .. } | PlanNode::DiscUnion { .. } => self.invalid_type("object"),
+            PlanNode::Record { .. } => self.invalid_type("record"),
+            PlanNode::Array { .. } => self.invalid_type("array"),
+            PlanNode::Tuple { .. } => self.invalid_type("tuple"),
+            PlanNode::Map { .. } => self.invalid_type("map"),
+            PlanNode::Set { .. } => self.invalid_type("set"),
+            PlanNode::NonOptional { .. } => self.invalid_type("nonoptional"),
+            PlanNode::Literal { values } | PlanNode::Enum { values } => {
+                let values = values.clone();
+                self.invalid_value(values);
+            }
+            PlanNode::Nullable { inner }
+            | PlanNode::Readonly { inner }
+            | PlanNode::Lazy { inner }
+            | PlanNode::Promise { inner } => {
+                let inner = *inner;
+                self.check_missing(inner);
+            }
+            PlanNode::Pipe { a, .. } => {
+                let a = *a;
+                self.check_missing(a);
+            }
+            PlanNode::Intersection { left, right } => {
+                let (left, right) = (*left, *right);
+                self.check_missing(left);
+                self.check_missing(right);
+            }
+            PlanNode::Union { options } => {
+                let options = options.clone();
+                let mut branch_errors: Vec<Json> = Vec::new();
+                for opt in &options {
+                    let before = self.issues.len();
+                    self.check_missing(*opt);
+                    if self.issues.len() == before {
+                        return; // an option accepts undefined
+                    }
+                    let branch = self.issues.split_off(before);
+                    branch_errors.push(issues_to_value(&branch));
+                }
+                self.push(
+                    Issue::new("invalid_union", &self.path)
+                        .with("errors", Json::Array(branch_errors)),
+                );
+            }
         }
     }
 
@@ -369,11 +450,17 @@ impl<'p> Validator<'p> {
                         self.string_format("uppercase", &[]);
                     }
                 }
-                Check::Regex { .. } => {
+                Check::Regex { src, flags } => {
                     if let Some(Some(CompiledCheck::Regex(re))) = compiled.get(ci)
                         && !re.is_match(&cur)
                     {
-                        self.string_format("regex", &[]);
+                        // Canonical regex issue carries the JS pattern source
+                        // and no `origin`; the message interpolates it.
+                        self.push(
+                            Issue::new("invalid_format", &self.path)
+                                .with("format", Json::from("regex"))
+                                .with("pattern", Json::from(format!("/{src}/{flags}"))),
+                        );
                     }
                 }
                 Check::Format { .. } => {
@@ -559,16 +646,15 @@ impl<'p> Validator<'p> {
         let PlanNode::Object {
             keys,
             values,
-            optional,
             mode,
             catchall,
+            ..
         } = self.node(id)
         else {
             return;
         };
         let keys = keys.clone();
         let values = values.clone();
-        let optional = optional.clone();
         let mode = *mode;
         let catchall = *catchall;
 
@@ -576,27 +662,36 @@ impl<'p> Validator<'p> {
             return self.invalid_type("object");
         };
 
+        // ECMA-262 JSON.parse collapses duplicate keys to last-wins, keeping the
+        // first position. Any collapse means the input bytes are not canonical.
+        let entries = collapse_object(obj);
+        if entries.len() != obj.len() {
+            self.dirty = true;
+        }
+
         let mut seen = vec![false; keys.len()];
         let mut unknown_keys: Vec<String> = Vec::new();
         let mut known_order: Vec<usize> = Vec::new();
 
-        for (in_key, in_val) in obj {
+        for (in_key, in_val) in &entries {
             if let Some(schema_i) = self.dispatch(id).object.as_ref().and_then(|o| o.find(in_key)) {
                 seen[schema_i] = true;
                 known_order.push(schema_i);
-                self.path.push(PathSeg::Key(in_key.to_string()));
+                self.path.push(PathSeg::Key((*in_key).to_string()));
                 self.check(values[schema_i], in_val);
                 self.path.pop();
+            } else if *in_key == "__proto__" {
+                // Canonical skips __proto__ in unknown-key handling entirely:
+                // never flagged, never retained. Dropping it rewrites the input.
+                self.dirty = true;
             } else if let Some(catchall_id) = catchall {
-                self.path.push(PathSeg::Key(in_key.to_string()));
+                self.path.push(PathSeg::Key((*in_key).to_string()));
                 self.check(catchall_id, in_val);
                 self.path.pop();
             } else {
                 match mode {
-                    // Strip drops unknowns; passthrough retains them after the
-                    // schema keys — both rewrite the input, so both go dirty.
                     ObjectMode::Strip | ObjectMode::Passthrough => self.dirty = true,
-                    ObjectMode::Strict => unknown_keys.push(in_key.to_string()),
+                    ObjectMode::Strict => unknown_keys.push((*in_key).to_string()),
                 }
             }
         }
@@ -606,21 +701,17 @@ impl<'p> Validator<'p> {
             self.dirty = true;
         }
 
-        // Missing keys: apply defaults, skip optionals, else invalid_type.
+        // Missing keys: apply defaults, else emit the node's missing-input issue.
         for (schema_i, present) in seen.iter().enumerate() {
             if *present {
                 continue;
             }
-            match self.missing_kind(values[schema_i]) {
-                Missing::Default => self.dirty = true,
-                Missing::Optional => {}
-                Missing::Required => {
-                    self.path.push(PathSeg::Key(keys[schema_i].clone()));
-                    let expected = self.expected_name(values[schema_i]);
-                    self.invalid_type(&expected);
-                    self.path.pop();
-                    let _ = &optional; // optional[] is advisory; node kind is authoritative
-                }
+            if default_value(self.plan, values[schema_i]).is_some() {
+                self.dirty = true;
+            } else {
+                self.path.push(PathSeg::Key(keys[schema_i].clone()));
+                self.check_missing(values[schema_i]);
+                self.path.pop();
             }
         }
 
@@ -654,21 +745,36 @@ impl<'p> Validator<'p> {
         let Some(obj) = value.as_object() else {
             return self.invalid_type("object");
         };
-        let disc = obj.get(&disc_key);
+        // Last-wins lookup of the discriminant value.
+        let disc = collapse_object(obj)
+            .into_iter()
+            .find(|(k, _)| *k == disc_key)
+            .map(|(_, v)| v);
         let target = disc.and_then(LiteralValue::from_value).and_then(|k| {
             self.dispatch(id)
                 .disc_union
                 .as_ref()
                 .and_then(|m| m.get(&k).copied())
         });
-        match target {
-            Some(node) => self.check(node, value),
-            None => self.push(
-                Issue::new("invalid_union", &self.path)
-                    .with("errors", Json::Array(Vec::new()))
-                    .with("note", Json::from("No matching discriminator")),
-            ),
+        if let Some(node) = target {
+            return self.check(node, value);
         }
+
+        // No matching discriminator: canonical invalid_union carrying the
+        // discriminator name, the expected option values, and the disc-key path.
+        let options: Vec<Json> = match self.node(id) {
+            PlanNode::DiscUnion { map, .. } => map.iter().map(|(v, _)| v.clone()).collect(),
+            _ => Vec::new(),
+        };
+        self.path.push(PathSeg::Key(disc_key.to_string()));
+        self.push(
+            Issue::new("invalid_union", &self.path)
+                .with("errors", Json::Array(Vec::new()))
+                .with("note", Json::from("No matching discriminator"))
+                .with("discriminator", Json::from(disc_key))
+                .with("options", Json::Array(options)),
+        );
+        self.path.pop();
     }
 
     // ---- issue helpers -------------------------------------------------
@@ -709,53 +815,6 @@ impl<'p> Validator<'p> {
                 .with("format", Json::from(f.id.clone())),
         );
     }
-
-    // ---- missing-key / expected-type resolution ------------------------
-
-    fn missing_kind(&self, id: NodeId) -> Missing {
-        match self.node(id) {
-            PlanNode::Optional { .. } => Missing::Optional,
-            PlanNode::Default { .. } | PlanNode::Prefault { .. } | PlanNode::Catch { .. } => {
-                Missing::Default
-            }
-            PlanNode::Readonly { inner } | PlanNode::Lazy { inner } => self.missing_kind(*inner),
-            PlanNode::Any | PlanNode::Unknown | PlanNode::Void | PlanNode::Undefined => {
-                Missing::Optional
-            }
-            _ => Missing::Required,
-        }
-    }
-
-    fn expected_name(&self, id: NodeId) -> String {
-        match self.node(id) {
-            PlanNode::String { .. } => "string",
-            PlanNode::Number { .. } => "number",
-            PlanNode::Boolean { .. } => "boolean",
-            PlanNode::BigInt { .. } => "bigint",
-            PlanNode::Date { .. } => "date",
-            PlanNode::File { .. } => "file",
-            PlanNode::Symbol => "symbol",
-            PlanNode::Object { .. } => "object",
-            PlanNode::Array { .. } => "array",
-            PlanNode::Tuple { .. } => "tuple",
-            PlanNode::Record { .. } => "record",
-            PlanNode::Map { .. } => "map",
-            PlanNode::Set { .. } => "set",
-            PlanNode::Nan => "nan",
-            PlanNode::NonOptional { .. } => "nonoptional",
-            PlanNode::Nullable { inner }
-            | PlanNode::Readonly { inner }
-            | PlanNode::Lazy { inner } => return self.expected_name(*inner),
-            _ => "unknown",
-        }
-        .to_string()
-    }
-}
-
-enum Missing {
-    Required,
-    Optional,
-    Default,
 }
 
 // ------------------------------------------------------------------------
@@ -778,12 +837,17 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             let Some(obj) = value.as_object() else {
                 return append_raw(value, out);
             };
+            let entries = collapse_object(obj);
+            let mut lookup: HashMap<&str, &Value> = HashMap::with_capacity(entries.len());
+            for (k, v) in &entries {
+                lookup.insert(k, v);
+            }
             out.push('{');
             let mut first = true;
             let disp = plan.dispatch[id as usize].object.as_ref();
             // Canonical schema key order.
             for (schema_i, key) in keys.iter().enumerate() {
-                if let Some(child) = obj.get(&key) {
+                if let Some(child) = lookup.get(key.as_str()) {
                     write_pair(key, out, &mut first);
                     write_output(plan, values[schema_i], child, out);
                 } else if let Some(def) = default_value(plan, values[schema_i]) {
@@ -791,9 +855,12 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
                     out.push_str(&serde_json::to_string(&def).unwrap_or_else(|_| "null".into()));
                 }
             }
-            // Retained unknowns (passthrough / catchall) after schema keys.
+            // Retained unknowns (passthrough / catchall), __proto__ excluded.
             if *mode == ObjectMode::Passthrough || catchall.is_some() {
-                for (k, v) in obj {
+                for (k, v) in &entries {
+                    if *k == "__proto__" {
+                        continue;
+                    }
                     let known = disp.and_then(|o| o.find(k)).is_some();
                     if !known {
                         write_pair(k, out, &mut first);
@@ -843,7 +910,7 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             };
             out.push('{');
             let mut first = true;
-            for (k, v) in obj {
+            for (k, v) in collapse_object(obj) {
                 write_pair(k, out, &mut first);
                 write_output(plan, *val, v, out);
             }
@@ -876,14 +943,25 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
                 append_raw(value, out);
             }
         }
+        PlanNode::Catch {
+            inner,
+            value: catch_val,
+            ..
+        } => {
+            // Emit the caught fallback only when the inner schema would fail.
+            if option_matches(plan, *inner, value) {
+                write_output(plan, *inner, value, out);
+            } else {
+                out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
+            }
+        }
         PlanNode::Optional { inner }
         | PlanNode::NonOptional { inner }
         | PlanNode::Readonly { inner }
         | PlanNode::Lazy { inner }
         | PlanNode::Promise { inner }
         | PlanNode::Default { inner, .. }
-        | PlanNode::Prefault { inner, .. }
-        | PlanNode::Catch { inner, .. } => {
+        | PlanNode::Prefault { inner, .. } => {
             if value.is_null() {
                 append_raw(value, out);
             } else {
@@ -911,7 +989,12 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
         PlanNode::DiscUnion { key, .. } => {
             let target = value
                 .as_object()
-                .and_then(|o| o.get(&key.as_str()))
+                .and_then(|o| {
+                    collapse_object(o)
+                        .into_iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v)
+                })
                 .and_then(LiteralValue::from_value)
                 .and_then(|k| {
                     plan.dispatch[id as usize]
@@ -968,6 +1051,19 @@ fn append_raw(value: &Value, out: &mut String) {
 // ------------------------------------------------------------------------
 // Value helpers.
 // ------------------------------------------------------------------------
+
+/// Collapse an object's entries to ECMA-262 JSON.parse semantics: one entry per
+/// key in first-occurrence order, carrying the last value seen for that key.
+fn collapse_object(obj: &Object) -> Vec<(&str, &Value)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut last: HashMap<&str, &Value> = HashMap::new();
+    for (k, v) in obj {
+        if last.insert(k, v).is_none() {
+            order.push(k);
+        }
+    }
+    order.into_iter().map(|k| (k, last[k])).collect()
+}
 
 /// Converts a container index to a path segment, saturating at `u32::MAX`.
 fn idx(i: usize) -> PathSeg {

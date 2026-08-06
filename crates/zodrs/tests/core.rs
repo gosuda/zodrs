@@ -523,3 +523,185 @@ fn unparseable_input_falls_back() {
     let v = validate(&user_plan(), b"{ not json ");
     assert_eq!(v.status, 3);
 }
+
+// ------------------------------------------------------------------------
+// Differential-fuzz regression suite (one test per divergence class).
+// ------------------------------------------------------------------------
+
+// K2: duplicate keys resolve last-wins (ECMA-262 JSON.parse), not first-wins.
+#[test]
+fn k2_duplicate_keys_last_wins() {
+    // z.string().min(3) at key "name"; duplicate name -> last value "Ada" wins.
+    let compiled = plan(&json!([
+        {"k":"object","keys":["name","age"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"string","checks":[{"c":"min_length","v":3}]},
+        {"k":"number","checks":[]}
+    ]));
+    // First value "A" fails min(3); last value "Ada" passes. Must succeed.
+    let v = validate(&compiled, br#"{"name":"A","name":"Ada","age":36}"#);
+    assert_eq!(v.status, 1, "collapsed dup keys rewrite the input: {v:?}");
+    assert_eq!(output(&v), json!({"name":"Ada","age":36}));
+
+    // Last value fails -> the error is about "A", not the earlier "Ada".
+    let bad = validate(&compiled, br#"{"name":"Ada","name":"A","age":36}"#);
+    assert_issue(
+        &bad,
+        &json!({"code":"too_small","origin":"string","minimum":3,"inclusive":true,"path":["name"]}),
+    );
+}
+
+// K4: .catch() fires on failure and substitutes the fallback value in output.
+#[test]
+fn k4_catch_fires_on_failure() {
+    // root: catch(string, "dflt")
+    let compiled = plan(&json!([
+        {"k":"catch","inner":1,"value":"dflt"},
+        {"k":"string","checks":[]}
+    ]));
+    let v = validate(&compiled, b"1");
+    assert_eq!(v.status, 1, "catch rewrites the input: {v:?}");
+    assert_eq!(output(&v), json!("dflt"));
+
+    // Nested: strictObject({}).catch({}) at key b; [1,2] fails -> b becomes {}.
+    let nested = plan(&json!([
+        {"k":"object","keys":["b"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"catch","inner":2,"value":{}},
+        {"k":"object","keys":[],"values":[],"optional":[],"mode":"strict","catchall":null}
+    ]));
+    let nv = validate(&nested, br#"{"b":[1,2]}"#);
+    assert_eq!(nv.status, 1);
+    assert_eq!(output(&nv), json!({"b":{}}));
+
+    // catch on success passes the inner value through unchanged.
+    let ok = validate(&compiled, br#""hello""#);
+    assert_eq!(ok.status, 0, "clean success: {ok:?}");
+}
+
+// K5: regex issue carries the JS `pattern` source and omits `origin`.
+#[test]
+fn k5_regex_issue_has_pattern() {
+    let compiled = plan(&json!([
+        {"k":"string","checks":[{"c":"regex","src":"^[a-z]+$","flags":""}]}
+    ]));
+    let v = validate(&compiled, br#""ABC""#);
+    assert_issue(
+        &v,
+        &json!({"code":"invalid_format","format":"regex","pattern":"/^[a-z]+$/","path":[]}),
+    );
+}
+
+// K6: strict objects skip __proto__ in the unrecognized-keys scan.
+#[test]
+fn k6_strict_skips_proto() {
+    let compiled = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
+        {"k":"number","checks":[]}
+    ]));
+    // __proto__ present as unknown key: not flagged, dropped from output.
+    let v = validate(&compiled, br#"{"a":1,"__proto__":2}"#);
+    assert_eq!(v.status, 1, "proto dropped -> rewritten: {v:?}");
+    assert_eq!(output(&v), json!({"a":1}));
+}
+
+// K7: no-match discriminated union emits the full discriminator issue.
+#[test]
+fn k7_discriminator_issue_shape() {
+    let compiled = plan(&json!([
+        {"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},
+        {"k":"object","keys":["kind"],"values":[3],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["kind"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"literal","values":["dog"]},
+        {"k":"literal","values":["cat"]}
+    ]));
+    let v = validate(&compiled, br#"{"kind":"fish"}"#);
+    assert_issue(
+        &v,
+        &json!({
+            "code":"invalid_union",
+            "errors":[],
+            "note":"No matching discriminator",
+            "discriminator":"kind",
+            "options":["dog","cat"],
+            "path":["kind"]
+        }),
+    );
+}
+
+// K8: missing keys report the node's own missing-input issue, not "unknown".
+#[test]
+fn k8_missing_key_expected_per_node() {
+    // Missing object-typed key -> invalid_type expected "object".
+    let obj = plan(&json!([
+        {"k":"object","keys":["inner"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["x"],"values":[2],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]}
+    ]));
+    assert_issue(
+        &validate(&obj, b"{}"),
+        &json!({"code":"invalid_type","expected":"object","path":["inner"]}),
+    );
+
+    // Missing enum key -> invalid_value with the values, not invalid_type.
+    let en = plan(&json!([
+        {"k":"object","keys":["role"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"enum","values":["admin","user"]}
+    ]));
+    assert_issue(
+        &validate(&en, b"{}"),
+        &json!({"code":"invalid_value","values":["admin","user"],"path":["role"]}),
+    );
+}
+
+// K9: the empty string is an ordinary object key.
+#[test]
+fn k9_empty_string_key() {
+    let compiled = plan(&json!([
+        {"k":"object","keys":[""],"values":[1],"optional":[false],"mode":"strict","catchall":null},
+        {"k":"number","checks":[{"c":"number_format","v":"int32"}]}
+    ]));
+    // Present "" value validates cleanly (no spurious unrecognized_keys / missing).
+    assert_eq!(validate(&compiled, br#"{"":36}"#).status, 0);
+    // "" enum violation at the "" path is reported, not silently accepted.
+    let en = plan(&json!([
+        {"k":"object","keys":[""],"values":[1],"optional":[false],"mode":"strict","catchall":null},
+        {"k":"enum","values":["a","b"]}
+    ]));
+    assert_issue(
+        &validate(&en, br#"{"":"z"}"#),
+        &json!({"code":"invalid_value","values":["a","b"],"path":[""]}),
+    );
+}
+
+// K11: record rejects a non-object root as expected:"record".
+#[test]
+fn k11_record_root_type() {
+    let compiled = plan(&json!([
+        {"k":"record","key":1,"value":2},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]));
+    assert_issue(
+        &validate(&compiled, b"[1,2,3]"),
+        &json!({"code":"invalid_type","expected":"record","path":[]}),
+    );
+}
+
+// K13: array element issues precede array length checks.
+#[test]
+fn k13_array_issue_order() {
+    // array(boolean).min(2); input [[1]] -> element(0) invalid, then too_small.
+    let compiled = plan(&json!([
+        {"k":"array","element":1,"checks":[{"c":"min_length","v":2}]},
+        {"k":"boolean"}
+    ]));
+    let v = validate(&compiled, b"[[1]]");
+    assert_eq!(v.status, 2);
+    let got = issues(&v.payload);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0]["code"], json!("invalid_type"));
+    assert_eq!(got[0]["expected"], json!("boolean"));
+    assert_eq!(got[0]["path"], json!([0]));
+    assert_eq!(got[1]["code"], json!("too_small"));
+    assert_eq!(got[1]["origin"], json!("array"));
+    assert_eq!(got[1]["path"], json!([]));
+}
