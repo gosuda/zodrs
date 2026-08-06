@@ -42,6 +42,10 @@ pub(crate) struct NodeDispatch {
     pub disc_union: Option<HashMap<LiteralValue, NodeId>>,
     pub checks: Vec<Option<CompiledCheck>>,
     pub template: Option<Regex>,
+    /// Whether the schema accepts `undefined` as input (zod `_zod.optin`).
+    pub optin_optional: bool,
+    /// Whether the schema can produce `undefined` as output (zod `_zod.optout`).
+    pub optout_optional: bool,
 }
 
 /// Sorted `(schema key, original schema index)` pairs. The hot lookup starts
@@ -238,11 +242,76 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
         dispatch.push(d);
     }
 
+    compute_optionality(&raw.nodes, &mut dispatch);
+
     Ok(CompiledPlan {
         raw,
         json_eligible: eligible,
         dispatch,
     })
+}
+
+/// Computes every node's `optin`/`optout` optionality, mirroring zod's
+/// `_zod.optin`/`_zod.optout` flags: optional, default, prefault, and catch
+/// schemas accept `undefined` input; nullable, lazy, and readonly wrappers
+/// delegate to their inner type; unions and pipes aggregate across their
+/// branches. Tuple validation reads these flags to place the optional tail.
+fn compute_optionality(nodes: &[PlanNode], dispatch: &mut [NodeDispatch]) {
+    let mut memo: Vec<Option<(bool, bool)>> = vec![None; nodes.len()];
+    let mut visiting = vec![false; nodes.len()];
+    for (id, d) in dispatch.iter_mut().enumerate() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "arena indices are NodeId-valued by construction"
+        )]
+        let id = id as NodeId;
+        let (optin, optout) = optionality(nodes, &mut memo, &mut visiting, id);
+        d.optin_optional = optin;
+        d.optout_optional = optout;
+    }
+}
+
+fn optionality(
+    nodes: &[PlanNode],
+    memo: &mut [Option<(bool, bool)>],
+    visiting: &mut [bool],
+    id: NodeId,
+) -> (bool, bool) {
+    if let Some(done) = memo[id as usize] {
+        return done;
+    }
+    // A cycle can only arise through a recursive lazy schema, whose
+    // optionality is decided by the structural wrapper around it, so the
+    // back-edge itself is treated as required.
+    if visiting[id as usize] {
+        return (false, false);
+    }
+    visiting[id as usize] = true;
+    let flags = match &nodes[id as usize] {
+        PlanNode::Optional { .. } => (true, true),
+        PlanNode::Default { .. } | PlanNode::Prefault { .. } => (true, false),
+        PlanNode::Catch { inner, .. } => (true, optionality(nodes, memo, visiting, *inner).1),
+        PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
+            optionality(nodes, memo, visiting, *inner)
+        }
+        PlanNode::Union { options } => {
+            let mut flags = (false, false);
+            for opt in options {
+                let (optin, optout) = optionality(nodes, memo, visiting, *opt);
+                flags.0 |= optin;
+                flags.1 |= optout;
+            }
+            flags
+        }
+        PlanNode::Pipe { a, b } => (
+            optionality(nodes, memo, visiting, *a).0,
+            optionality(nodes, memo, visiting, *b).1,
+        ),
+        _ => (false, false),
+    };
+    visiting[id as usize] = false;
+    memo[id as usize] = Some(flags);
+    flags
 }
 
 fn node_checks(node: &PlanNode) -> Option<&[Check]> {

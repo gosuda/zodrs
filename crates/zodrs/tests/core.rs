@@ -616,10 +616,10 @@ fn k7_discriminator_issue_shape() {
     let v = validate(&compiled, br#"{"kind":"fish"}"#);
     assert_issue(
         &v,
+        // Canonical zod emits no `note` on a discriminator miss.
         &json!({
             "code":"invalid_union",
             "errors":[],
-            "note":"No matching discriminator",
             "discriminator":"kind",
             "options":["dog","cat"],
             "path":["kind"]
@@ -704,4 +704,289 @@ fn k13_array_issue_order() {
     assert_eq!(got[1]["code"], json!("too_small"));
     assert_eq!(got[1]["origin"], json!("array"));
     assert_eq!(got[1]["path"], json!([]));
+}
+
+// ------------------------------------------------------------------------
+// Regression: records skip `__proto__` keys entirely (never validated,
+// never retained) — canonical zod builds record output with plain-object
+// assignment, where `__proto__` would target the prototype.
+// ------------------------------------------------------------------------
+
+#[test]
+fn record_proto_key_skipped_in_check_and_output() {
+    let rec = plan(&json!([
+        {"k":"record","key":1,"value":2},
+        {"k":"string","checks":[]},
+        {"k":"boolean","checks":[]}
+    ]));
+    // The `__proto__` value (a string) would fail the boolean schema if
+    // validated; canonical skips it, so the parse succeeds and the output
+    // drops the key.
+    let v = validate(&rec, br#"{"__proto__":"x","a":true}"#);
+    assert_eq!(output(&v), json!({"a": true}));
+
+    // A record whose only key is `__proto__` validates to an empty object.
+    let v = validate(&rec, br#"{"__proto__":null}"#);
+    assert_eq!(output(&v), json!({}));
+}
+
+#[test]
+fn object_unknown_proto_dropped_in_all_modes() {
+    for mode in ["strip", "passthrough", "strict"] {
+        let obj = plan(&json!([
+            {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":mode,"catchall":null},
+            {"k":"string","checks":[]}
+        ]));
+        let v = validate(&obj, br#"{"a":"x","__proto__":1}"#);
+        assert_eq!(output(&v), json!({"a": "x"}), "mode {mode}");
+    }
+    // Catchall does not validate or retain __proto__ either.
+    let ca = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&ca, br#"{"a":"x","__proto__":"not-a-number"}"#);
+    assert_eq!(output(&v), json!({"a": "x"}));
+}
+
+#[test]
+fn object_shape_key_named_proto_is_validated_and_retained() {
+    let obj = plan(&json!([
+        {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]}
+    ]));
+    // Present: validated and emitted like any shape key.
+    let v = validate(&obj, br#"{"__proto__":"x"}"#);
+    assert_eq!(v.status, 0, "clean parse: {v:?}");
+    // Wrong type: invalid_type at the key path.
+    assert_issue(
+        &validate(&obj, br#"{"__proto__":1}"#),
+        &json!({"code":"invalid_type","expected":"string","path":["__proto__"]}),
+    );
+}
+
+// ------------------------------------------------------------------------
+// Regression: duplicate keys collapse last-wins but keep the first
+// position (ECMA-262 JSON.parse semantics).
+// ------------------------------------------------------------------------
+
+#[test]
+fn duplicate_key_keeps_first_position_with_last_value() {
+    let obj = plan(&json!([
+        {"k":"object","keys":["b","a"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&obj, br#"{"b":1,"a":2,"b":3}"#);
+    assert_eq!(v.status, 1, "duplicate collapse rewrites: {v:?}");
+    let payload = v.payload.as_deref().unwrap();
+    assert_eq!(payload, r#"{"b":3,"a":2}"#);
+}
+
+// ------------------------------------------------------------------------
+// Regression: canonical tuple length semantics.
+// ------------------------------------------------------------------------
+
+#[test]
+fn tuple_short_input_reports_only_too_small() {
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1,2,3],"rest":null},
+        {"k":"string","checks":[{"c":"min_length","v":3}]},
+        {"k":"number","checks":[]},
+        {"k":"boolean","checks":[]}
+    ]));
+    // One present (invalid) item, but a short input skips item validation.
+    assert_issue(
+        &validate(&tup, br#"["a"]"#),
+        &json!({"code":"too_small","origin":"array","minimum":3,"inclusive":true,"path":[]}),
+    );
+}
+
+#[test]
+fn tuple_long_input_reports_too_big_and_validates_items() {
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1],"rest":null},
+        {"k":"string","checks":[{"c":"min_length","v":3}]}
+    ]));
+    let v = validate(&tup, br#"["a",999]"#);
+    assert_eq!(v.status, 2);
+    let got = issues(&v.payload);
+    assert_eq!(
+        Json::Array(got),
+        json!([
+            {"code":"too_big","origin":"array","maximum":1,"inclusive":true,"path":[]},
+            {"code":"too_small","origin":"string","minimum":3,"inclusive":true,"path":[0]}
+        ])
+    );
+}
+
+#[test]
+fn tuple_optional_tail_changes_length_floor_and_output() {
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"string","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]}
+    ]));
+    // Trailing optional item: a one-element input is valid, and the absent
+    // optional slot drops out of the output.
+    let v = validate(&tup, br#"["a"]"#);
+    assert_eq!(v.status, 0, "no rewrite needed: {v:?}");
+
+    // A leading optional does not lower the floor.
+    let lead = plan(&json!([
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]},
+        {"k":"string","checks":[]}
+    ]));
+    assert_issue(
+        &validate(&lead, br"[]"),
+        &json!({"code":"too_small","origin":"array","minimum":2,"inclusive":true,"path":[]}),
+    );
+}
+
+#[test]
+fn tuple_absent_default_and_catch_fill_slots() {
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"string","checks":[]},
+        {"k":"default","inner":3,"value":7,"dynamic":false},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&tup, br#"["a"]"#);
+    assert_eq!(output(&v), json!(["a", 7]));
+
+    let cat = plan(&json!([
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"string","checks":[]},
+        {"k":"catch","inner":3,"value":9,"dynamic":false},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&cat, br#"["a"]"#);
+    assert_eq!(output(&v), json!(["a", 9]));
+}
+
+#[test]
+fn tuple_with_rest_validates_absent_items_as_undefined() {
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1],"rest":2},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]));
+    assert_issue(
+        &validate(&tup, br"[]"),
+        &json!({"code":"invalid_type","expected":"string","path":[0]}),
+    );
+}
+
+#[test]
+fn tuple_absent_nullable_of_optional_is_swallowed() {
+    // z.nullable(z.string().optional()) delegates optin to its inner type,
+    // so the trailing slot accepts absence and drops out.
+    let tup = plan(&json!([
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"string","checks":[]},
+        {"k":"nullable","inner":3},
+        {"k":"optional","inner":4},
+        {"k":"string","checks":[]}
+    ]));
+    let v = validate(&tup, br#"["a"]"#);
+    assert_eq!(v.status, 0, "nullable(optional) accepts absence: {v:?}");
+}
+
+// ------------------------------------------------------------------------
+// Regression: object issues are emitted in schema key order, not input
+// order (canonical zod iterates the shape).
+// ------------------------------------------------------------------------
+
+#[test]
+fn object_issues_follow_schema_key_order() {
+    let obj = plan(&json!([
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&obj, br#"{"b":"x","a":1}"#);
+    assert_eq!(v.status, 2);
+    let got = issues(&v.payload);
+    assert_eq!(
+        Json::Array(got),
+        json!([
+            {"code":"invalid_type","expected":"string","path":["a"]},
+            {"code":"invalid_type","expected":"number","path":["b"]}
+        ]),
+        "schema order a-then-b even though the input lists b first"
+    );
+
+    // Missing and present-but-invalid keys interleave in schema order.
+    let v = validate(&obj, br#"{"b":"x"}"#);
+    let got = issues(&v.payload);
+    assert_eq!(
+        Json::Array(got),
+        json!([
+            {"code":"invalid_type","expected":"string","path":["a"]},
+            {"code":"invalid_type","expected":"number","path":["b"]}
+        ])
+    );
+}
+
+// ------------------------------------------------------------------------
+// Regression: number serialization edge cases.
+// ------------------------------------------------------------------------
+
+#[test]
+fn negative_zero_rewrite_defers_to_js_path() {
+    // A dirty parse whose input carries -0 cannot rewrite it faithfully
+    // (sonic-rs normalizes -0 to 0.0), so the verdict defers (status 3).
+    let obj = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&obj, br#"{"a":-0,"extra":1}"#);
+    assert_eq!(v.status, 3, "-0 with a dirty rewrite defers: {v:?}");
+
+    // Clean parses leave the bytes to JSON.parse, which keeps -0.
+    let v = validate(&obj, br#"{"a":-0}"#);
+    assert_eq!(v.status, 0, "clean parse keeps the bytes: {v:?}");
+
+    // A "-0" inside a string is not a number token and must not defer.
+    let obj2 = plan(&json!([
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&obj2, br#"{"a":"-0","b":1,"extra":2}"#);
+    assert_eq!(output(&v), json!({"a": "-0", "b": 1}));
+}
+
+#[test]
+fn coerce_number_js_semantics() {
+    let num = plan(&json!([{"k":"number","coerce":true,"checks":[]}]));
+    // Overflowing strings coerce to Infinity: valid, but JSON cannot write
+    // it back, so the verdict defers to the JS path.
+    assert_eq!(validate(&num, br#""1e400""#).status, 3);
+    assert_eq!(validate(&num, br#""Infinity""#).status, 3);
+    // NaN-producing strings fail as invalid_type.
+    assert_issue(
+        &validate(&num, br#""nan""#),
+        &json!({"code":"invalid_type","expected":"number","path":[]}),
+    );
+    assert_issue(
+        &validate(&num, br#""inf""#),
+        &json!({"code":"invalid_type","expected":"number","path":[]}),
+    );
+    // Radix prefixes and null follow JS Number().
+    assert_eq!(output(&validate(&num, br#""0x1F""#)), json!(31));
+    assert_eq!(output(&validate(&num, br"null")), json!(0));
+}
+
+#[test]
+fn coerce_string_uses_js_number_formatting() {
+    let s = plan(&json!([{"k":"string","coerce":true,"checks":[]}]));
+    assert_eq!(output(&validate(&s, br"2e4")), json!("20000"));
+    assert_eq!(output(&validate(&s, br"1e21")), json!("1e+21"));
+    assert_eq!(output(&validate(&s, br"1.5e-7")), json!("1.5e-7"));
+    assert_eq!(output(&validate(&s, br"0.000001")), json!("0.000001"));
+    assert_eq!(output(&validate(&s, br"0.30000000000000004")), json!("0.30000000000000004"));
 }

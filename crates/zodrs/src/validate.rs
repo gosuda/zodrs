@@ -60,6 +60,7 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         issues: Vec::new(),
         path: Path::new(),
         dirty: false,
+        nonfinite: false,
     };
     v.check(plan.root(), &value);
 
@@ -75,6 +76,12 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
             payload: None,
         };
     }
+    // The rewrite cannot represent a coerced `Infinity` (not JSON), and
+    // sonic-rs normalizes every `-0` token to `0.0`, losing the sign that
+    // `JSON.parse` would keep — defer both to the JS path.
+    if v.nonfinite || contains_negative_zero(input) {
+        return Verdict::fallback();
+    }
     let mut out = String::new();
     write_output(plan, plan.root(), &value, &mut out);
     Verdict {
@@ -88,6 +95,10 @@ struct Validator<'p> {
     issues: Vec<Issue>,
     path: Path,
     dirty: bool,
+    /// Set when a coercion produced a non-finite number: JSON cannot
+    /// represent `Infinity` in the rewritten output, so the verdict must
+    /// defer to the JS path (`status: 3`).
+    nonfinite: bool,
 }
 
 impl<'p> Validator<'p> {
@@ -112,7 +123,8 @@ impl<'p> Validator<'p> {
     #[allow(
         clippy::too_many_lines,
         clippy::match_same_arms,
-        reason = "one arm per plan-node kind reads clearer than a split; some distinct kinds share a no-op body"
+        clippy::cast_precision_loss,
+        reason = "one arm per plan-node kind reads clearer than a split; some distinct kinds share a no-op body; tuple lengths are small integers"
     )]
     fn check(&mut self, id: NodeId, value: &Value) {
         match self.node(id) {
@@ -183,26 +195,54 @@ impl<'p> Validator<'p> {
                     return self.invalid_type("tuple");
                 };
                 let slice = arr.as_slice();
-                if slice.len() < items.len() {
-                    self.push(
-                        Issue::new("too_small", &self.path)
-                            .with("origin", Json::from("array"))
-                            .with("minimum", Json::from(items.len()))
-                            .with("inclusive", Json::from(true)),
-                    );
-                } else if slice.len() > items.len() && rest.is_none() {
-                    self.push(
-                        Issue::new("too_big", &self.path)
-                            .with("origin", Json::from("array"))
-                            .with("maximum", Json::from(items.len()))
-                            .with("inclusive", Json::from(true)),
-                    );
+                // Canonical tuple length rules: without a rest schema a short
+                // input reports only `too_small` (against the required-prefix
+                // length, i.e. trailing optional-input items excluded) and
+                // skips item validation entirely; a long input reports
+                // `too_big` and still validates the in-range items.
+                let optin_start = items.len()
+                    - items
+                        .iter()
+                        .rev()
+                        .take_while(|it| self.dispatch(**it).optin_optional)
+                        .count();
+                let optout_start = items.len()
+                    - items
+                        .iter()
+                        .rev()
+                        .take_while(|it| self.dispatch(**it).optout_optional)
+                        .count();
+                if rest.is_none() {
+                    if slice.len() < optin_start {
+                        self.too_small("array", optin_start as f64, true, false);
+                        return;
+                    }
+                    if slice.len() > items.len() {
+                        self.too_big("array", items.len() as f64, true, false);
+                    }
                 }
                 for (i, item_id) in items.iter().enumerate() {
                     if let Some(elem) = slice.get(i) {
                         self.path.push(idx(i));
                         self.check(*item_id, elem);
                         self.path.pop();
+                    } else {
+                        // Absent slot: the item runs on `undefined`. A failing
+                        // optional-tail item is swallowed (its slot and the
+                        // remaining tail drop out of the output); a passing
+                        // default/catch fills the slot, rewriting the input.
+                        match absent_result(self.plan, *item_id) {
+                            Absent::Fail => {
+                                if i >= optout_start {
+                                    break;
+                                }
+                                self.path.push(idx(i));
+                                self.check_missing(*item_id);
+                                self.path.pop();
+                            }
+                            Absent::Undefined => {}
+                            Absent::Value(..) => self.dirty = true,
+                        }
                     }
                 }
                 if let Some(rest_id) = rest {
@@ -233,6 +273,14 @@ impl<'p> Validator<'p> {
                     return self.invalid_type("record");
                 };
                 for (k, entry) in collapse_object(obj) {
+                    // Canonical records skip `__proto__` keys entirely: never
+                    // validated, never retained (the TS output builder's
+                    // plain-object assignment would target the prototype).
+                    // Dropping the key rewrites the input.
+                    if k == "__proto__" {
+                        self.dirty = true;
+                        continue;
+                    }
                     // Record key validation (invalid_key on failure).
                     let key_val: Value = sonic_rs::from_str(&json_string(k)).unwrap_or_default();
                     let before = self.issues.len();
@@ -489,6 +537,15 @@ impl<'p> Validator<'p> {
         } else if coerce {
             match coerce_to_number(value) {
                 Some(f) => {
+                    // JS Number() yielding NaN fails z.number() as
+                    // invalid_type; Infinity validates but cannot be written
+                    // back as JSON, so the verdict defers to the JS path.
+                    if f.is_nan() {
+                        return self.invalid_type("number");
+                    }
+                    if !f.is_finite() {
+                        self.nonfinite = true;
+                    }
                     n = f;
                     self.dirty = true;
                 }
@@ -669,17 +726,31 @@ impl<'p> Validator<'p> {
             self.dirty = true;
         }
 
-        let mut seen = vec![false; keys.len()];
+        let lookup: HashMap<&str, &Value> = entries.iter().copied().collect();
+
+        // Canonical issue order: every shape key in schema order — present
+        // values are validated, absent ones apply a default or emit the
+        // missing-input issue.
+        for (schema_i, key) in keys.iter().enumerate() {
+            if let Some(child) = lookup.get(key.as_str()) {
+                self.path.push(PathSeg::Key(key.clone()));
+                self.check(values[schema_i], child);
+                self.path.pop();
+            } else if default_value(self.plan, values[schema_i]).is_some() {
+                self.dirty = true;
+            } else {
+                self.path.push(PathSeg::Key(key.clone()));
+                self.check_missing(values[schema_i]);
+                self.path.pop();
+            }
+        }
+
+        // Then unknown keys in input order.
         let mut unknown_keys: Vec<String> = Vec::new();
         let mut known_order: Vec<usize> = Vec::new();
-
         for (in_key, in_val) in &entries {
             if let Some(schema_i) = self.dispatch(id).object.as_ref().and_then(|o| o.find(in_key)) {
-                seen[schema_i] = true;
                 known_order.push(schema_i);
-                self.path.push(PathSeg::Key((*in_key).to_string()));
-                self.check(values[schema_i], in_val);
-                self.path.pop();
             } else if *in_key == "__proto__" {
                 // Canonical skips __proto__ in unknown-key handling entirely:
                 // never flagged, never retained. Dropping it rewrites the input.
@@ -699,20 +770,6 @@ impl<'p> Validator<'p> {
         // Retained known keys not in ascending schema order => reorder => dirty.
         if known_order.windows(2).any(|w| w[0] > w[1]) {
             self.dirty = true;
-        }
-
-        // Missing keys: apply defaults, else emit the node's missing-input issue.
-        for (schema_i, present) in seen.iter().enumerate() {
-            if *present {
-                continue;
-            }
-            if default_value(self.plan, values[schema_i]).is_some() {
-                self.dirty = true;
-            } else {
-                self.path.push(PathSeg::Key(keys[schema_i].clone()));
-                self.check_missing(values[schema_i]);
-                self.path.pop();
-            }
         }
 
         if mode == ObjectMode::Strict && !unknown_keys.is_empty() {
@@ -770,7 +827,6 @@ impl<'p> Validator<'p> {
         self.push(
             Issue::new("invalid_union", &self.path)
                 .with("errors", Json::Array(Vec::new()))
-                .with("note", Json::from("No matching discriminator"))
                 .with("discriminator", Json::from(disc_key))
                 .with("options", Json::Array(options)),
         );
@@ -891,15 +947,55 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             let Some(arr) = value.as_array() else {
                 return append_raw(value, out);
             };
+            let slice = arr.as_slice();
+            // Build the slot list first: absent items contribute their
+            // default/catch value or an `undefined` slot, and the canonical
+            // trailing truncation then drops trailing absent optional-output
+            // slots (the array analog of an absent optional object key).
+            let mut slots: Vec<Option<String>> = Vec::with_capacity(items.len().max(slice.len()));
+            for (i, item_id) in items.iter().enumerate() {
+                if let Some(elem) = slice.get(i) {
+                    let mut s = String::new();
+                    write_output(plan, *item_id, elem, &mut s);
+                    slots.push(Some(s));
+                } else {
+                    match absent_result(plan, *item_id) {
+                        // Swallowed by the optional-tail rule (a non-swallowed
+                        // failure never reaches output construction).
+                        Absent::Fail => break,
+                        Absent::Undefined => slots.push(None),
+                        Absent::Value(v, _) => slots.push(Some(
+                            serde_json::to_string(&v).unwrap_or_else(|_| "null".into()),
+                        )),
+                    }
+                }
+            }
+            if let Some(rest_id) = rest {
+                for elem in slice.iter().skip(items.len()) {
+                    let mut s = String::new();
+                    write_output(plan, *rest_id, elem, &mut s);
+                    slots.push(Some(s));
+                }
+            }
+            while slots.len() > slice.len() {
+                let last = slots.len() - 1;
+                if last < items.len()
+                    && plan.dispatch[items[last] as usize].optout_optional
+                    && slots[last].is_none()
+                {
+                    slots.pop();
+                } else {
+                    break;
+                }
+            }
             out.push('[');
-            for (i, elem) in arr.as_slice().iter().enumerate() {
+            for (i, slot) in slots.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                let child = items.get(i).copied().or(*rest);
-                match child {
-                    Some(c) => write_output(plan, c, elem, out),
-                    None => append_raw(elem, out),
+                match slot {
+                    Some(s) => out.push_str(s),
+                    None => out.push_str("null"),
                 }
             }
             out.push(']');
@@ -911,6 +1007,9 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             out.push('{');
             let mut first = true;
             for (k, v) in collapse_object(obj) {
+                if k == "__proto__" {
+                    continue; // records never retain __proto__ (see check)
+                }
                 write_pair(k, out, &mut first);
                 write_output(plan, *val, v, out);
             }
@@ -1017,9 +1116,102 @@ fn option_matches(plan: &CompiledPlan, id: NodeId, value: &Value) -> bool {
         issues: Vec::new(),
         path: Path::new(),
         dirty: false,
+        nonfinite: false,
     };
     v.check(id, value);
     v.issues.is_empty()
+}
+
+/// The outcome of running a schema on `undefined` (a missing tuple slot).
+enum Absent {
+    /// Validates cleanly with `undefined` output (the slot drops out of the
+    /// tuple output).
+    Undefined,
+    /// Validates cleanly with a concrete JSON value (defaults, catches). The
+    /// flag marks a catch fallback: canonical `handleOptionalResult` swallows
+    /// it back to `undefined` under an `Optional` wrapper.
+    Value(Json, bool),
+    /// Emits issues on `undefined` input.
+    Fail,
+}
+
+fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent {
+    match &plan.nodes()[id as usize] {
+        PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
+            Absent::Undefined
+        }
+        PlanNode::Optional { inner } => {
+            if plan.dispatch[*inner as usize].optin_optional {
+                match absent_result(plan, *inner) {
+                    // `handleOptionalResult`: undefined input plus issues or a
+                    // catch fallback resolves to a clean `undefined`.
+                    Absent::Fail | Absent::Value(_, true) => Absent::Undefined,
+                    ok => ok,
+                }
+            } else {
+                Absent::Undefined
+            }
+        }
+        PlanNode::Default { value, .. } | PlanNode::Prefault { value, .. } => {
+            Absent::Value(value.clone(), false)
+        }
+        PlanNode::Catch { inner, value, .. } => match absent_result(plan, *inner) {
+            Absent::Fail => Absent::Value(value.clone(), true),
+            ok => ok,
+        },
+        PlanNode::Union { options } => {
+            for opt in options {
+                match absent_result(plan, *opt) {
+                    Absent::Fail => {}
+                    ok => return ok,
+                }
+            }
+            Absent::Fail
+        }
+        PlanNode::Pipe { a, b } => match absent_result(plan, *a) {
+            Absent::Fail => Absent::Fail,
+            Absent::Undefined => absent_result(plan, *b),
+            Absent::Value(va, fell_back) => match run_concrete(plan, *b, &va) {
+                Some(vb) => Absent::Value(vb, fell_back),
+                None => Absent::Fail,
+            },
+        },
+        PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
+            absent_result(plan, *inner)
+        }
+        PlanNode::Intersection { left, right } => {
+            match (absent_result(plan, *left), absent_result(plan, *right)) {
+                (Absent::Fail, _) | (_, Absent::Fail) => Absent::Fail,
+                (Absent::Undefined, Absent::Undefined) => Absent::Undefined,
+                (Absent::Value(v, f), Absent::Undefined)
+                | (Absent::Undefined, Absent::Value(v, f)) => Absent::Value(v, f),
+                (Absent::Value(a, fa), Absent::Value(b, fb)) => {
+                    match (a, b) {
+                        (Json::Object(mut x), Json::Object(y)) => {
+                            x.extend(y);
+                            Absent::Value(Json::Object(x), fa || fb)
+                        }
+                        // Non-mergeable undefined intersections do not arise
+                        // in JSON-eligible schemas; treat as failure.
+                        _ => Absent::Fail,
+                    }
+                }
+            }
+        }
+        _ => Absent::Fail,
+    }
+}
+
+/// Runs a schema on an already-parsed JSON value, returning its output.
+fn run_concrete(plan: &CompiledPlan, id: NodeId, v: &Json) -> Option<Json> {
+    let text = serde_json::to_string(v).ok()?;
+    let value: Value = sonic_rs::from_str(&text).ok()?;
+    if !option_matches(plan, id, &value) {
+        return None;
+    }
+    let mut s = String::new();
+    write_output(plan, id, &value, &mut s);
+    serde_json::from_str(&s).ok()
 }
 
 fn default_value(plan: &CompiledPlan, id: NodeId) -> Option<Json> {
@@ -1051,6 +1243,74 @@ fn append_raw(value: &Value, out: &mut String) {
 // ------------------------------------------------------------------------
 // Value helpers.
 // ------------------------------------------------------------------------
+
+/// Scans the raw input for a negative-zero number token (`-0`, `-0.0`,
+/// `-0e5`, ...), skipping string contents. sonic-rs normalizes every such
+/// token to `0.0`, so a rewrite would lose the sign `JSON.parse` preserves.
+fn contains_negative_zero(input: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else if b == b'"' {
+            in_string = true;
+        } else if b == b'-' && is_negative_zero_token(&input[i + 1..]) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// After a `-`: an all-zero mantissa (`0`, `0.0`, ...) with an optional
+/// exponent, terminated by a JSON delimiter or the end of input.
+fn is_negative_zero_token(rest: &[u8]) -> bool {
+    if rest.first() != Some(&b'0') {
+        return false;
+    }
+    let mut i = 1;
+    // JSON forbids leading zeros, so a digit here means invalid JSON (which
+    // sonic-rs rejects before this scan ever runs); bail out conservatively.
+    if rest.get(i).is_some_and(u8::is_ascii_digit) {
+        return false;
+    }
+    if rest.get(i) == Some(&b'.') {
+        i += 1;
+        let start = i;
+        while rest.get(i) == Some(&b'0') {
+            i += 1;
+        }
+        if i == start || rest.get(i).is_some_and(u8::is_ascii_digit) {
+            return false; // empty fraction or a non-zero digit: not zero
+        }
+    }
+    if matches!(rest.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(rest.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        let start = i;
+        while rest.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if i == start {
+            return false;
+        }
+    }
+    matches!(
+        rest.get(i),
+        None | Some(b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r')
+    )
+}
 
 /// Collapse an object's entries to ECMA-262 JSON.parse semantics: one entry per
 /// key in first-occurrence order, carrying the last value seen for that key.
@@ -1118,23 +1378,127 @@ fn coerce_to_string(value: &Value) -> String {
         return b.to_string();
     }
     if value.is_number() {
-        return sonic_rs::to_string(value).unwrap_or_default();
+        return value.as_f64().map_or_else(String::new, js_number_to_string);
     }
     value.as_str().unwrap_or_default().to_string()
 }
 
 fn coerce_to_number(value: &Value) -> Option<f64> {
     if let Some(s) = value.as_str() {
-        let t = s.trim();
-        if t.is_empty() {
-            return Some(0.0); // JS Number("") === 0
-        }
-        return t.parse::<f64>().ok();
+        return js_number_str(s);
     }
     if let Some(b) = value.as_bool() {
         return Some(if b { 1.0 } else { 0.0 });
     }
+    if value.is_null() {
+        return Some(0.0); // JS Number(null) === 0
+    }
     value.as_f64()
+}
+
+/// ECMA-262 `Number(string)`: trims, accepts the exact `Infinity` literal and
+/// the `0x`/`0o`/`0b` radix prefixes, and rejects the `inf`/`infinity`/`nan`
+/// words that Rust's float parser would accept.
+fn js_number_str(s: &str) -> Option<f64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Some(0.0); // JS Number("") === 0
+    }
+    match t {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        _ => {}
+    }
+    let unsigned = t.strip_prefix('+').unwrap_or(t);
+    if unsigned.eq_ignore_ascii_case("inf")
+        || unsigned.eq_ignore_ascii_case("infinity")
+        || unsigned.eq_ignore_ascii_case("nan")
+        || t.strip_prefix('-').is_some_and(|r| {
+            r.eq_ignore_ascii_case("inf") || r.eq_ignore_ascii_case("infinity") || r.eq_ignore_ascii_case("nan")
+        })
+    {
+        return None;
+    }
+    if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return js_radix(rest, 16);
+    }
+    if let Some(rest) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return js_radix(rest, 8);
+    }
+    if let Some(rest) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        return js_radix(rest, 2);
+    }
+    t.parse::<f64>().ok()
+}
+
+/// Parses radix-prefixed integer digits, accumulating in `f64` so oversized
+/// literals round instead of failing (as JS does).
+fn js_radix(digits: &str, radix: u32) -> Option<f64> {
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value = 0.0f64;
+    for c in digits.chars() {
+        let d = c.to_digit(radix)?;
+        value = value * f64::from(radix) + f64::from(d);
+    }
+    Some(value)
+}
+
+/// ECMA-262 `Number::toString`: shortest round-trip digits (via Rust's `{:e}`)
+/// placed by JS's fixed-point vs exponential rules.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "digit counts and decimal exponents are tiny and guarded to be non-negative"
+)]
+fn js_number_to_string(n: f64) -> String {
+    if n == 0.0 {
+        return "0".into(); // also covers -0
+    }
+    if n.is_nan() {
+        return "NaN".into();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+    }
+    let negative = n < 0.0;
+    let sci = format!("{:e}", n.abs()); // "2.5e4", "3e-1"
+    let Some((mantissa, exp)) = sci.split_once('e') else {
+        return sci;
+    };
+    let Ok(exp) = exp.parse::<i32>() else {
+        return sci;
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let (k, point) = (digits.len() as i32, exp + 1);
+    let body = if (k..=21).contains(&point) {
+        // Integral: digits then trailing zeros.
+        let mut s = digits;
+        s.push_str(&"0".repeat((point - k) as usize));
+        s
+    } else if (1..=21).contains(&point) {
+        // Fixed point inside the digits.
+        let at = point as usize;
+        format!("{}.{}", &digits[..at], &digits[at..])
+    } else if (-5..=0).contains(&point) {
+        // Leading "0." with zeros before the digits.
+        format!("0.{}{}", "0".repeat((-point) as usize), digits)
+    } else {
+        // Exponential: one digit, optional fraction, signed exponent.
+        let frac = if digits.len() > 1 {
+            format!(".{}", &digits[1..])
+        } else {
+            String::new()
+        };
+        format!("{}{}e{}{}", &digits[..1], frac, if point > 0 { "+" } else { "" }, point - 1)
+    };
+    if negative {
+        format!("-{body}")
+    } else {
+        body
+    }
 }
 
 /// Zod's `floatSafeRemainder`: integer-scale the operands to dodge FP drift.
