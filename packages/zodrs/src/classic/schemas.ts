@@ -14,6 +14,8 @@ import type {
   SchemaNode,
 } from "../core/nodes.js";
 import { cloneNode, node } from "../core/nodes.js";
+import { bagOf, optinOf, optoutOf, patternOf, propValuesOf, valuesOf } from "../core/introspect.js";
+import { REGEXES } from "../core/formats.js";
 import * as parsing from "../core/parse.js";
 import type { RuntimeSchema, SafeParseResult } from "../core/parse.js";
 import { compilePlan } from "../core/plan.js";
@@ -62,6 +64,8 @@ export type ErrorParam = string | {
   readonly params?: Record<string, unknown> | undefined;
   /** Path prefix appended to the emitted issue path (refinements). */
   readonly path?: PropertyKey[] | undefined;
+  /** Gate: run the check only when this returns true (bypasses abort short-circuit). */
+  readonly when?: ((payload: { value: unknown; issues: $ZodIssue[] }) => boolean) | undefined;
 };
 export type RefinementCtx<T = unknown> = {
   readonly value: T;
@@ -99,9 +103,11 @@ function runtimeCheck(check: RuntimeCheck["check"], params?: ErrorParam): $ZodCh
       abort: extra?.abort,
       params: extra?.params,
       path: extra?.path,
+      when: extra?.when as RuntimeCheck["when"],
     },
   };
 }
+
 
 function checksOf(values: readonly ($ZodCheck | RuntimeCheck | ((payload: { value: unknown; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): RuntimeCheck[] {
   return values.map((value) => {
@@ -113,7 +119,7 @@ function checksOf(values: readonly ($ZodCheck | RuntimeCheck | ((payload: { valu
       // A passed SCHEMA becomes a host check that runs the schema's raw validator so
       // any produced issues stay in raw (unfinalized) form for the outer context.
       const fn: HostFunction = (input, context) => {
-        const sub: ValidationContext = { ...context, issues: null };
+        const sub: ValidationContext = { ...context, issues: null, async: false };
         const result = value._zod.validate(input, sub);
         if (result === FAIL) {
           for (const raw of sub.issues ?? []) context.addIssue(raw);
@@ -200,10 +206,22 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
       output: undefined as Output,
       input: undefined as Input,
       node: schemaNode,
+      parent,
       def: defFacade,
       get validate() { return (cachedValidate ??= CODEGEN_AVAILABLE && !config().jitless ? createCodegenValidator(schemaNode) : createInterpreter(schemaNode)); },
       get validateAsync() { return (cachedValidateAsync ??= createAsyncInterpreter(schemaNode)); },
       get plan() { return (cachedPlan ??= compilePlan(schemaNode)); },
+      get values() { return valuesOf(schemaNode); },
+      get propValues() { return propValuesOf(schemaNode); },
+      get optin() { return optinOf(schemaNode); },
+      get optout() { return optoutOf(schemaNode); },
+      get pattern() { return patternOf(schemaNode); },
+      get innerType() {
+        const current = schemaNode;
+        if (current.kind === "lazy") return childSchema(current.getter());
+        if ("inner" in current && current.inner) return childSchema(current.inner);
+        return undefined;
+      },
       nativeHandle: null,
     };
     this.def = defFacade;
@@ -239,9 +257,12 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   safeEncodeAsync(data: Output, params?: ParseContext): Promise<SafeParseResult<Input>> { return parsing.safeEncodeAsync(this, data, params); }
   safeDecodeAsync(data: Input, params?: ParseContext): Promise<SafeParseResult<Output>> { return parsing.safeDecodeAsync(this, data, params); }
 
-  check(...values: readonly ($ZodCheck<Output> | RuntimeCheck | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): this {
-    const next = cloneNode(this._zod.node, { checks: [...this._zod.node.checks, ...checksOf(values as readonly AnyCheckInput[])] });
-    return fromNode(next, this) as this;
+  check(...values: readonly ($ZodCheck<Output> | RuntimeCheck | SomeType | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): this {
+    const runtimes = checksOf(values as readonly AnyCheckInput[]);
+    const next = cloneNode(this._zod.node, { checks: [...this._zod.node.checks, ...runtimes] });
+    const result = fromNode(next, this);
+    for (const runtime of runtimes) runtime.attach?.(result);
+    return result as this;
   }
   with(...values: readonly ($ZodCheck<Output> | RuntimeCheck | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): this { return this.check(...values); }
   clone(definition: SchemaNode = this._zod.node): this { return fromNode(cloneNode(definition), this) as this; }
@@ -300,6 +321,73 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   }
   isOptional(): boolean { return this.safeParse(undefined).success; }
   isNullable(): boolean { return this.safeParse(null).success; }
+  get enum(): Record<string, string | number> | undefined {
+    const definition = this._zod.node;
+    if (definition.kind !== "enum") return undefined;
+    const entries: Record<string, string | number> = {};
+    for (const value of definition.values) entries[String(value)] = value;
+    return entries;
+  }
+  get value(): unknown {
+    const definition = this._zod.node;
+    if (definition.kind !== "literal") return undefined;
+    if (definition.values.length > 1) throw new Error("This schema contains multiple valid literal values. Use `.values` instead.");
+    return definition.values[0];
+  }
+  get values(): ReadonlySet<unknown> | undefined { return valuesOf(this._zod.node); }
+  extract(values: readonly unknown[], params?: ErrorParam): unknown {
+    const definition = this._zod.node;
+    if (definition.kind !== "enum") return this;
+    const selected = new Set<unknown>(values);
+    const kept = definition.values.filter((value) => selected.has(value));
+    const resolved = errorMap(params) ?? definition.error;
+    return fromNode(node({ kind: "enum", values: kept, error: resolved }), this);
+  }
+  exclude(values: readonly unknown[], params?: ErrorParam): unknown {
+    const definition = this._zod.node;
+    if (definition.kind !== "enum") return this;
+    const skipped = new Set<unknown>(values);
+    const kept = definition.values.filter((value) => !skipped.has(value));
+    const resolved = errorMap(params) ?? definition.error;
+    return fromNode(node({ kind: "enum", values: kept, error: resolved }), this);
+  }
+  get format(): string | null { return bagOf(this._zod.node)["format"] as string ?? null; }
+  get minLength(): number | null { return bagOf(this._zod.node)["minimum"] as number ?? null; }
+  get maxLength(): number | null { return bagOf(this._zod.node)["maximum"] as number ?? null; }
+  get minValue(): number | bigint | Date | null {
+    const bag = bagOf(this._zod.node);
+    const minimum = bag["minimum"] as number | bigint | undefined;
+    const exclusive = bag["exclusiveMinimum"] as number | bigint | undefined;
+    let candidate = minimum;
+    if (candidate === undefined || (exclusive !== undefined && exclusive > candidate)) candidate = exclusive;
+    if (candidate === undefined) return null;
+    if (this._zod.node.kind === "date") return new Date(Number(candidate));
+    return candidate;
+  }
+  get maxValue(): number | bigint | Date | null {
+    const bag = bagOf(this._zod.node);
+    const maximum = bag["maximum"] as number | bigint | undefined;
+    const exclusive = bag["exclusiveMaximum"] as number | bigint | undefined;
+    let candidate = maximum;
+    if (candidate === undefined || (exclusive !== undefined && exclusive < candidate)) candidate = exclusive;
+    if (candidate === undefined) return null;
+    if (this._zod.node.kind === "date") return new Date(Number(candidate));
+    return candidate;
+  }
+  get isInt(): boolean {
+    const kind = this._zod.node.kind;
+    if (kind === "bigint") return true;
+    if (kind !== "number") return false;
+    const fmt = bagOf(this._zod.node)["format"] as string | undefined;
+    if (fmt && fmt.includes("int")) return true;
+    return Number.isSafeInteger(bagOf(this._zod.node)["multipleOf"] as number | undefined ?? 0.5);
+  }
+  get isFinite(): boolean {
+    const kind = this._zod.node.kind;
+    if (kind === "number" || kind === "bigint") return true;
+    const bag = bagOf(this._zod.node);
+    return bag["maximum"] !== undefined || bag["minimum"] !== undefined;
+  }
   apply<T>(fn: (schema: this) => T): T { return fn(this); }
 
   min(value: number | bigint | Date, params?: ErrorParam): this {
@@ -324,12 +412,10 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   nonnegative(params?: ErrorParam): this { return this.check(gte(0, params)); }
   multipleOf(value: number | bigint, params?: ErrorParam): this { return this.check(multipleOf(value, params)); }
   step(value: number | bigint, params?: ErrorParam): this { return this.multipleOf(value, params); }
-  int(params?: ErrorParam): this { return this.check(int(params)); }
-  safe(params?: ErrorParam): this { return this.check(int(params)); }
+  int(params?: ErrorParam): this { return this.check(intCheck(params)); }
+  safe(params?: ErrorParam): this { return this.check(intCheck(params)); }
   finite(params?: ErrorParam): this { return this.refine((value) => typeof value === "number" && Number.isFinite(value), params); }
 
-  minLength(value: number, params?: ErrorParam): this { return this.check(minLength(value, params)); }
-  maxLength(value: number, params?: ErrorParam): this { return this.check(maxLength(value, params)); }
   length(value: number, params?: ErrorParam): this {
     const kind = this._zod.node.kind;
     if (kind === "set" || kind === "map") return this.check(size(value, params));
@@ -353,7 +439,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   slugify(): this { return this.check(slugify()); }
 
   email(params?: ErrorParam): this { return this.check(format("email", params)); }
-  url(params?: ErrorParam): this { return this.check(format("url", params)); }
+  url(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): this { return this.check(format("url", params, urlFormatParams(params))); }
   jwt(params?: ErrorParam): this { return this.check(format("jwt", params)); }
   emoji(params?: ErrorParam): this { return this.check(format("emoji", params)); }
   guid(params?: ErrorParam): this { return this.check(format("guid", params)); }
@@ -369,6 +455,36 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   ksuid(params?: ErrorParam): this { return this.check(format("ksuid", params)); }
   base64(params?: ErrorParam): this { return this.check(format("base64", params)); }
   base64url(params?: ErrorParam): this { return this.check(format("base64url", params)); }
+  ipv4(params?: ErrorParam): this { return this.check(format("ipv4", params)); }
+  ipv6(params?: ErrorParam): this { return this.check(format("ipv6", params)); }
+  cidrv4(params?: ErrorParam): this { return this.check(format("cidrv4", params)); }
+  cidrv6(params?: ErrorParam): this { return this.check(format("cidrv6", params)); }
+  e164(params?: ErrorParam): this { return this.check(format("e164", params)); }
+  mac(params?: ErrorParam): this { return this.check(format("mac", params)); }
+  hex(params?: ErrorParam): this { return this.check(format("hex", params)); }
+  hash(algorithm: string, params?: ErrorParam): this { return this.check(format(algorithm as FormatId, params)); }
+  httpUrl(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): this { return this.check(format("httpUrl", params, urlFormatParams(params))); }
+  hostname(params?: ErrorParam): this { return this.check(format("hostname", params)); }
+  duration(params?: ErrorParam): this { return this.check(format("duration", params)); }
+  date(params?: ErrorParam): this { return this.check(format("date", params)); }
+  time(params?: ErrorParam): this { return this.check(format("time", params)); }
+  datetime(params?: ErrorParam & { readonly precision?: number | null; readonly offset?: boolean; readonly local?: boolean }): this { return this.check(format("datetime", params, typeof params === "object" ? params : undefined)); }
+  int32(params?: ErrorParam): this { return this.check(int32Check(params)); }
+  uint32(params?: ErrorParam): this { return this.check(uint32Check(params)); }
+  float32(params?: ErrorParam): this { return this.check(float32Check(params)); }
+  float64(params?: ErrorParam): this { return this.check(float64Check(params)); }
+  int64(params?: ErrorParam): this { return this.check(int64Check(params)); }
+  uint64(params?: ErrorParam): this { return this.check(uint64Check(params)); }
+  jsonString(params?: ErrorParam): this {
+    const inner = json();
+    const parseHost: HostFunction = (value, context) => {
+      try { return JSON.parse(value as string); } catch {
+        context.addIssue({ code: "custom", message: "Invalid JSON", input: value } as never);
+        return undefined;
+      }
+    };
+    return fromNode(node({ kind: "pipe", a: this._zod.node, b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: parseHost, op: "transform" }), b: inner._zod.node }) }), this) as this;
+  }
 
   minSize(value: number, params?: ErrorParam): this { return this.check(minSize(value, params)); }
   maxSize(value: number, params?: ErrorParam): this { return this.check(maxSize(value, params)); }
@@ -476,12 +592,16 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   }
 
   get element(): SomeType { return this._zod.node.kind === "array" ? childSchema(this._zod.node.element) : never(); }
-  get options(): readonly SomeType[] { return this._zod.node.kind === "union" || this._zod.node.kind === "discunion" ? this._zod.node.options.map(childSchema) : []; }
+  get options(): readonly (SomeType | string | number)[] {
+    const definition = this._zod.node;
+    if (definition.kind === "enum") return [...definition.values];
+    return definition.kind === "union" || definition.kind === "discunion" ? definition.options.map(childSchema) : [];
+  }
   get items(): readonly SomeType[] { return this._zod.node.kind === "tuple" ? this._zod.node.items.map(childSchema) : []; }
   rest<T extends SomeType>(schema: T): $ZodType<Output, Input> { if (this._zod.node.kind !== "tuple") throw new TypeError("rest() requires a tuple schema"); return fromNode(cloneNode(this._zod.node, { rest: schema._zod.node }), this); }
   unwrap(): SomeType {
     const current = this._zod.node;
-    if (current.kind === "optional" || current.kind === "nullable" || current.kind === "nonoptional" || current.kind === "readonly" || current.kind === "promise" || current.kind === "default" || current.kind === "prefault" || current.kind === "catch") return childSchema(current.inner);
+    if (current.kind === "optional" || current.kind === "exactOptional" || current.kind === "nullable" || current.kind === "nonoptional" || current.kind === "readonly" || current.kind === "promise" || current.kind === "default" || current.kind === "prefault" || current.kind === "catch") return childSchema(current.inner);
     if (current.kind === "lazy") return childSchema(current.getter());
     throw new TypeError("unwrap() is not supported by this schema");
   }
@@ -491,10 +611,40 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   get in(): SomeType { return this._zod.node.kind === "pipe" ? childSchema(this._zod.node.a) : never(); }
   get out(): SomeType { return this._zod.node.kind === "pipe" ? childSchema(this._zod.node.b) : never(); }
 
-  implement<F extends (...args: never[]) => unknown>(fn: F): F { return fn; }
-  implementAsync<F extends (...args: never[]) => Promise<unknown>>(fn: F): F { return fn; }
-  input<T extends SomeType>(schema: T): this { return this; }
-  output<T extends SomeType>(schema: T): this { return this; }
+  implement<F extends (...args: never[]) => unknown>(fn: F): F {
+    const definition = this._zod.node;
+    if (definition.kind !== "function" || (!definition.input && !definition.output)) return fn;
+    // The parse result is the wrapped callable; F is opaque to the compiler
+    // (generic boundary), so assert through the constraint type.
+    return this.parse(fn) as (...args: never[]) => unknown as F;
+  }
+  implementAsync<F extends (...args: never[]) => Promise<unknown>>(fn: F): F {
+    const definition = this._zod.node;
+    if (definition.kind !== "function" || (!definition.input && !definition.output)) return fn;
+    const argsSchema = definition.input ? childSchema(definition.input) : undefined;
+    const returnsSchema = definition.output ? childSchema(definition.output) : undefined;
+    // Localized legacy-interop cast: the generic F cannot be reconstructed from
+    // the runtime wrapper signature without erasing the argument tuple.
+    const wrapped = async (...args: readonly unknown[]): Promise<unknown> => {
+      const parsedArgs = argsSchema ? await argsSchema.parseAsync(args) : args;
+      const returned = await fn(...(parsedArgs as never[]));
+      return returnsSchema ? returnsSchema.parseAsync(returned) : returned;
+    };
+    return wrapped as (...args: never[]) => Promise<unknown> as F;
+  }
+  input<T extends SomeType | readonly SomeType[]>(schema: T, rest?: SomeType): this {
+    const definition = this._zod.node;
+    if (definition.kind !== "function") return this;
+    const argsNode = Array.isArray(schema)
+      ? tuple(schema as readonly SomeType[], rest)._zod.node
+      : (schema as SomeType)._zod.node;
+    return fromNode(cloneNode(definition, { input: argsNode }), this) as this;
+  }
+  output<T extends SomeType>(schema: T): this {
+    const definition = this._zod.node;
+    if (definition.kind !== "function") return this;
+    return fromNode(cloneNode(definition, { output: schema._zod.node }), this) as this;
+  }
 
   toJSONSchema(params?: ToJSONSchemaParams): JSONSchema { return coreToJSONSchema(this, params); }
 }
@@ -536,51 +686,62 @@ export type ZodFile = $ZodType<{ readonly name: string; readonly size: number; r
 export type ZodFunction = $ZodType<(...args: never[]) => unknown, (...args: never[]) => unknown>;
 
 // One runtime implementation backs every schema (single core, no duplicated
-// class hierarchy). The named wrappers are `instanceof` matchers keyed by the
-// underlying node kind via `Symbol.hasInstance`, so `x instanceof z.ZodString`
-// is true exactly when `x` is a string schema, without a real subclass.
+// class hierarchy). The named wrappers are constructor-shaped matchers keyed by
+// the underlying node kind via `Symbol.hasInstance`, so `x instanceof z.ZodString`
+// is true exactly when `x` is a string schema — and each is also callable as the
+// corresponding factory (`z.ZodString() === z.string()`), matching Zod.
 type ZodMatcher = { readonly [Symbol.hasInstance]: (value: unknown) => boolean };
-function kindMatcher(...kinds: readonly SchemaNode["kind"][]): ZodMatcher {
-  return { [Symbol.hasInstance]: (value: unknown): boolean => value instanceof $ZodType && kinds.includes(value._zod.node.kind) };
+function kindMatcher(factory: (...args: readonly unknown[]) => $ZodType, ...kinds: readonly SchemaNode["kind"][]): ZodMatcher {
+  const matcher = Object.defineProperty(function (...args: readonly unknown[]) { return factory(...args); }, Symbol.hasInstance, {
+    value: (value: unknown): boolean => value instanceof $ZodType && kinds.includes(value._zod.node.kind),
+  });
+  return matcher as unknown as ZodMatcher;
 }
 
-export const ZodString: ZodMatcher = kindMatcher("string");
-export const ZodNumber: ZodMatcher = kindMatcher("number");
-export const ZodBigInt: ZodMatcher = kindMatcher("bigint");
-export const ZodBoolean: ZodMatcher = kindMatcher("boolean");
-export const ZodDate: ZodMatcher = kindMatcher("date");
-export const ZodSymbol: ZodMatcher = kindMatcher("symbol");
-export const ZodUndefined: ZodMatcher = kindMatcher("undefined");
-export const ZodNull: ZodMatcher = kindMatcher("null");
-export const ZodVoid: ZodMatcher = kindMatcher("void");
-export const ZodAny: ZodMatcher = kindMatcher("any");
-export const ZodUnknown: ZodMatcher = kindMatcher("unknown");
-export const ZodNever: ZodMatcher = kindMatcher("never");
-export const ZodNaN: ZodMatcher = kindMatcher("nan");
-export const ZodLiteral: ZodMatcher = kindMatcher("literal");
-export const ZodEnum: ZodMatcher = kindMatcher("enum");
-export const ZodObject: ZodMatcher = kindMatcher("object");
-export const ZodArray: ZodMatcher = kindMatcher("array");
-export const ZodTuple: ZodMatcher = kindMatcher("tuple");
-export const ZodUnion: ZodMatcher = kindMatcher("union", "discunion");
-export const ZodDiscriminatedUnion: ZodMatcher = kindMatcher("discunion");
-export const ZodIntersection: ZodMatcher = kindMatcher("intersection");
-export const ZodRecord: ZodMatcher = kindMatcher("record");
-export const ZodMap: ZodMatcher = kindMatcher("map");
-export const ZodSet: ZodMatcher = kindMatcher("set");
-export const ZodOptional: ZodMatcher = kindMatcher("optional");
-export const ZodNullable: ZodMatcher = kindMatcher("nullable");
-export const ZodDefault: ZodMatcher = kindMatcher("default");
-export const ZodPrefault: ZodMatcher = kindMatcher("prefault");
-export const ZodNonOptional: ZodMatcher = kindMatcher("nonoptional");
-export const ZodCatch: ZodMatcher = kindMatcher("catch");
-export const ZodPromise: ZodMatcher = kindMatcher("promise");
-export const ZodReadonly: ZodMatcher = kindMatcher("readonly");
-export const ZodLazy: ZodMatcher = kindMatcher("lazy");
-export const ZodFile: ZodMatcher = kindMatcher("file");
-export const ZodFunction: ZodMatcher = kindMatcher("function");
-export const ZodTemplateLiteral: ZodMatcher = kindMatcher("templateLiteral");
-export const ZodPipe: ZodMatcher = kindMatcher("pipe");
+export const ZodString: ZodMatcher = kindMatcher(() => string(), "string");
+export const ZodNumber: ZodMatcher = kindMatcher(() => number(), "number");
+export const ZodBigInt: ZodMatcher = kindMatcher(() => bigint(), "bigint");
+export const ZodBoolean: ZodMatcher = kindMatcher(() => boolean(), "boolean");
+export const ZodDate: ZodMatcher = kindMatcher(() => date(), "date");
+export const ZodSymbol: ZodMatcher = kindMatcher(() => symbol(), "symbol");
+export const ZodUndefined: ZodMatcher = kindMatcher(() => undefined_(), "undefined");
+export const ZodNull: ZodMatcher = kindMatcher(() => null_(), "null");
+export const ZodVoid: ZodMatcher = kindMatcher(() => void_(), "void");
+export const ZodAny: ZodMatcher = kindMatcher(() => any(), "any");
+export const ZodUnknown: ZodMatcher = kindMatcher(() => unknown(), "unknown");
+export const ZodNever: ZodMatcher = kindMatcher(() => never(), "never");
+export const ZodNaN: ZodMatcher = kindMatcher(() => nan(), "nan");
+export const ZodLiteral: ZodMatcher = kindMatcher((value) => literal(value as Primitive), "literal");
+export const ZodEnum: ZodMatcher = kindMatcher((values) => enum_(values as readonly string[]), "enum");
+export const ZodObject: ZodMatcher = kindMatcher((shape) => object(shape as Shape), "object");
+export const ZodArray: ZodMatcher = kindMatcher((element) => array(element as SomeType), "array");
+export const ZodTuple: ZodMatcher = kindMatcher((items) => tuple(items as readonly SomeType[]), "tuple");
+export const ZodUnion: ZodMatcher = kindMatcher((options) => union(options as readonly SomeType[]), "union", "discunion");
+export const ZodDiscriminatedUnion: ZodMatcher = kindMatcher((key, options) => discriminatedUnion(key as string, options as readonly SomeType[]), "discunion");
+export const ZodIntersection: ZodMatcher = kindMatcher((left, right) => intersection(left as SomeType, right as SomeType), "intersection");
+export const ZodRecord: ZodMatcher = kindMatcher((key, value) => record(key as SomeType, value as SomeType), "record");
+export const ZodMap: ZodMatcher = kindMatcher((key, value) => map(key as SomeType, value as SomeType), "map");
+export const ZodSet: ZodMatcher = kindMatcher((value) => set(value as SomeType), "set");
+export const ZodOptional: ZodMatcher = kindMatcher((inner) => optional(inner as SomeType), "optional");
+export const ZodNullable: ZodMatcher = kindMatcher((inner) => nullable(inner as SomeType), "nullable");
+export const ZodDefault: ZodMatcher = kindMatcher((inner, value) => _default(inner as SomeType, value), "default");
+export const ZodPrefault: ZodMatcher = kindMatcher((inner, value) => prefault(inner as SomeType, value as never), "prefault");
+export const ZodNonOptional: ZodMatcher = kindMatcher((inner) => nonoptional(inner as SomeType), "nonoptional");
+export const ZodCatch: ZodMatcher = kindMatcher((inner, value) => catch_(inner as SomeType, value as never), "catch");
+export const ZodPromise: ZodMatcher = kindMatcher((inner) => promise(inner as SomeType), "promise");
+export const ZodReadonly: ZodMatcher = kindMatcher((inner) => (inner as SomeType).readonly(), "readonly");
+export const ZodLazy: ZodMatcher = kindMatcher((getter) => lazy(getter as () => SomeType), "lazy");
+export const ZodFile: ZodMatcher = kindMatcher(() => file(), "file");
+export const ZodFunction: ZodMatcher = kindMatcher(() => function_(), "function");
+export const ZodTemplateLiteral: ZodMatcher = kindMatcher((parts) => templateLiteral(parts as readonly string[]), "templateLiteral");
+export const ZodPipe: ZodMatcher = kindMatcher((a, b) => pipe(a as SomeType, b as SomeType), "pipe");
+export const ZodCustom: ZodMatcher = kindMatcher((fn) => custom(fn as (data: unknown) => unknown), "host");
+export const ZodStringFormat: ZodMatcher = kindMatcher(() => string(), "string");
+export const ZodSuccess: ZodMatcher = kindMatcher((inner) => success(inner as SomeType), "host");
+export const ZodJSONSchema: ZodMatcher = kindMatcher(() => json(), "host");
+export const ZodNumberFormat: ZodMatcher = kindMatcher(() => number(), "number");
+export const ZodBigIntFormat: ZodMatcher = kindMatcher(() => bigint(), "bigint");
+export const ZodExactOptional: ZodMatcher = kindMatcher((inner) => (inner as SomeType).exactOptional(), "exactOptional");
 export const ZodTransform: ZodMatcher = {
   [Symbol.hasInstance]: (value: unknown): boolean => {
     if (!(value instanceof $ZodType)) return false;
@@ -593,6 +754,13 @@ export const ZodCodec: ZodMatcher = {
     if (!(value instanceof $ZodType)) return false;
     const current = value._zod.node;
     return current.kind === "pipe" && current.codec === true;
+  },
+};
+export const ZodPreprocess: ZodMatcher = {
+  [Symbol.hasInstance]: (value: unknown): boolean => {
+    if (!(value instanceof $ZodType)) return false;
+    const current = value._zod.node;
+    return current.kind === "pipe" && current.a.kind === "host" && current.a.op === "preprocess";
   },
 };
 
@@ -691,17 +859,30 @@ function discriminantValues(schema: SomeType, key: string): Primitive[] {
   return [];
 }
 
-export function discriminatedUnion<const T extends readonly SomeType[]>(key: string, options: T, params?: ErrorParam): ZodUnion<T> {
+export function discriminatedUnion<const T extends readonly SomeType[]>(key: string, options: T, params?: ErrorParam & { readonly unionFallback?: boolean }): ZodUnion<T> {
   const map = new Map<Primitive, SchemaNode>();
-  for (const option of options) for (const value of discriminantValues(option, key)) {
-    if (map.has(value)) throw new Error(`Duplicate discriminator value "${String(value)}"`);
-    map.set(value, option._zod.node);
+  let invalidOptionIndex: number | undefined;
+  for (const option of options) {
+    const sets = (propValuesOf(option._zod.node) ?? {})[key];
+    if (!sets) {
+      if (invalidOptionIndex === undefined) invalidOptionIndex = options.indexOf(option);
+      continue;
+    }
+    for (const value of sets) {
+      if (map.has(value as Primitive)) throw new Error(`Duplicate discriminator value "${String(value)}"`);
+      map.set(value as Primitive, option._zod.node);
+    }
   }
-  return fromNode(node({ kind: "discunion", key, options: options.map((option) => option._zod.node), map }, { error: errorMap(params) }));
+  const fallback = typeof params === "object" && params.unionFallback === true;
+  return fromNode(node({
+    kind: "discunion", key,
+    options: options.map((option) => option._zod.node),
+    map, unionFallback: fallback,
+    ...(invalidOptionIndex !== undefined ? { invalidOptionIndex } : {}),
+  }, { error: errorMap(params) }));
 }
 export function xor<const T extends readonly SomeType[]>(options: T, params?: ErrorParam): ZodUnion<T> {
-  const fn: HostFunction = (value) => options.filter((option) => option.safeParse(value).success).length === 1;
-  return fromNode(node({ kind: "host", inner: null, fn, op: "refine" }, { error: errorMap(params) }));
+  return fromNode(node({ kind: "union", inclusive: false, options: options.map((option) => option._zod.node) }, { error: errorMap(params) }));
 }
 export function intersection<A extends SomeType, B extends SomeType>(left: A, right: B): ZodIntersection<A, B> { return fromNode(node({ kind: "intersection", left: left._zod.node, right: right._zod.node })); }
 export function record<V extends SomeType>(value: V, params?: ErrorParam): ZodRecord<ZodString, V>;
@@ -745,38 +926,84 @@ export function custom<O = unknown>(predicate: (data: unknown) => MaybeAsync<unk
   const host: HostFunction = (value) => predicate(value);
   return fromNode(node({ kind: "host", inner: null, fn: host, op: "refine" }, { error: errorMap(params) }));
 }
-export function instanceOf<T extends abstract new (...args: never[]) => object>(constructor: T, params?: ErrorParam): $ZodType<InstanceType<T>, InstanceType<T>> {
-  return custom<InstanceType<T>>((value) => value instanceof constructor, params ?? `Input not instance of ${constructor.name}`);
+/** Standalone refine check: `z.refine(fn)` passed into `.check()`. */
+export function refine<T = unknown>(fn: (value: T) => MaybeAsync<boolean>, params?: ErrorParam): $ZodCheck<T> {
+  const host: HostFunction = (value) => (fn as (input: unknown) => MaybeAsync<boolean>)(value);
+  return runtimeCheck({ c: "host_runtime", op: "refine", fn: host }, params);
 }
-export function function_(params?: ErrorParam): ZodFunction {
-  return fromNode(node({ kind: "function" }, { error: errorMap(params) }));
+/** Standalone check: `z.check(fn)` runs a function against `{ value, issues }`. */
+export function check<T = unknown>(fn: (payload: { value: T; issues: $ZodIssue[] }) => MaybeAsync<void>): $ZodCheck<T> {
+  const host: HostFunction = (value, context) => (fn as (payload: { value: unknown; issues: $ZodIssue[] }) => MaybeAsync<void>)({ value, issues: context.issues as $ZodIssue[] });
+  return runtimeCheck({ c: "host_runtime", op: "check", fn: host });
+}
+/** Standalone default: `z._default(schema, value)` == `schema.default(value)`. */
+export function _default<T extends SomeType>(inner: T, value: NoUndefined<output<T>> | (() => NoUndefined<output<T>>)): $ZodType<Exclude<output<T>, undefined>, input<T> | undefined> {
+  return fromNode(node({ kind: "default", inner: inner._zod.node, value, dynamic: typeof value === "function" }));
+}
+/** Standalone catch: `z.catch(schema, value)` == `schema.catch(value)`. */
+export function catch_<T extends SomeType>(inner: T, value: output<T> | ((context: { readonly error: unknown; readonly input: unknown }) => output<T>)): $ZodType<output<T>, input<T>> {
+  return fromNode(node({ kind: "catch", inner: inner._zod.node, value, dynamic: typeof value === "function" }));
+}
+/** Standalone prefault: `z.prefault(schema, value)` == `schema.prefault(value)`. */
+export function prefault<T extends SomeType>(inner: T, value: input<T> | (() => input<T>)): $ZodType<output<T>, input<T> | undefined> {
+  return fromNode(node({ kind: "prefault", inner: inner._zod.node, value, dynamic: typeof value === "function" }));
+}
+export function instanceOf<T extends abstract new (...args: never[]) => object>(constructor: T, params?: ErrorParam): $ZodType<InstanceType<T>, InstanceType<T>> {
+  const host: HostFunction = (value, context) => {
+    if (value instanceof constructor) return value;
+    context.addIssue({ code: "invalid_type", expected: constructor.name, input: value, path: [] } as never);
+    return value;
+  };
+  return fromNode(node({ kind: "host", inner: null, fn: host, op: "check", error: errorMap(params) }));
+}
+export function function_(def?: { readonly input?: SomeType | readonly SomeType[]; readonly output?: SomeType }, params?: ErrorParam): ZodFunction {
+  const argsNode = def?.input
+    ? (Array.isArray(def.input) ? tuple(def.input as readonly SomeType[])._zod.node : (def.input as SomeType)._zod.node)
+    : undefined;
+  const returnsNode = def?.output ? def.output._zod.node : undefined;
+  return fromNode(node({
+    kind: "function",
+    ...(argsNode ? { input: argsNode } : {}),
+    ...(returnsNode ? { output: returnsNode } : {}),
+  }, { error: errorMap(params) }));
 }
 export function stringbool(params: { readonly truthy?: readonly string[]; readonly falsy?: readonly string[]; readonly case?: "sensitive" | "insensitive"; readonly error?: string | $ZodErrorMap } = {}): $ZodType<boolean, string> {
-  const truthy = params.truthy ?? ["true", "1", "yes", "on", "y", "enabled"];
-  const falsy = params.falsy ?? ["false", "0", "no", "off", "n", "disabled"];
-  return string().transform((value, context) => {
-    const candidate = params.case === "sensitive" ? value : value.toLowerCase();
+  let truthy: readonly string[] = params.truthy ?? ["true", "1", "yes", "on", "y", "enabled"];
+  let falsy: readonly string[] = params.falsy ?? ["false", "0", "no", "off", "n", "disabled"];
+  const sensitive = params.case === "sensitive";
+  if (!sensitive) { truthy = truthy.map((v) => v.toLowerCase()); falsy = falsy.map((v) => v.toLowerCase()); }
+  const values = [...truthy, ...falsy];
+  const decodeHost: HostFunction = (value, context) => {
+    const candidate = sensitive ? (value as string) : (value as string).toLowerCase();
     if (truthy.includes(candidate)) return true;
     if (falsy.includes(candidate)) return false;
-    context.addIssue({ code: "invalid_value", values: [...truthy, ...falsy], input: value, path: [], message: "" });
+    context.addIssue({ code: "invalid_value", values, input: value, path: [] } as never);
     return false;
-  });
+  };
+  const encodeHost: HostFunction = (value) => ((value as boolean) ? truthy[0] : falsy[0]);
+  return fromNode(node({
+    kind: "pipe",
+    codec: true,
+    a: node({ kind: "string" }, { error: errorMap(params) }),
+    b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: decodeHost, op: "codec_decode", error: errorMap(params) }), b: node({ kind: "boolean" }) }),
+    encodeHost,
+  }));
 }
 
 function templatePattern(part: string | number | bigint | boolean | null | SomeType): string {
   if (part instanceof $ZodType) {
-    const current = part._zod.node;
-    if (current.kind === "literal") return current.values.map((value) => escapeRegex(String(value))).join("|");
-    if (current.kind === "enum") return current.values.map((value) => escapeRegex(String(value))).join("|");
-    if (current.kind === "number" || current.kind === "bigint") return "-?\\d+(?:\\.\\d+)?";
-    if (current.kind === "boolean") return "(?:true|false)";
-    if (current.kind === "null") return "null";
-    return ".*";
+    const pattern = patternOf(part._zod.node);
+    if (!pattern) throw new Error(`One or more parts of the template literal does not have a regex pattern: ${part._zod.node.kind}`);
+    const source = pattern.source;
+    const start = source.startsWith("^") ? 1 : 0;
+    const end = source.endsWith("$") ? source.length - 1 : source.length;
+    return source.slice(start, end);
   }
   return escapeRegex(String(part));
 }
 export function templateLiteral<const Parts extends readonly (string | number | bigint | boolean | null | SomeType)[]>(parts: Parts, params?: ErrorParam): $ZodType<string, string> {
-  return fromNode(node({ kind: "templateLiteral", pattern: new RegExp(`^(?:${parts.map(templatePattern).join("")})$`) }, { error: errorMap(params) }));
+  const pattern = new RegExp(`^${parts.map(templatePattern).join("")}$`);
+  return fromNode(node({ kind: "templateLiteral", pattern }, { error: errorMap(params) }));
 }
 
 export function codec<A extends SomeType, B extends SomeType>(inputSchema: A, outputSchema: B, handlers: {
@@ -828,13 +1055,21 @@ export function negative(params?: ErrorParam): $ZodCheck { return lt(0, params);
 export function nonpositive(params?: ErrorParam): $ZodCheck { return lte(0, params); }
 export function nonnegative(params?: ErrorParam): $ZodCheck { return gte(0, params); }
 export function multipleOf(value: number | bigint, params?: ErrorParam): $ZodCheck { return runtimeCheck({ c: "multiple_of", v: typeof value === "bigint" ? value.toString() : value }, params); }
-export function int(params?: ErrorParam): $ZodCheck<number> { return runtimeCheck({ c: "number_format", v: "safeint" }, params); }
-export function int32(params?: ErrorParam): $ZodCheck<number> { return runtimeCheck({ c: "number_format", v: "int32" }, params); }
-export function uint32(params?: ErrorParam): $ZodCheck<number> { return runtimeCheck({ c: "number_format", v: "uint32" }, params); }
-export function float32(params?: ErrorParam): $ZodCheck<number> { return runtimeCheck({ c: "number_format", v: "float32" }, params); }
-export function float64(params?: ErrorParam): $ZodCheck<number> { return runtimeCheck({ c: "number_format", v: "float64" }, params); }
-export function int64(params?: ErrorParam): $ZodCheck<bigint> { return runtimeCheck({ c: "bigint_format", v: "int64" }, params); }
-export function uint64(params?: ErrorParam): $ZodCheck<bigint> { return runtimeCheck({ c: "bigint_format", v: "uint64" }, params); }
+const intCheck = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "number_format", v: "safeint" }, params);
+const int32Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "number_format", v: "int32" }, params);
+const uint32Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "number_format", v: "uint32" }, params);
+const float32Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "number_format", v: "float32" }, params);
+const float64Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "number_format", v: "float64" }, params);
+const int64Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "bigint_format", v: "int64" }, params);
+const uint64Check = (params?: ErrorParam): $ZodCheck => runtimeCheck({ c: "bigint_format", v: "uint64" }, params);
+/** Format-checked number/bigint schemas (Zod: z.int() is z.number().int()). */
+export function int(params?: ErrorParam): $ZodType<number, number> { return number(params).check(intCheck(params)); }
+export function int32(params?: ErrorParam): $ZodType<number, number> { return number(params).check(int32Check(params)); }
+export function uint32(params?: ErrorParam): $ZodType<number, number> { return number(params).check(uint32Check(params)); }
+export function float32(params?: ErrorParam): $ZodType<number, number> { return number(params).check(float32Check(params)); }
+export function float64(params?: ErrorParam): $ZodType<number, number> { return number(params).check(float64Check(params)); }
+export function int64(params?: ErrorParam): $ZodType<bigint, bigint> { return bigint(params).check(int64Check(params)); }
+export function uint64(params?: ErrorParam): $ZodType<bigint, bigint> { return bigint(params).check(uint64Check(params)); }
 export function regex(value: RegExp, params?: ErrorParam): $ZodCheck<string> { return runtimeCheck({ c: "regex", src: value.source, flags: value.flags }, params); }
 export function lowercase(params?: ErrorParam): $ZodCheck<string> { return runtimeCheck({ c: "lowercase" }, params); }
 export function uppercase(params?: ErrorParam): $ZodCheck<string> { return runtimeCheck({ c: "uppercase" }, params); }
@@ -858,8 +1093,17 @@ export function uuid(params?: ErrorParam): ZodString { return formatted("uuid", 
 export function uuidv4(params?: ErrorParam): ZodString { return formatted("uuidv4", params); }
 export function uuidv6(params?: ErrorParam): ZodString { return formatted("uuidv6", params); }
 export function uuidv7(params?: ErrorParam): ZodString { return formatted("uuidv7", params); }
-export function url(params?: ErrorParam): ZodString { return formatted("url", params); }
-export function httpUrl(params?: ErrorParam): ZodString { return formatted("httpUrl", params); }
+function urlFormatParams(params: unknown): Record<string, unknown> | undefined {
+  if (!params || typeof params !== "object") return undefined;
+  const source = params as Readonly<Record<string, unknown>>;
+  const out: Record<string, unknown> = {};
+  if (source["hostname"] !== undefined) out["hostname"] = source["hostname"];
+  if (source["protocol"] !== undefined) out["protocol"] = source["protocol"];
+  if (source["normalize"] !== undefined) out["normalize"] = source["normalize"];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+export function url(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): ZodString { return formatted("url", params, urlFormatParams(params)); }
+export function httpUrl(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): ZodString { return formatted("httpUrl", params, urlFormatParams(params)); }
 export function hostname(params?: ErrorParam): ZodString { return formatted("hostname", params); }
 export function emoji(params?: ErrorParam): ZodString { return formatted("emoji", params); }
 export function nanoid(params?: ErrorParam): ZodString { return formatted("nanoid", params); }
@@ -923,27 +1167,66 @@ export function safeParseJson<T extends SomeType>(schema: T, value: Uint8Array |
 
 export const NEVER: Readonly<{ status: "aborted" }> = Object.freeze({ status: "aborted" });
 export const TimePrecision: Readonly<{ minute: -1; second: 0; millisecond: 3; microsecond: 6 }> = { minute: -1, second: 0, millisecond: 3, microsecond: 6 };
-export const regexes: Readonly<Record<string, RegExp>> = {};
+export const regexes: Readonly<Record<string, RegExp>> = REGEXES;
 export function json(params?: ErrorParam): SomeType {
-  const valid = (value: unknown): boolean => value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-    || Array.isArray(value) && value.every(valid)
-    || isObject(value) && Object.values(value).every(valid);
+  const valid = (value: unknown): boolean => {
+    if (value === null) return true;
+    if (typeof value === "string" || typeof value === "boolean") return true;
+    if (typeof value === "number") return !Number.isNaN(value);
+    if (Array.isArray(value)) return value.every(valid);
+    if (isObject(value)) {
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) return false;
+      return Object.values(value).every(valid);
+    }
+    return false;
+  };
   return custom<JSONType>(valid, params);
 }
+
+/** Issue-code constants mirroring Zod v4's `z.ZodIssueCode` enum (lowercase codes). */
+export const ZodIssueCode: Readonly<Record<string, string>> = {
+  invalid_type: "invalid_type",
+  too_big: "too_big",
+  too_small: "too_small",
+  invalid_format: "invalid_format",
+  not_multiple_of: "not_multiple_of",
+  unrecognized_keys: "unrecognized_keys",
+  invalid_union: "invalid_union",
+  invalid_key: "invalid_key",
+  invalid_element: "invalid_element",
+  invalid_value: "invalid_value",
+  custom: "custom",
+};
 
 export function setErrorMap(map: $ZodErrorMap): void { config({ customError: map }); }
 export function getErrorMap(): $ZodErrorMap | undefined { return config().customError; }
 
-export function describe<T extends SomeType>(schema: T, description: string): T {
-  const copy = schema.clone();
-  globalRegistry.add(copy, { description });
-  return copy;
+/** Check form: `z.describe(str)` attaches a description to whatever schema `.check()` builds. */
+export function describe(description: string): $ZodCheck {
+  const runtime = runtimeCheck({ c: "host_runtime", op: "check", fn: () => {} });
+  return {
+    _zod: {
+      ...runtime._zod,
+      attach: (target) => {
+        if (target instanceof $ZodType) globalRegistry.add(target, { description });
+      },
+    },
+  };
 }
-export function meta<T extends SomeType>(schema: T, data: $replace<GlobalMeta, T>): T {
-  const copy = schema.clone();
-  globalRegistry.add(copy, data);
-  return copy;
+/** Check form: `z.meta({...})` registers metadata on the schema `.check()` builds. */
+export function metaCheck(data: Record<string, unknown>): $ZodCheck {
+  const runtime = runtimeCheck({ c: "host_runtime", op: "check", fn: () => {} });
+  return {
+    _zod: {
+      ...runtime._zod,
+      attach: (target) => {
+        if (target instanceof $ZodType) globalRegistry.add(target, data);
+      },
+    },
+  };
 }
+export const meta_: typeof metaCheck = metaCheck;
 
 /** Wraps a schema so parsing always succeeds, yielding `true` when the inner
  * schema validates and `false` otherwise (mirrors Zod's `z.success`). */

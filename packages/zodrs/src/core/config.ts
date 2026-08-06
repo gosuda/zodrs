@@ -11,10 +11,10 @@ export interface $ZodConfig {
 
 declare global {
   // eslint-disable-next-line vars-on-top, no-var
-  var __zodrs_globalConfig: $ZodConfig | undefined;
+  var __zod_globalConfig: $ZodConfig | undefined;
 }
 
-export const globalConfig: $ZodConfig = (globalThis.__zodrs_globalConfig ??= {});
+export const globalConfig: $ZodConfig = (globalThis.__zod_globalConfig ??= {});
 
 export function config(newConfig?: Partial<$ZodConfig>): $ZodConfig {
   if (newConfig) Object.assign(globalConfig, newConfig);

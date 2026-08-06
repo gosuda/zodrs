@@ -7,6 +7,8 @@ export {
   enum_ as enum,
   function_ as function,
   instanceOf as instanceof,
+  catch_ as catch,
+  metaCheck as meta,
 } from "./schemas.js";
 
 export { ZodError, $ZodError, $ZodRealError, ZodRealError, defaultError, finalizeIssue } from "../core/errors.js";

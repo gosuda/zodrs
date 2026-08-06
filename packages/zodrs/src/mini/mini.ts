@@ -296,7 +296,7 @@ export class ZodMiniType<Output = unknown, Input = unknown> extends ClassicType<
   }
 
   override check(
-    ...values: readonly (ClassicCheck<Output> | RuntimeCheck | CheckFn | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>) | ZodMiniType)[]
+    ...values: readonly (ClassicCheck<Output> | RuntimeCheck | CheckFn | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>) | SomeType)[]
   ): this {
     const nextNode = cloneNode(this._zod.node, { checks: [...this._zod.node.checks, ...toRuntimeChecks(values)] });
     const nextDef: MiniDef = { ...internalsOf(this).def, checks: nextNode.checks };
@@ -305,7 +305,7 @@ export class ZodMiniType<Output = unknown, Input = unknown> extends ClassicType<
   }
 
   override with(
-    ...values: readonly (ClassicCheck<Output> | RuntimeCheck | CheckFn | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>) | ZodMiniType)[]
+    ...values: readonly (ClassicCheck<Output> | RuntimeCheck | CheckFn | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>) | SomeType)[]
   ): this {
     return this.check(...values);
   }
@@ -320,7 +320,7 @@ function toRuntimeChecks(values: readonly unknown[]): RuntimeCheck[] {
       const checkFn = value as CheckFn;
       const fn: HostFunction = (input, context) => checkFn({ value: input, issues: context.issues as $ZodIssue[] });
       out.push({ check: { c: "host_runtime", op: "check", fn } });
-    } else if (value instanceof ZodMiniType) {
+    } else if (value instanceof ZodMiniType || value instanceof ClassicType) {
       const schemaNode = value._zod.node;
       if (schemaNode.kind === "host" && schemaNode.inner === null) {
         out.push({ check: { c: "host_runtime", op: schemaNode.op, fn: schemaNode.fn }, error: schemaNode.error });
@@ -786,31 +786,31 @@ export const iso: {
 // ---------------------------------------------------------------------------
 
 export function int(params?: ErrorParam): ZodMiniNumberFormat {
-  const schemaNode = node({ kind: "number" }, { checks: [classicInt(params)._zod] });
+  const schemaNode = classicInt(params)._zod.node;
   return new ZodMiniNumberFormat({ type: "number", format: "safeint", checks: schemaNode.checks }, schemaNode);
 }
 export function int32(params?: ErrorParam): ZodMiniNumberFormat {
-  const schemaNode = node({ kind: "number" }, { checks: [classicInt32(params)._zod] });
+  const schemaNode = classicInt32(params)._zod.node;
   return new ZodMiniNumberFormat({ type: "number", format: "int32", checks: schemaNode.checks }, schemaNode);
 }
 export function uint32(params?: ErrorParam): ZodMiniNumberFormat {
-  const schemaNode = node({ kind: "number" }, { checks: [classicUint32(params)._zod] });
+  const schemaNode = classicUint32(params)._zod.node;
   return new ZodMiniNumberFormat({ type: "number", format: "uint32", checks: schemaNode.checks }, schemaNode);
 }
 export function float32(params?: ErrorParam): ZodMiniNumberFormat {
-  const schemaNode = node({ kind: "number" }, { checks: [classicFloat32(params)._zod] });
+  const schemaNode = classicFloat32(params)._zod.node;
   return new ZodMiniNumberFormat({ type: "number", format: "float32", checks: schemaNode.checks }, schemaNode);
 }
 export function float64(params?: ErrorParam): ZodMiniNumberFormat {
-  const schemaNode = node({ kind: "number" }, { checks: [classicFloat64(params)._zod] });
+  const schemaNode = classicFloat64(params)._zod.node;
   return new ZodMiniNumberFormat({ type: "number", format: "float64", checks: schemaNode.checks }, schemaNode);
 }
 export function int64(params?: ErrorParam): ZodMiniBigIntFormat {
-  const schemaNode = node({ kind: "bigint" }, { checks: [classicInt64(params)._zod] });
+  const schemaNode = classicInt64(params)._zod.node;
   return new ZodMiniBigIntFormat({ type: "bigint", format: "int64", checks: schemaNode.checks }, schemaNode);
 }
 export function uint64(params?: ErrorParam): ZodMiniBigIntFormat {
-  const schemaNode = node({ kind: "bigint" }, { checks: [classicUint64(params)._zod] });
+  const schemaNode = classicUint64(params)._zod.node;
   return new ZodMiniBigIntFormat({ type: "bigint", format: "uint64", checks: schemaNode.checks }, schemaNode);
 }
 
@@ -1146,7 +1146,7 @@ export function instanceOf<T extends abstract new (...args: never[]) => object>(
 }
 
 export function _function(params?: ErrorParam): ZodMiniFunction {
-  return new ZodMiniFunction({ type: "function", error: errorMap(params) }, classicFunction(params)._zod.node);
+  return new ZodMiniFunction({ type: "function", error: errorMap(params) }, classicFunction(undefined, params)._zod.node);
 }
 
 export function json(params?: ErrorParam): ZodMiniJSONSchema {

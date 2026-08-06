@@ -1,8 +1,11 @@
 import type { FormatId } from "./nodes.js";
 import { escapeRegex } from "./util.js";
 
-// URL is a WHATWG global on Node, browsers, and wasip1; typed locally since the build lib excludes DOM/Node types.
-declare const URL: { new (input: string): { readonly protocol: string } };
+// URL/atob are WHATWG globals on Node, browsers, and wasip1; typed locally since the build lib excludes DOM/Node types.
+declare const URL: {
+  new (input: string): { readonly protocol: string; readonly hostname: string; readonly href: string };
+};
+declare const atob: (data: string) => string;
 
 const PATTERNS: Readonly<Record<string, RegExp>> = {
   cuid: /^[cC][0-9a-z]{6,}$/,
@@ -30,6 +33,8 @@ const PATTERNS: Readonly<Record<string, RegExp>> = {
   base64: /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/,
   base64url: /^[A-Za-z0-9_-]*$/,
   hostname: /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/,
+  domain: /^([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/,
+  httpProtocol: /^https?$/,
   e164: /^\+[1-9]\d{6,14}$/,
   lowercase: /^[^A-Z]*$/,
   uppercase: /^[^a-z]*$/,
@@ -49,6 +54,13 @@ function timeSource(params: Readonly<Record<string, unknown>>): string {
   return `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
 }
 
+function datetimeRegex(params: Readonly<Record<string, unknown>>): RegExp {
+  const opts = ["Z"];
+  if (params["local"] === true) opts.push("");
+  if (params["offset"] === true) opts.push("([+-](?:[01]\\d|2[0-3]):[0-5]\\d)");
+  return new RegExp(`^${DATE.source.slice(1, -1)}T(?:${timeSource(params)}(?:${opts.join("|")}))$`);
+}
+
 function hashPattern(format: string, encoding: string): RegExp | undefined {
   const lengths: Readonly<Record<string, readonly [number, number, string]>> = {
     md5: [32, 22, "=="], sha1: [40, 27, "="], sha256: [64, 43, "="], sha384: [96, 64, ""], sha512: [128, 86, "=="],
@@ -61,27 +73,110 @@ function hashPattern(format: string, encoding: string): RegExp | undefined {
   return new RegExp(`^[A-Za-z0-9+/]{${b64}}${escapeRegex(padding)}$`);
 }
 
-export function testFormat(format: FormatId, input: string, params: Readonly<Record<string, unknown>> = {}): boolean {
-  if (format === "url" || format === "httpUrl") {
-    try {
-      const parsed = new URL(input);
-      return format === "url" || parsed.protocol === "http:" || parsed.protocol === "https:";
-    } catch {
-      return false;
+function isValidBase64(data: string): boolean {
+  if (data === "") return true;
+  // atob ignores whitespace, so reject it up front.
+  if (/\s/.test(data)) return false;
+  if (data.length % 4 !== 0) return false;
+  try {
+    atob(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidBase64URL(data: string): boolean {
+  if (!PATTERNS["base64url"]?.test(data)) return false;
+  const base64 = data.replace(/[-_]/g, (c) => (c === "-" ? "+" : "/"));
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  return isValidBase64(padded);
+}
+
+function isValidJWT(token: string, algorithm: string | null = null): boolean {
+  try {
+    const tokensParts = token.split(".");
+    if (tokensParts.length !== 3) return false;
+    const [header] = tokensParts;
+    if (!header) return false;
+    const parsedHeader: unknown = JSON.parse(atob(header));
+    if (typeof parsedHeader !== "object" || parsedHeader === null) return false;
+    if ("typ" in parsedHeader && (parsedHeader as Record<string, unknown>)["typ"] !== "JWT") return false;
+    if (!(parsedHeader as Record<string, unknown>)["alg"]) return false;
+    if (algorithm && (!("alg" in parsedHeader) || (parsedHeader as Record<string, unknown>)["alg"] !== algorithm)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface UrlVerdict {
+  readonly ok: boolean;
+  readonly value: string;
+  readonly note?: string;
+  readonly pattern?: string;
+}
+
+/** Zod v4.4 `$ZodURL` semantics: trims, validates via WHATWG URL, optional
+ * protocol/hostname constraints, rewrites to trimmed or normalized href. */
+export function checkUrl(input: string, params: Readonly<Record<string, unknown>> = {}, httpOnly = false): UrlVerdict {
+  const normalize = params["normalize"] === true;
+  const protocolSource = httpOnly
+    ? "^https?$"
+    : typeof params["protocol"] === "string"
+      ? (params["protocol"] as string)
+      : undefined;
+  const hostnameSource = typeof params["hostname"] === "string" ? (params["hostname"] as string) : undefined;
+  const trimmed = input.trim();
+
+  // When normalize is off, require :// for http/https URLs
+  if (!normalize && protocolSource === "^https?$") {
+    if (!/^https?:\/\//i.test(trimmed)) {
+      return { ok: false, value: trimmed, note: "Invalid URL format" };
     }
   }
-  if (format === "jwt") return input.split(".").length === 3;
+
+  let url: InstanceType<typeof URL>;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return { ok: false, value: trimmed };
+  }
+
+  if (hostnameSource !== undefined) {
+    const hostname = new RegExp(hostnameSource);
+    if (!hostname.test(url.hostname)) {
+      return { ok: false, value: trimmed, note: "Invalid hostname", pattern: hostname.source };
+    }
+  }
+
+  if (protocolSource !== undefined) {
+    const protocol = new RegExp(protocolSource);
+    const candidate = url.protocol.endsWith(":") ? url.protocol.slice(0, -1) : url.protocol;
+    if (!protocol.test(candidate)) {
+      return { ok: false, value: trimmed, note: "Invalid protocol", pattern: protocol.source };
+    }
+  }
+
+  return { ok: true, value: normalize ? url.href : trimmed };
+}
+
+export function testFormat(format: FormatId, input: string, params: Readonly<Record<string, unknown>> = {}): boolean {
+  if (format === "url" || format === "httpUrl") {
+    return checkUrl(input, params, format === "httpUrl").ok;
+  }
+  if (format === "jwt") {
+    const alg = typeof params["alg"] === "string" ? params["alg"] : null;
+    return isValidJWT(input, alg);
+  }
+  if (format === "base64") return isValidBase64(input);
+  if (format === "base64url") return isValidBase64URL(input);
   if (format === "date") return DATE.test(input);
   if (format === "time") {
     return new RegExp(`^${timeSource(params)}$`).test(input);
   }
   if (format === "datetime") {
-    const [date, time] = input.split("T");
-    if (!date || !time || !DATE.test(date)) return false;
-    const opts = ["Z"];
-    if (params["local"] === true) opts.push("");
-    if (params["offset"] === true) opts.push("(?:[+-](?:[01]\\d|2[0-3]):[0-5]\\d)");
-    return new RegExp(`^${timeSource(params)}(?:${opts.join("|")})$`).test(time);
+    return datetimeRegex(params).test(input);
   }
   if (format === "mac") {
     const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";
@@ -93,3 +188,47 @@ export function testFormat(format: FormatId, input: string, params: Readonly<Rec
   }
   return PATTERNS[format]?.test(input) ?? false;
 }
+
+/** The regex a format check contributes to the schema's `_zod.pattern` bag,
+ * or undefined for formats validated procedurally (url, jwt, base64* still
+ * contribute their shape regex, matching Zod's `def.pattern ??=`). */
+export function patternForFormat(format: FormatId, params: Readonly<Record<string, unknown>> = {}): RegExp | undefined {
+  switch (format) {
+    case "url":
+    case "httpUrl":
+    case "jwt":
+      return undefined;
+    case "base64":
+      return PATTERNS["base64"];
+    case "base64url":
+      return PATTERNS["base64url"];
+    case "date":
+      return DATE;
+    case "time":
+      return new RegExp(`^${timeSource(params)}$`);
+    case "datetime":
+      return datetimeRegex(params);
+    case "mac": {
+      const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";
+      return new RegExp(`^(?:[0-9A-F]{2}${escapeRegex(delimiter)}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapeRegex(delimiter)}){5}[0-9a-f]{2}$`);
+    }
+    case "md5":
+    case "sha1":
+    case "sha256":
+    case "sha384":
+    case "sha512": {
+      const encoding = typeof params["enc"] === "string" ? params["enc"] : "hex";
+      return hashPattern(format, encoding);
+    }
+    default:
+      return PATTERNS[format];
+  }
+}
+
+/** Zod's exported `regexes` table (classic surface mirrors these names). */
+export const REGEXES: Readonly<Record<string, RegExp>> = {
+  ...PATTERNS,
+  uuid4: PATTERNS["uuidv4"] as RegExp,
+  uuid6: PATTERNS["uuidv6"] as RegExp,
+  uuid7: PATTERNS["uuidv7"] as RegExp,
+};

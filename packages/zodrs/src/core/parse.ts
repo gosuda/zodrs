@@ -14,6 +14,18 @@ export interface RuntimeSchema<Output = unknown, Input = unknown> {
     readonly validateAsync: AsyncValidator;
     readonly plan: CompiledPlan;
     nativeHandle: number | null;
+    /** Finite accepted value set (enum/literal/derived), else undefined. */
+    readonly values?: ReadonlySet<unknown> | undefined;
+    /** Per-property accepted value sets, else undefined. */
+    readonly propValues?: Readonly<Record<string, ReadonlySet<unknown>>> | undefined;
+    /** "optional" when the input may be absent. */
+    readonly optin?: "optional" | undefined;
+    /** "optional" when the output may be absent. */
+    readonly optout?: "optional" | undefined;
+    /** Implied validation pattern, else undefined. */
+    readonly pattern?: RegExp | undefined;
+    /** Resolved inner schema for wrappers/lazy, else undefined. */
+    readonly innerType?: RuntimeSchema | undefined;
   };
 }
 

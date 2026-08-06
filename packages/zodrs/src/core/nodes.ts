@@ -79,6 +79,10 @@ export interface RuntimeCheck {
   readonly abort?: boolean | undefined;
   readonly params?: Record<string, unknown> | undefined;
   readonly path?: PropertyKey[] | undefined;
+  /** Gate: the check runs only when this returns true (bypasses abort short-circuit). */
+  readonly when?: ((payload: { value: unknown; issues: $ZodRawIssue[] }) => boolean) | undefined;
+  /** Side effect applied to the schema a `.check()` call produces (describe/meta). */
+  readonly attach?: ((target: unknown) => void) | undefined;
 }
 
 export interface NodeCommon {
@@ -90,6 +94,9 @@ export interface NodeCommon {
 export interface PrimitiveNode extends NodeCommon {
   readonly kind: "string" | "number" | "bigint" | "boolean" | "date" | "file" | "null" | "undefined" | "any" | "unknown" | "never" | "void" | "symbol" | "nan" | "function";
   readonly coerce?: boolean;
+  /** function schemas: argument tuple and return schemas for call wrapping. */
+  readonly input?: SchemaNode;
+  readonly output?: SchemaNode;
 }
 export interface LiteralNode extends NodeCommon { readonly kind: "literal"; readonly values: readonly Primitive[] }
 export interface EnumNode extends NodeCommon { readonly kind: "enum"; readonly values: readonly (string | number)[] }
@@ -101,12 +108,15 @@ export interface ObjectNode extends NodeCommon {
 }
 export interface ArrayNode extends NodeCommon { readonly kind: "array"; readonly element: SchemaNode }
 export interface TupleNode extends NodeCommon { readonly kind: "tuple"; readonly items: readonly SchemaNode[]; readonly rest: SchemaNode | null }
-export interface UnionNode extends NodeCommon { readonly kind: "union"; readonly options: readonly SchemaNode[] }
+export interface UnionNode extends NodeCommon { readonly kind: "union"; readonly options: readonly SchemaNode[]; readonly inclusive?: false }
 export interface DiscriminatedUnionNode extends NodeCommon {
   readonly kind: "discunion";
   readonly key: string;
   readonly options: readonly SchemaNode[];
   readonly map: ReadonlyMap<Primitive, SchemaNode>;
+  readonly unionFallback?: boolean;
+  /** Option index lacking discriminator values; parse must throw when set. */
+  readonly invalidOptionIndex?: number;
 }
 export interface IntersectionNode extends NodeCommon { readonly kind: "intersection"; readonly left: SchemaNode; readonly right: SchemaNode }
 export interface RecordNode extends NodeCommon {
