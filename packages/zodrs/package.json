@@ -1,0 +1,70 @@
+{
+  "name": "zodrs",
+  "version": "0.1.0",
+  "description": "TypeScript-first schema validation with static type inference, backed by a Rust core. Drop-in replacement for zod v4.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/classic/index.js",
+  "types": "./dist/classic/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/classic/index.d.ts",
+      "import": "./dist/classic/index.js"
+    },
+    "./mini": {
+      "types": "./dist/mini/index.d.ts",
+      "import": "./dist/mini/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./locales": {
+      "types": "./dist/locales/index.d.ts",
+      "import": "./dist/locales/index.js"
+    },
+    "./v4": {
+      "types": "./dist/classic/index.d.ts",
+      "import": "./dist/classic/index.js"
+    },
+    "./v4/core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./v4/locales": {
+      "types": "./dist/locales/index.d.ts",
+      "import": "./dist/locales/index.js"
+    },
+    "./v4-mini": {
+      "types": "./dist/mini/index.d.ts",
+      "import": "./dist/mini/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "native",
+    "wasm"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "napi": {
+    "binaryName": "zodrs",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "wasm32-wasip1-threads"
+    ]
+  },
+  "engines": {
+    "node": ">=20.17"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@zodrs/conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:differential": "vitest run --project differential"
+  },
+  "devDependencies": {
+    "zodrs": "workspace:*"
+  }
+}

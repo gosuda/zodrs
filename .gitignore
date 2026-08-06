@@ -1,0 +1,39 @@
+# === RUST ===
+target/
+**/*.rs.bk
+*.pdb
+
+# === NODE ===
+node_modules/
+dist/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.pnpm-store/
+*.tgz
+
+# === TYPESCRIPT ===
+*.tsbuildinfo
+
+# === NAPI ===
+*.node
+*.wasm
+packages/zodrs/native/
+packages/zodrs/wasm/
+
+# === AI TOOLING ===
+.agent-tasks/
+.cursor/
+.claude/
+omp-sessions/
+
+# === IDE / EDITOR ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === EMPIRICAL ===
+# none beyond template coverage

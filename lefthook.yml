@@ -1,0 +1,15 @@
+pre-commit:
+  parallel: true
+  commands:
+    cargo-fmt:
+      run: cargo fmt --all -- --check
+    cargo-clippy:
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    cargo-test:
+      run: cargo nextest run --workspace
+    tsc:
+      run: pnpm -C packages/zodrs build
+    oxlint:
+      run: pnpm exec oxlint --config .oxlintrc.json packages/
+    conformance:
+      run: pnpm -C packages/conformance test

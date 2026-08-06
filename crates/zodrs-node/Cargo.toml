@@ -1,0 +1,36 @@
+[package]
+name = "zodrs-node"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# napi-derive macros expand to unsafe blocks; this crate is the factored-out
+# unsafe surface. Cargo cannot override workspace lints, so spell them out
+# with unsafe_code relaxed.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi.workspace = true
+napi-derive.workspace = true
+zodrs = { path = "../zodrs" }
+slab.workspace = true
+
+[build-dependencies]
+napi-build.workspace = true

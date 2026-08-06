@@ -1,0 +1,11 @@
+{
+  "name": "@zodrs/bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "tsx ./index.ts"
+  },
+  "devDependencies": {
+    "mitata": "1.0.34"
+  }
+}
