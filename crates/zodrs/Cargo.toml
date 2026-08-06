@@ -1,0 +1,24 @@
+[package]
+name = "zodrs"
+description = "Plan-based JSON validation engine: Zod v4-compatible schemas compiled to a flat arena, validated over raw JSON bytes in one pass"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+keywords = ["validation", "schema", "json", "zod"]
+categories = ["parser-implementations", "data-structures"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sonic-rs.workspace = true
+regex.workspace = true
+jiff.workspace = true
+memchr.workspace = true
+smallvec.workspace = true
+compact_str.workspace = true
+
+[dev-dependencies]
+rstest = "0.25"

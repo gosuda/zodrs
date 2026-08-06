@@ -1,3 +1,3 @@
-//! napi bindings over `zodrs`. Exposes exactly four functions:
-//! `compile`, `dispose`, `validate_json`, `to_json_schema`.
-//! Plans live in a `RwLock<Slab<Plan>>` keyed by `u32`.
+//! napi bindings over `zodrs`. Exposes exactly three functions:
+//! `compile`, `dispose`, `validate_json`.
+//! Plans live in an `RwLock<Slab<Plan>>` keyed by `u32`.
