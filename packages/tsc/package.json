@@ -1,0 +1,18 @@
+{
+  "name": "@zodrs/tsc-bench",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT",
+  "scripts": {
+    "generate": "tsx generate.ts",
+    "bench": "tsx bench.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.0",
+    "typescript": "7.0.2",
+    "zodrs": "workspace:*",
+    "zod4": "npm:zod@4.4.3"
+  }
+}
