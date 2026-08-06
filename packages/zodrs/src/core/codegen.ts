@@ -96,7 +96,7 @@ function compileNode(node: SchemaNode, cache: Map<SchemaNode, CompiledNode>): Co
           runtime.keyIssue(context, node, path, extras, input);
           failed = true;
         }
-        if (failed) return runtime.FAIL;
+        if (failed) { if (node.checks.length > 0) runtime.applyChecks(node, input, context, path); return runtime.FAIL; }
         return node.checks.length === 0 ? output : runtime.applyChecks(node, output, context, path);
       };
       break;
@@ -114,7 +114,7 @@ function compileNode(node: SchemaNode, cache: Map<SchemaNode, CompiledNode>): Co
           const value = element(input[index], context, [...path, index]);
           if (value === runtime.FAIL) failed = true; else output.push(value);
         }
-        if (failed) return runtime.FAIL;
+        if (failed) { if (node.checks.length > 0) runtime.applyChecks(node, input, context, path); return runtime.FAIL; }
         return node.checks.length === 0 ? output : runtime.applyChecks(node, output, context, path);
       };
       break;

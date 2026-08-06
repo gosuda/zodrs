@@ -10,6 +10,21 @@ export type MaybeAsync<T> = T | Promise<T>;
 export const FAIL: unique symbol = Symbol.for("zodrs.fail");
 export type FAIL = typeof FAIL;
 
+/** Bounds for the fixed-width/safe integer and float number formats. */
+export const NUMBER_FORMAT_RANGES: Readonly<Record<"safeint" | "int32" | "uint32" | "float32" | "float64", readonly [number, number]>> = {
+  safeint: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  int32: [-2147483648, 2147483647],
+  uint32: [0, 4294967295],
+  float32: [-3.4028234663852886e38, 3.4028234663852886e38],
+  float64: [-Number.MAX_VALUE, Number.MAX_VALUE],
+};
+
+/** Bounds for the fixed-width bigint formats. */
+export const BIGINT_FORMAT_RANGES: Readonly<Record<"int64" | "uint64", readonly [bigint, bigint]>> = {
+  int64: [BigInt("-9223372036854775808"), BigInt("9223372036854775807")],
+  uint64: [BigInt(0), BigInt("18446744073709551615")],
+};
+
 /** Runtime type label matching Zod's `parsedType`. */
 export function parsedType(data: unknown): string {
   switch (typeof data) {
@@ -61,6 +76,17 @@ export function isPlainObject(data: unknown): data is Record<string, unknown> {
   if (!isObject(data)) return false;
   const proto: unknown = Object.getPrototypeOf(data);
   return proto === Object.prototype || proto === null;
+}
+
+/** Zod's `shallowClone`: a fresh top-level copy of plain objects, arrays, Maps,
+ * and Sets so a default value cannot be mutated across parses. Other values
+ * (primitives, class instances) pass through unchanged. */
+export function shallowClone<T>(value: T): T {
+  if (isPlainObject(value)) return { ...value } as T;
+  if (Array.isArray(value)) return [...value] as T;
+  if (value instanceof Map) return new Map(value) as T;
+  if (value instanceof Set) return new Set(value) as T;
+  return value;
 }
 
 /** Lazily-computed, memoized getter. */

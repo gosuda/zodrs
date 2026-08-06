@@ -77,6 +77,8 @@ export interface RuntimeCheck {
   readonly check: WireCheck | PropertyBuildCheck | HostRuntimeCheck;
   readonly error?: $ZodErrorMap | undefined;
   readonly abort?: boolean | undefined;
+  readonly params?: Record<string, unknown> | undefined;
+  readonly path?: PropertyKey[] | undefined;
 }
 
 export interface NodeCommon {
@@ -86,7 +88,7 @@ export interface NodeCommon {
 }
 
 export interface PrimitiveNode extends NodeCommon {
-  readonly kind: "string" | "number" | "bigint" | "boolean" | "date" | "file" | "null" | "undefined" | "any" | "unknown" | "never" | "void" | "symbol" | "nan";
+  readonly kind: "string" | "number" | "bigint" | "boolean" | "date" | "file" | "null" | "undefined" | "any" | "unknown" | "never" | "void" | "symbol" | "nan" | "function";
   readonly coerce?: boolean;
 }
 export interface LiteralNode extends NodeCommon { readonly kind: "literal"; readonly values: readonly Primitive[] }
@@ -121,7 +123,7 @@ export interface FallbackNode extends NodeCommon {
   readonly value: unknown | DynamicValue;
   readonly dynamic: boolean;
 }
-export interface PipeNode extends NodeCommon { readonly kind: "pipe"; readonly a: SchemaNode; readonly b: SchemaNode }
+export interface PipeNode extends NodeCommon { readonly kind: "pipe"; readonly a: SchemaNode; readonly b: SchemaNode; readonly codec?: boolean }
 export interface TemplateLiteralNode extends NodeCommon { readonly kind: "templateLiteral"; readonly pattern: RegExp }
 export interface HostNode extends NodeCommon { readonly kind: "host"; readonly inner: SchemaNode | null; readonly fn: HostFunction; readonly op: HostOperation }
 

@@ -1,4 +1,6 @@
 import type { $ZodConfig } from "./config.js";
+import { flattenError, formatError } from "./error-utils.js";
+import type { $ZodFlattenedError, $ZodFormattedError } from "./error-utils.js";
 import { captureStackTrace, joinValues, jsonStringifyReplacer, parsedType, stringifyPrimitive } from "./util.js";
 import type { Primitive } from "./util.js";
 
@@ -229,12 +231,28 @@ export class ZodError<T = unknown> extends Error implements $ZodError<T> {
     this.message = JSON.stringify(this.issues, jsonStringifyReplacer, 2);
   }
 
+  format(): $ZodFormattedError<T>;
+  format<U>(mapper: (issue: $ZodIssue) => U): $ZodFormattedError<T, U>;
+  format<U>(mapper?: (issue: $ZodIssue) => U): $ZodFormattedError<T, U> {
+    return formatError(this, mapper as (issue: $ZodIssue) => U);
+  }
+
+  flatten(): $ZodFlattenedError<T>;
+  flatten<U>(mapper: (issue: $ZodIssue) => U): $ZodFlattenedError<T, U>;
+  flatten<U>(mapper?: (issue: $ZodIssue) => U): $ZodFlattenedError<T, U> {
+    return flattenError(this, mapper as (issue: $ZodIssue) => U);
+  }
+
   override toString(): string {
     return this.message;
   }
 }
 
+// `$ZodError` (the core class value), `$ZodRealError`, and `ZodRealError` are all
+// the one `ZodError` class; the aliases mirror Zod's export surface for instanceof.
+export const $ZodError: typeof ZodError = ZodError;
 export const $ZodRealError: typeof ZodError = ZodError;
+export const ZodRealError: typeof ZodError = ZodError;
 
 function unwrapMessage(value: string | { message: string } | undefined | null): string | undefined {
   return typeof value === "string" ? value : value?.message;
@@ -322,7 +340,6 @@ export function finalizeIssue(
     ?? unwrapMessage(context?.error?.(issue))
     ?? unwrapMessage(global.customError?.(issue))
     ?? unwrapMessage(global.localeError?.(issue))
-    ?? unwrapMessage(defaultError(issue))
     ?? "Invalid input";
   const { inst: _inst, continue: _continue, input, ...rest } = issue;
   const finalized = { ...rest, path: rest.path ?? [], message };

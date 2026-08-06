@@ -74,6 +74,12 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
     case "symbol":
     case "nan":
       return { k: schema.kind };
+    case "function": {
+      // Functions are host-only: they cannot cross into Rust, so emit a host
+      // node that poisons JSON eligibility while the TS backends validate typeof.
+      state.hostFns.push(() => true);
+      return { k: "host", inner: null, fn: state.hostFns.length - 1 };
+    }
     case "literal":
       return { k: "literal", values: schema.values.map(normalizeLiteral) };
     case "enum":

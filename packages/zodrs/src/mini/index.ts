@@ -1,2 +1,3 @@
-/** zodrs mini surface. Implementation lands per plan steps 5-6. */
-export {};
+/** zodrs mini surface: functional projection over the shared core. */
+export * from "./mini.js";
+export * as z from "./mini.js";
