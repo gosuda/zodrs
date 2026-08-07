@@ -1,6 +1,6 @@
 {
   "name": "zodrs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript-first schema validation with static type inference, backed by a Rust core. Drop-in replacement for zod v4.",
   "license": "MIT",
   "type": "module",
@@ -59,7 +59,12 @@
     "dist",
     "dist-cjs",
     "native",
-    "wasm"
+    "wasm",
+    "!dist/**/*.test.*",
+    "!dist-cjs/**/*.test.*",
+    "!wasm/node_modules",
+    "!wasm/package-lock.json",
+    "!wasm/*.debug.wasm"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
