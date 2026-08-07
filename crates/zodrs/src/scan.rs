@@ -568,12 +568,13 @@ impl<'a> Scanner<'a> {
             return false;
         };
         let compiled = &self.dispatch(id).checks;
+        let s_len = if s.is_ascii() { s.len() } else { utf16_len(s) };
         for (ci, check) in checks.iter().enumerate() {
             let ok = match check {
-                Check::MinLength { v } => utf16_len(s) >= *v as usize,
-                Check::MaxLength { v } => utf16_len(s) <= *v as usize,
+                Check::MinLength { v } => s_len >= *v as usize,
+                Check::MaxLength { v } => s_len <= *v as usize,
                 Check::Length { v } => {
-                    (utf16_len(s) as f64).partial_cmp(v) == Some(std::cmp::Ordering::Equal)
+                    (s_len as f64).partial_cmp(v) == Some(std::cmp::Ordering::Equal)
                 }
                 Check::StartsWith { v } => s.starts_with(v),
                 Check::EndsWith { v } => s.ends_with(v),
@@ -605,6 +606,9 @@ impl<'a> Scanner<'a> {
             };
             if !ok {
                 return false;
+            }
+            if self.dirty_hint {
+                return true;
             }
         }
         true
@@ -650,6 +654,9 @@ impl<'a> Scanner<'a> {
     /// Field-value dispatch for object properties: leaf kinds validate
     /// inline without a recursive `value()` call; containers recurse.
     fn field(&mut self, id: NodeId) -> bool {
+        if self.dirty_hint {
+            return true;
+        }
         match self.node(id) {
             PlanNode::String { checks, coerce } => {
                 if *coerce {
@@ -723,6 +730,10 @@ impl<'a> Scanner<'a> {
         } else {
             'entries: loop {
                 self.ws();
+                if self.dirty_hint {
+                    self.depth -= 1;
+                    return true;
+                }
                 let Some(k) = self.key_token() else {
                     // Escaped or malformed key: the DOM walk decides.
                     self.dirty_hint = true;
@@ -818,6 +829,9 @@ impl<'a> Scanner<'a> {
         } else {
             loop {
                 self.ws();
+                if self.dirty_hint {
+                    return true;
+                }
                 if !self.value(element) {
                     return false;
                 }

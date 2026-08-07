@@ -153,20 +153,13 @@ impl ObjectDispatch {
     pub fn find_bytes(&self, kb: &[u8]) -> Option<usize> {
         if kb.len() <= 8 {
             let w = pack_key(kb);
-            for kw in &self.words {
-                if kw.len == kb.len() && kw.word == w {
-                    return Some(kw.schema_i);
-                }
-            }
-            None
+            let i = self.words.binary_search_by(|kw| {
+                kw.len.cmp(&kb.len()).then_with(|| kw.word.cmp(&w))
+            }).ok()?;
+            Some(self.words[i].schema_i)
         } else {
-            for (candidate, schema_i) in &self.long {
-                let cb = candidate.as_bytes();
-                if cb.len() == kb.len() && cb == kb {
-                    return Some(*schema_i);
-                }
-            }
-            None
+            let i = self.long.binary_search_by(|(k, _)| k.as_bytes().cmp(kb)).ok()?;
+            Some(self.long[i].1)
         }
     }
 }
@@ -268,6 +261,8 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                         long.push((key.clone(), schema_i));
                     }
                 }
+                words.sort_by(|a, b| a.len.cmp(&b.len).then(a.word.cmp(&b.word)));
+                long.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
                 d.object = Some(ObjectDispatch { words, long });
             }
             PlanNode::DiscUnion { map, .. } => {
