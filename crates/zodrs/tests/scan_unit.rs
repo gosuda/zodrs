@@ -161,3 +161,90 @@ fn defer_depth_129() {
     let input = format!("{}1{}", iter::repeat_n('[', depth).collect::<String>(), iter::repeat_n(']', depth).collect::<String>());
     assert_eq!(scan(&plan, input.as_bytes()), Scan::Defer);
 }
+
+#[test]
+fn clean_int64_max() {
+    let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"int64"}]}]"#;
+    assert_eq!(scan(plan, b"9223372036854775807"), Scan::Clean);
+}
+
+#[test]
+fn defer_int64_over() {
+    let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"int64"}]}]"#;
+    // 1e19 is clearly > int64 max (9.22e18) in f64, unlike 9223372036854775808 which rounds to max
+    assert_eq!(scan(plan, b"1e19"), Scan::Defer);
+}
+
+#[test]
+fn clean_uint64_max() {
+    let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
+    // 2^64 - 1 = 18446744073709551615; scanner uses f64 bounds so this probes
+    // the 19-digit parse path and the lossy 2^64 boundary.
+    assert_eq!(scan(plan, b"18446744073709551615"), Scan::Clean);
+}
+
+#[test]
+fn defer_uint64_over() {
+    let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
+    // 2e19 is clearly > uint64 max (1.84e19) in f64
+    assert_eq!(scan(plan, b"2e19"), Scan::Defer);
+}
+
+#[test]
+fn defer_uint64_negative() {
+    let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
+    assert_eq!(scan(plan, b"-1"), Scan::Defer);
+}
+
+#[test]
+fn clean_float32_max() {
+    let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float32"}]}]"#;
+    assert_eq!(scan(plan, b"3.4028234663852886e38"), Scan::Clean);
+}
+
+#[test]
+fn defer_float32_over() {
+    let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float32"}]}]"#;
+    assert_eq!(scan(plan, b"6e38"), Scan::Defer);
+}
+
+#[test]
+fn clean_float64_max() {
+    let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float64"}]}]"#;
+    // 1.7976931348623157e308 is near f64::MAX; any finite JSON number is Clean
+    // for float64, but this pins the scanner does not spuriously Defer.
+    assert_eq!(scan(plan, b"1.7976931348623157e308"), Scan::Clean);
+}
+
+#[test]
+fn clean_catchall_unknown_string() {
+    // Object with catchall string: unknown keys validated via catchall stay Clean
+    let plan = r#"[
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
+        {"k":"number","checks":[]},
+        {"k":"string","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1,"b":"hello"}"#), Scan::Clean);
+}
+
+#[test]
+fn defer_catchall_unknown_dirty() {
+    // Same catchall but with an overwrite check; unknown key value needing
+    // trim rewrites -> dirty_hint -> Defer, distinct from strip/passthrough.
+    let plan = r#"[
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
+        {"k":"number","checks":[]},
+        {"k":"string","checks":[{"c":"overwrite","v":"trim","op":"trim"}]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1,"b":"  hello  "}"#), Scan::Defer);
+}
+
+#[test]
+fn defer_strict_unknown_key() {
+    let plan = r#"[
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
+        {"k":"number","checks":[]}
+    ]"#;
+    // Strict mode unknown key is a hard failure -> Defer (not dirty write but still not Clean)
+    assert_eq!(scan(plan, br#"{"a":1,"b":2}"#), Scan::Defer);
+}

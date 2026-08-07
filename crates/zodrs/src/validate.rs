@@ -314,21 +314,22 @@ impl<'p> Validator<'p> {
                 };
                 // Collapse duplicates to last-wins (first position kept) on
                 // the stack; any collapse means the input was not canonical.
-                let mut entries: SmallVec<[(&str, &Value); 16]> = SmallVec::new();
+                let mut order: Vec<&str> = Vec::with_capacity(obj.len());
+                let mut last: HashMap<&str, &Value> = HashMap::with_capacity(obj.len());
                 let mut collapsed = false;
                 for (k, v) in obj {
-                    if let Some(slot) = entries.iter_mut().find(|(ek, _)| *ek == k) {
-                        slot.1 = v;
-                        collapsed = true;
+                    if last.insert(k, v).is_none() {
+                        order.push(k);
                     } else {
-                        entries.push((k, v));
+                        collapsed = true;
                     }
                 }
                 if collapsed {
                     self.dirty = true;
                 }
                 let string_key = matches!(self.node(key_id), PlanNode::String { .. });
-                for (k, entry) in entries {
+                for k in order {
+                    let entry = last[k];
                     // Canonical records skip `__proto__` keys entirely: never
                     // validated, never retained (the TS output builder's
                     // plain-object assignment would target the prototype).

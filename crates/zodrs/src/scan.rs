@@ -1091,9 +1091,24 @@ impl<'a> Scanner<'a> {
                 }
                 self.i += 1;
                 self.ws();
-                if k == b"__proto__" || entries.contains(&k) {
-                    // Dropped or collapsed keys rewrite the input: the record
-                    // validates dirty.
+                if k == b"__proto__" {
+                    // Dropped key rewrites the input: the record validates dirty.
+                    self.dirty_hint = true;
+                    self.depth -= 1;
+                    return true;
+                }
+                if entries.contains(&k) {
+                    // Duplicate key collapsed to last-wins: validates dirty.
+                    self.dirty_hint = true;
+                    self.depth -= 1;
+                    return true;
+                }
+                // Bound the quadratic duplicate check. Beyond 128 entries the
+                // scan would cost O(n^2) on its zero-alloc hot path (see
+                // object() which already defers when keys.len() > 128). Large
+                // clean records defer to the DOM walk, which collapses via
+                // HashMap O(n) and remains correct.
+                if entries.len() >= 128 {
                     self.dirty_hint = true;
                     self.depth -= 1;
                     return true;
