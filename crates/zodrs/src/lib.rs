@@ -9,6 +9,7 @@ pub mod formats;
 pub mod issue;
 pub mod jsonschema;
 pub mod plan;
+pub mod scan;
 pub mod validate;
 
 pub use compile::{compile, CompileError, CompiledPlan};
