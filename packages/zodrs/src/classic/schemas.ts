@@ -15,6 +15,7 @@ import type {
 } from "../core/nodes.js";
 import { cloneNode, node } from "../core/nodes.js";
 import { bagOf, optinOf, optoutOf, patternOf, propValuesOf, valuesOf } from "../core/introspect.js";
+import { patternForFormat } from "../core/formats.js";
 import { REGEXES } from "../core/formats.js";
 import * as parsing from "../core/parse.js";
 import type { RuntimeSchema, SafeParseResult } from "../core/parse.js";
@@ -25,7 +26,7 @@ import type { ToJSONSchemaParams } from "../core/json-schema.js";
 import { globalRegistry } from "../core/registries.js";
 import type { $ZodRegistry, $replace, GlobalMeta } from "../core/registries.js";
 import { createStandardProps } from "../core/standard-schema.js";
-import type { StandardSchemaV1 } from "../core/standard-schema.js";
+import type { StandardJSONSchemaV1, StandardSchemaV1, StandardSchemaWithJSONProps } from "../core/standard-schema.js";
 import { escapeRegex, FAIL, isObject } from "../core/util.js";
 import type { JSONType, MaybeAsync, NoUndefined, Primitive } from "../core/util.js";
 
@@ -183,6 +184,15 @@ function makeDef(node: SchemaNode): SchemaDef {
     out: { enumerable: true, configurable: true, get: () => node.kind === "pipe" ? childSchema(node.b) : never() },
     options: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "union" || n.kind === "discunion" ? n.options.map(childSchema) : []; } },
     items: { enumerable: true, configurable: true, get: () => { const n = node; return n.kind === "tuple" ? n.items.map(childSchema) : []; } },
+    pattern: { enumerable: true, configurable: true, get: () => {
+      let found: RegExp | undefined;
+      for (const runtime of node.checks) {
+        const check = runtime.check;
+        if (check.c === "format") { const p = patternForFormat(check.v, check.params); if (p) found = p; }
+        else if (check.c === "host_runtime" && check.op === "custom_format" && check.pattern) found = check.pattern;
+      }
+      return found;
+    } },
   });
   return facade;
 }
@@ -192,7 +202,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   readonly def: SchemaDef;
   readonly _def: SchemaDef;
   readonly type: SchemaNode["kind"];
-  readonly "~standard": StandardSchemaV1.Props<Input, Output>;
+  readonly "~standard": StandardSchemaWithJSONProps<Input, Output>;
 
   constructor(schemaNode: SchemaNode, parent?: $ZodType) {
     // Compilation is deferred to first use so self-referential schemas
@@ -230,6 +240,13 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     this["~standard"] = createStandardProps<Input, Output>({
       safeParse: (value) => this.safeParse(value),
       safeParseAsync: (value) => this.safeParseAsync(value),
+    }) as StandardSchemaWithJSONProps<Input, Output>;
+    // StandardJSONSchemaV1: expose jsonSchema.input/output on every schema.
+    Object.assign(this["~standard"], {
+      jsonSchema: {
+        input: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "input", ...(options.libraryOptions ?? {}) }),
+        output: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "output", ...(options.libraryOptions ?? {}) }),
+      },
     });
     schemaByNode.set(schemaNode, this);
     const prototype = $ZodType.prototype;
@@ -341,7 +358,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     const selected = new Set<unknown>(values);
     const kept = definition.values.filter((value) => selected.has(value));
     const resolved = errorMap(params) ?? definition.error;
-    return fromNode(node({ kind: "enum", values: kept, error: resolved }), this);
+    return fromNode(node({ kind: "enum", values: kept }, { error: resolved }), this);
   }
   exclude(values: readonly unknown[], params?: ErrorParam): unknown {
     const definition = this._zod.node;
@@ -349,11 +366,19 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     const skipped = new Set<unknown>(values);
     const kept = definition.values.filter((value) => !skipped.has(value));
     const resolved = errorMap(params) ?? definition.error;
-    return fromNode(node({ kind: "enum", values: kept, error: resolved }), this);
+    return fromNode(node({ kind: "enum", values: kept }, { error: resolved }), this);
   }
   get format(): string | null { return bagOf(this._zod.node)["format"] as string ?? null; }
   get minLength(): number | null { return bagOf(this._zod.node)["minimum"] as number ?? null; }
   get maxLength(): number | null { return bagOf(this._zod.node)["maximum"] as number ?? null; }
+  get minDate(): Date | null {
+    const minimum = bagOf(this._zod.node)["minimum"] as number | undefined;
+    return minimum === undefined ? null : new Date(minimum);
+  }
+  get maxDate(): Date | null {
+    const maximum = bagOf(this._zod.node)["maximum"] as number | undefined;
+    return maximum === undefined ? null : new Date(maximum);
+  }
   get minValue(): number | bigint | Date | null {
     const bag = bagOf(this._zod.node);
     const minimum = bag["minimum"] as number | bigint | undefined;
@@ -393,13 +418,13 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   min(value: number | bigint | Date, params?: ErrorParam): this {
     const kind = this._zod.node.kind;
     if (kind === "string" || kind === "array") return this.check(minLength(Number(value), params));
-    if (kind === "set" || kind === "map") return this.check(minSize(Number(value), params));
+    if (kind === "set" || kind === "map" || kind === "file") return this.check(minSize(Number(value), params));
     return this.check(gte(value, params));
   }
   max(value: number | bigint | Date, params?: ErrorParam): this {
     const kind = this._zod.node.kind;
     if (kind === "string" || kind === "array") return this.check(maxLength(Number(value), params));
-    if (kind === "set" || kind === "map") return this.check(maxSize(Number(value), params));
+    if (kind === "set" || kind === "map" || kind === "file") return this.check(maxSize(Number(value), params));
     return this.check(lte(value, params));
   }
   gt(value: number | bigint | Date, params?: ErrorParam): this { return this.check(gt(value, params)); }
@@ -440,7 +465,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
 
   email(params?: ErrorParam): this { return this.check(format("email", params)); }
   url(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): this { return this.check(format("url", params, urlFormatParams(params))); }
-  jwt(params?: ErrorParam): this { return this.check(format("jwt", params)); }
+  jwt(params?: ErrorParam & { readonly alg?: string }): this { return this.check(format("jwt", params, typeof params === "object" && params.alg !== undefined ? { alg: params.alg } : undefined)); }
   emoji(params?: ErrorParam): this { return this.check(format("emoji", params)); }
   guid(params?: ErrorParam): this { return this.check(format("guid", params)); }
   uuid(params?: ErrorParam): this { return this.check(format("uuid", params)); }
@@ -462,12 +487,12 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   e164(params?: ErrorParam): this { return this.check(format("e164", params)); }
   mac(params?: ErrorParam): this { return this.check(format("mac", params)); }
   hex(params?: ErrorParam): this { return this.check(format("hex", params)); }
-  hash(algorithm: string, params?: ErrorParam): this { return this.check(format(algorithm as FormatId, params)); }
+  hash(algorithm: string, params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): this { return this.check(format(algorithm as FormatId, params, typeof params === "object" ? { enc: params.enc } : undefined)); }
   httpUrl(params?: ErrorParam & { readonly hostname?: RegExp; readonly protocol?: RegExp; readonly normalize?: boolean }): this { return this.check(format("httpUrl", params, urlFormatParams(params))); }
   hostname(params?: ErrorParam): this { return this.check(format("hostname", params)); }
   duration(params?: ErrorParam): this { return this.check(format("duration", params)); }
   date(params?: ErrorParam): this { return this.check(format("date", params)); }
-  time(params?: ErrorParam): this { return this.check(format("time", params)); }
+  time(params?: ErrorParam & { readonly precision?: number | null }): this { return this.check(format("time", params, typeof params === "object" ? params : undefined)); }
   datetime(params?: ErrorParam & { readonly precision?: number | null; readonly offset?: boolean; readonly local?: boolean }): this { return this.check(format("datetime", params, typeof params === "object" ? params : undefined)); }
   int32(params?: ErrorParam): this { return this.check(int32Check(params)); }
   uint32(params?: ErrorParam): this { return this.check(uint32Check(params)); }
@@ -912,7 +937,10 @@ export function nullish<T extends SomeType>(inner: T): $ZodType<output<T> | null
 export function nonoptional<T extends SomeType>(inner: T, params?: ErrorParam): $ZodType<Exclude<output<T>, undefined>, input<T>> { return fromNode(node({ kind: "nonoptional", inner: inner._zod.node }, { error: errorMap(params) })); }
 export function readonly<T extends SomeType>(inner: T): ZodReadonly<T> { return inner.readonly(); }
 export function promise<T extends SomeType>(inner: T): ZodPromise<T> { return fromNode(node({ kind: "promise", inner: inner._zod.node })); }
-export function lazy<T extends SomeType>(getter: () => T): ZodLazy<T> { return fromNode(node({ kind: "lazy", getter: () => getter()._zod.node })); }
+export function lazy<T extends SomeType>(getter: () => T): ZodLazy<T> {
+  let cached: SchemaNode | undefined;
+  return fromNode(node({ kind: "lazy", getter: () => (cached ??= getter()._zod.node) }));
+}
 export function transform<I = unknown, O = I>(fn: (input: I, context: RefinementCtx<I>) => MaybeAsync<O>): $ZodType<Awaited<O>, I> {
   const host: HostFunction = (value, context) => fn(value as I, context as RefinementCtx<I>);
   return fromNode(node({ kind: "host", inner: null, fn: host, op: "transform" }));
@@ -967,27 +995,29 @@ export function function_(def?: { readonly input?: SomeType | readonly SomeType[
     ...(returnsNode ? { output: returnsNode } : {}),
   }, { error: errorMap(params) }));
 }
-export function stringbool(params: { readonly truthy?: readonly string[]; readonly falsy?: readonly string[]; readonly case?: "sensitive" | "insensitive"; readonly error?: string | $ZodErrorMap } = {}): $ZodType<boolean, string> {
-  let truthy: readonly string[] = params.truthy ?? ["true", "1", "yes", "on", "y", "enabled"];
-  let falsy: readonly string[] = params.falsy ?? ["false", "0", "no", "off", "n", "disabled"];
-  const sensitive = params.case === "sensitive";
+export function stringbool(params: string | { readonly truthy?: readonly string[]; readonly falsy?: readonly string[]; readonly case?: "sensitive" | "insensitive"; readonly error?: string | $ZodErrorMap } = {}): $ZodType<boolean, string> {
+  const normalized = typeof params === "string" ? { error: params } as const : params;
+  let truthy: readonly string[] = normalized.truthy ?? ["true", "1", "yes", "on", "y", "enabled"];
+  let falsy: readonly string[] = normalized.falsy ?? ["false", "0", "no", "off", "n", "disabled"];
+  const sensitive = normalized.case === "sensitive";
   if (!sensitive) { truthy = truthy.map((v) => v.toLowerCase()); falsy = falsy.map((v) => v.toLowerCase()); }
   const values = [...truthy, ...falsy];
+  const codecError = errorMap(normalized);
   const decodeHost: HostFunction = (value, context) => {
     const candidate = sensitive ? (value as string) : (value as string).toLowerCase();
     if (truthy.includes(candidate)) return true;
     if (falsy.includes(candidate)) return false;
-    context.addIssue({ code: "invalid_value", values, input: value, path: [] } as never);
+    context.addIssue({ code: "invalid_value", expected: "stringbool", values, input: value, path: [], continue: false, inst: { error: codecError } } as never);
     return false;
   };
   const encodeHost: HostFunction = (value) => ((value as boolean) ? truthy[0] : falsy[0]);
   return fromNode(node({
     kind: "pipe",
     codec: true,
-    a: node({ kind: "string" }, { error: errorMap(params) }),
-    b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: decodeHost, op: "codec_decode", error: errorMap(params) }), b: node({ kind: "boolean" }) }),
+    a: node({ kind: "string" }, { error: codecError }),
+    b: node({ kind: "pipe", a: node({ kind: "host", inner: null, fn: decodeHost, op: "codec_decode" }, { error: codecError }), b: node({ kind: "boolean" }, { error: codecError }) }),
     encodeHost,
-  }));
+  }, { error: codecError }));
 }
 
 function templatePattern(part: string | number | bigint | boolean | null | SomeType): string {
@@ -1120,7 +1150,7 @@ export function cidrv6(params?: ErrorParam): ZodString { return formatted("cidrv
 export function base64(params?: ErrorParam): ZodString { return formatted("base64", params); }
 export function base64url(params?: ErrorParam): ZodString { return formatted("base64url", params); }
 export function e164(params?: ErrorParam): ZodString { return formatted("e164", params); }
-export function jwt(params?: ErrorParam): ZodString { return formatted("jwt", params); }
+export function jwt(params?: ErrorParam & { readonly alg?: string }): ZodString { return formatted("jwt", params, typeof params === "object" && params.alg !== undefined ? { alg: params.alg } : undefined); }
 export function hex(params?: ErrorParam): ZodString { return formatted("hex", params); }
 export function md5(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString { return formatted("md5", params, typeof params === "object" ? { enc: params.enc } : undefined); }
 export function sha1(params?: ErrorParam & { readonly enc?: "hex" | "base64" | "base64url" }): ZodString { return formatted("sha1", params, typeof params === "object" ? { enc: params.enc } : undefined); }
@@ -1132,7 +1162,8 @@ export function hash<Alg extends HashAlgorithm>(alg: Alg, params?: ErrorParam & 
   return formatted(alg, params, typeof params === "object" ? { enc: params.enc } : undefined);
 }
 export function stringFormat(name: string, validator: RegExp | ((value: string) => MaybeAsync<unknown>), params?: ErrorParam): ZodString {
-  return validator instanceof RegExp ? string().regex(validator, params) : string().refine(validator, params);
+  const fn: HostFunction = validator instanceof RegExp ? (value) => validator.test(value as string) : (value) => validator(value as string);
+  return string().check(runtimeCheck({ c: "host_runtime", op: "custom_format", fn, format: name, ...(validator instanceof RegExp ? { pattern: validator } : {}) }, params));
 }
 
 export const iso: {
@@ -1166,7 +1197,7 @@ export function parseJson<T extends SomeType>(schema: T, value: Uint8Array | Arr
 export function safeParseJson<T extends SomeType>(schema: T, value: Uint8Array | ArrayBuffer | string, params?: ParseContext): SafeParseResult<output<T>> { return schema.safeParseJson(value, params); }
 
 export const NEVER: Readonly<{ status: "aborted" }> = Object.freeze({ status: "aborted" });
-export const TimePrecision: Readonly<{ minute: -1; second: 0; millisecond: 3; microsecond: 6 }> = { minute: -1, second: 0, millisecond: 3, microsecond: 6 };
+export const TimePrecision: Readonly<{ Any: null; Minute: -1; Second: 0; Millisecond: 3; Microsecond: 6 }> = { Any: null, Minute: -1, Second: 0, Millisecond: 3, Microsecond: 6 };
 export const regexes: Readonly<Record<string, RegExp>> = REGEXES;
 export function json(params?: ErrorParam): SomeType {
   const valid = (value: unknown): boolean => {
@@ -1209,7 +1240,10 @@ export function describe(description: string): $ZodCheck {
     _zod: {
       ...runtime._zod,
       attach: (target) => {
-        if (target instanceof $ZodType) globalRegistry.add(target, { description });
+        if (target instanceof $ZodType) {
+          const existing = globalRegistry.get(target) ?? {};
+          globalRegistry.add(target, { ...existing, description });
+        }
       },
     },
   };
@@ -1221,7 +1255,10 @@ export function metaCheck(data: Record<string, unknown>): $ZodCheck {
     _zod: {
       ...runtime._zod,
       attach: (target) => {
-        if (target instanceof $ZodType) globalRegistry.add(target, data);
+        if (target instanceof $ZodType) {
+          const existing = globalRegistry.get(target) ?? {};
+          globalRegistry.add(target, { ...existing, ...data });
+        }
       },
     },
   };

@@ -1,4 +1,5 @@
 import type { $ZodConfig } from "./config.js";
+import { config } from "./config.js";
 import { flattenError, formatError } from "./error-utils.js";
 import type { $ZodFlattenedError, $ZodFormattedError } from "./error-utils.js";
 import { captureStackTrace, joinValues, jsonStringifyReplacer, parsedType, stringifyPrimitive } from "./util.js";
@@ -344,4 +345,21 @@ export function finalizeIssue(
   const { inst: _inst, continue: _continue, input, ...rest } = issue;
   const finalized = { ...rest, path: rest.path ?? [], message };
   return (context?.reportInput ? { ...finalized, input } : finalized) as $ZodIssue;
+}
+
+/** Finalize a raw issue tree: nested union branch errors and key/element
+ *  sub-issues are finalized recursively before the parent. */
+export function finalizeNested(raw: $ZodRawIssue, context: ParseContext | undefined): $ZodIssue {
+  const global = config();
+  if (raw.code === "invalid_union" && Array.isArray(raw.errors)) {
+    const errors = raw.errors.map((branch: unknown) => Array.isArray(branch)
+      ? branch.map((entry: unknown) => finalizeNested(entry as $ZodRawIssue, context))
+      : []);
+    return finalizeIssue({ ...raw, errors } as $ZodRawIssue, context, global);
+  }
+  if ((raw.code === "invalid_key" || raw.code === "invalid_element") && Array.isArray(raw.issues)) {
+    const issues = raw.issues.map((entry: unknown) => finalizeNested(entry as $ZodRawIssue, context));
+    return finalizeIssue({ ...raw, issues } as $ZodRawIssue, context, global);
+  }
+  return finalizeIssue(raw, context, global);
 }

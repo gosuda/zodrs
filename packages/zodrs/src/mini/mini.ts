@@ -729,8 +729,8 @@ export function e164(params?: ErrorParam): ZodMiniE164 {
   const schemaNode = formatString("e164", params);
   return new ZodMiniE164(formattedDef("e164", schemaNode), schemaNode);
 }
-export function jwt(params?: ErrorParam): ZodMiniJWT {
-  const schemaNode = formatString("jwt", params);
+export function jwt(params?: ErrorParam & { readonly alg?: string }): ZodMiniJWT {
+  const schemaNode = formatString("jwt", params, typeof params === "object" && params.alg !== undefined ? { alg: params.alg } : undefined);
   return new ZodMiniJWT(formattedDef("jwt", schemaNode), schemaNode);
 }
 export function hex(params?: ErrorParam): ZodMiniCustomStringFormat<"hex"> {

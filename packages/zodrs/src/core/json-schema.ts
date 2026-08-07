@@ -18,6 +18,7 @@
 import { globalRegistry } from "./registries.js";
 import type { $ZodRegistry, $ZodRegistrySchema, GlobalMeta } from "./registries.js";
 import type { Check, FormatId, SchemaNode } from "./nodes.js";
+import { bagOf } from "./introspect.js";
 import { escapeRegex } from "./util.js";
 import type { BaseSchema, JSONSchema } from "./json-schema-types.js";
 
@@ -285,7 +286,7 @@ function timeSource(precision: unknown): string {
 /** JSON Schema `pattern` for a string format check, or undefined when the format carries no pattern. */
 function formatPattern(format: FormatId, params: Record<string, unknown> | undefined): string | undefined {
   if (format === "date") return `^${DATE_SOURCE}$`;
-  if (format === "time") return `^${timeSource(params?.["precision"])}}$`.replace(")}$", ")$");
+  if (format === "time") return `^${timeSource(params?.["precision"])}$`;
   if (format === "datetime") {
     const time = timeSource(params?.["precision"]);
     const opts = ["Z"];
@@ -370,6 +371,7 @@ function inputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNod
   visited.add(node);
   switch (node.kind) {
     case "optional":
+    case "exactOptional":
     case "default":
     case "prefault":
     case "catch":
@@ -384,6 +386,8 @@ function inputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNod
       return inputOptional(resolveLazyNode(node, ctx), ctx, visited);
     case "pipe":
       return inputOptional(node.a, ctx, visited);
+    case "union":
+      return node.options.some((option) => inputOptional(option, ctx, visited));
     case "host":
       return node.inner !== null && inputOptional(node.inner, ctx, visited);
     default:
@@ -397,6 +401,7 @@ function outputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNo
   visited.add(node);
   switch (node.kind) {
     case "optional":
+    case "exactOptional":
       return true;
     case "nonoptional":
       return false;
@@ -408,6 +413,8 @@ function outputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNo
       return outputOptional(resolveLazyNode(node, ctx), ctx, visited);
     case "pipe":
       return outputOptional(node.b, ctx, visited);
+    case "union":
+      return node.options.some((option) => outputOptional(option, ctx, visited));
     case "host":
       return node.inner !== null && outputOptional(node.inner, ctx, visited);
     default:
@@ -817,7 +824,9 @@ function processNode(schema: SchemaLike, node: SchemaNode, seen: Seen, ctx: GenC
       } else if (ctx.target === "openapi-3.0") {
         const anyOf = rest ? [...prefixItems, rest] : prefixItems;
         json["items"] = { anyOf };
-        json["minItems"] = prefixItems.length;
+        // Zod pushes `rest` into the prefix array before reading its length, so
+        // minItems counts the rest schema as a required item.
+        json["minItems"] = prefixItems.length + (rest ? 1 : 0);
         if (!rest) json["maxItems"] = prefixItems.length;
       } else {
         json["items"] = prefixItems;
@@ -869,16 +878,28 @@ function processNode(schema: SchemaLike, node: SchemaNode, seen: Seen, ctx: GenC
     case "record": {
       json["type"] = "object";
       const keyNode = node.key;
-      if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-        json["propertyNames"] = process(schema.keyType ?? nodeToSchema(keyNode, ctx), ctx, {
+      const keyPatterns = bagOf(keyNode).patterns;
+      if (node.mode === "loose" && keyPatterns && keyPatterns.length > 0) {
+        // Loose records with regex keys validate only matching keys: patternProperties.
+        const valueSchema = process(schema.valueType ?? nodeToSchema(node.value, ctx), ctx, {
           schemaPath: params.schemaPath,
-          path: [...params.path, "propertyNames"],
+          path: [...params.path, "patternProperties", "*"],
+        });
+        const patternProperties: Record<string, JSONSchema> = {};
+        for (const pattern of keyPatterns) patternProperties[pattern.source] = valueSchema;
+        json["patternProperties"] = patternProperties;
+      } else {
+        if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
+          json["propertyNames"] = process(schema.keyType ?? nodeToSchema(keyNode, ctx), ctx, {
+            schemaPath: params.schemaPath,
+            path: [...params.path, "propertyNames"],
+          });
+        }
+        json["additionalProperties"] = process(schema.valueType ?? nodeToSchema(node.value, ctx), ctx, {
+          schemaPath: params.schemaPath,
+          path: [...params.path, "additionalProperties"],
         });
       }
-      json["additionalProperties"] = process(schema.valueType ?? nodeToSchema(node.value, ctx), ctx, {
-        schemaPath: params.schemaPath,
-        path: [...params.path, "additionalProperties"],
-      });
 
       // Keys with discrete values (enum/literal) become required entries.
       const keyValues = keyNode.kind === "enum" || keyNode.kind === "literal" ? keyNode.values : undefined;

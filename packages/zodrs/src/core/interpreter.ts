@@ -1,5 +1,5 @@
 import type { $ZodRawIssue, ParseContext } from "./errors.js";
-import { ZodError } from "./errors.js";
+import { finalizeNested, ZodError } from "./errors.js";
 import { checkUrl, patternForFormat, testFormat } from "./formats.js";
 import { optinOf, optoutOf } from "./introspect.js";
 import type {
@@ -60,7 +60,7 @@ function issue(
   addIssue(context, raw as $ZodRawIssue);
 }
 
-function isPromise(value: unknown): value is PromiseLike<unknown> {
+export function isPromise(value: unknown): value is PromiseLike<unknown> {
   return isObject(value) && "then" in value && typeof value["then"] === "function";
 }
 
@@ -74,7 +74,8 @@ function makeRefinementContext(context: ValidationContext, node: SchemaNode, pat
     },
     addIssue(raw: $ZodRawIssue | string): void {
       if (typeof raw === "string") {
-        addIssue(context, { code: "custom", message: raw, input: value, path } as $ZodRawIssue);
+        // Key order matches Zod's `util.issue` string form: message, code, then path at finalize.
+        addIssue(context, { message: raw, code: "custom", input: value, path } as $ZodRawIssue);
         return;
       }
       const fatal = (raw as Record<string, unknown>)["fatal"] === true;
@@ -82,8 +83,9 @@ function makeRefinementContext(context: ValidationContext, node: SchemaNode, pat
         ...raw,
         input: raw.input ?? value,
         path: [...path, ...(raw.path ?? [])],
-        // fatal: true is sugar for continue: false; absent continue stays absent
-        ...(fatal ? { continue: false } : raw.continue !== undefined ? { continue: raw.continue } : {}),
+        // fatal: true is sugar for continue: false; absent continue defaults true
+        // (Zod `_superRefine`: `continue ??= !def.abort`, and abort is always unset).
+        continue: fatal ? false : (raw.continue ?? true),
       };
       if (raw.inst) merged["inst"] = raw.inst;
       addIssue(context, merged as $ZodRawIssue);
@@ -149,6 +151,8 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
       if (check.op === "refine" && !result) {
         const issuePath = runtime.path ? [...path, ...runtime.path] : path;
         addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
+      } else if (check.op === "custom_format" && !result) {
+        addIssue(context, { code: "invalid_format", format: check.format ?? "unknown", input: value, inst: { error: runtime.error }, path, continue: runtime.abort !== true } as $ZodRawIssue);
       } else if (check.op === "overwrite" || check.op === "transform" || check.op === "preprocess") value = result;
     } else if (check.c === "property") {
       if (isObject(value)) {
@@ -160,19 +164,19 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
       switch (check.c) {
         case "min_length":
         case "min_size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : 0;
+          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
           if (size < check.v) checkPayloadIssues(context, node, path, { origin, code: "too_small", minimum: check.v, inclusive: true }, value, runtime);
           break;
         }
         case "max_length":
         case "max_size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : 0;
+          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
           if (size > check.v) checkPayloadIssues(context, node, path, { origin, code: "too_big", maximum: check.v, inclusive: true }, value, runtime);
           break;
         }
         case "length":
         case "size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : 0;
+          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
           if (size !== check.v) {
             const small = size < check.v;
             checkPayloadIssues(context, node, path, small
@@ -228,7 +232,7 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
             const verdict = checkUrl(value, check.params, check.v === "httpUrl");
             if (!verdict.ok) {
               checkPayloadIssues(context, node, path, {
-                origin: "string", code: "invalid_format", format: "url",
+                code: "invalid_format", format: "url",
                 ...(verdict.note ? { note: verdict.note } : {}),
                 ...(verdict.pattern ? { pattern: verdict.pattern } : {}),
               }, value, runtime);
@@ -238,10 +242,16 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
             break;
           }
           if (!testFormat(check.v, value, check.params)) {
+            // Procedural formats (Zod overrides `_zod.check`) push neither
+            // `origin` nor `pattern`; regex-backed formats push both.
+            if (check.v === "jwt" || check.v === "ipv6" || check.v === "cidrv6" || check.v === "base64" || check.v === "base64url") {
+              checkPayloadIssues(context, node, path, { code: "invalid_format", format: check.v }, value, runtime);
+              break;
+            }
             const pattern = patternForFormat(check.v, check.params);
+            const formatName = check.v === "uuidv4" || check.v === "uuidv6" || check.v === "uuidv7" ? "uuid" : check.v;
             checkPayloadIssues(context, node, path, {
-              origin: "string", code: "invalid_format", format: check.v,
-              ...(check.params ?? {}),
+              origin: "string", code: "invalid_format", format: formatName,
               ...(pattern ? { pattern: pattern.toString() } : {}),
             }, value, runtime);
           }
@@ -386,6 +396,24 @@ function intersectionResult(node: SchemaNode & { readonly kind: "intersection" }
 
 function objectResult(node: SchemaNode & { readonly kind: "object" }, input: unknown, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
   if (!isObject(input)) { issue(context, node, path, { expected: "object", code: "invalid_type" }, input); return FAIL; }
+  if (context.direction === "backward" && node.checks.length > 0) {
+    // Canary: the object's own checks see the ORIGINAL output-side value, and
+    // the encoded result still comes from the backward shape parse.
+    const canary = objectShapeResult(node, input, context, path);
+    if (canary === FAIL) return FAIL;
+    const checked = applyChecksSync(node, input, context, path);
+    if (checked === FAIL) return FAIL;
+    return checked === input ? canary : objectShapeResult(node, checked as Record<PropertyKey, unknown>, context, path);
+  }
+  const result = objectShapeResult(node, input, context, path);
+  if (result === FAIL) { if (node.checks.length > 0) applyChecksSync(node, input, context, path); return FAIL; }
+  if (context.direction === "backward") {
+    return applyChecksSync(node, input, context, path) === FAIL ? FAIL : result;
+  }
+  return applyChecksSync(node, result, context, path);
+}
+
+function objectShapeResult(node: SchemaNode & { readonly kind: "object" }, input: Record<PropertyKey, unknown>, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
   const result: Record<string, unknown> = {};
   let failed = false;
   const known: Record<string, true> = Object.create(null) as Record<string, true>;
@@ -430,14 +458,8 @@ function objectResult(node: SchemaNode & { readonly kind: "object" }, input: unk
     // payload model): intersections merge it, the top-level parse still fails.
     issue(context, node, path, { code: "unrecognized_keys", keys: extra }, input);
   }
-  if (failed) { if (node.checks.length > 0) applyChecksSync(node, input, context, path); return FAIL; }
-  return applyChecksSync(node, context.direction === "backward" ? input : result, context, path) === FAIL ? FAIL : applyChecksResult(node, result, context, path);
-}
-
-/** Object checks may rewrite the value (overwrites); resolve the post-check value. */
-function applyChecksResult(node: SchemaNode, result: unknown, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
-  if (node.checks.length === 0) return result;
-  return applyChecksSync(node, result, context, path);
+  if (failed) return FAIL;
+  return result;
 }
 
 function optionalResult(node: SchemaNode & { readonly inner: SchemaNode }, input: unknown, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
@@ -490,7 +512,7 @@ function unionResult(node: SchemaNode & { readonly kind: "union" }, input: unkno
     const branchErrors: $ZodRawIssue[][] = [];
     for (const option of node.options) {
       const branchContext: ValidationContext = { ...context, issues: null };
-      const result = runSync(option, input, branchContext, path);
+      const result = runSync(option, input, branchContext, []);
       if (result !== FAIL && !(branchContext.issues?.length)) successes.push(result);
       else branchErrors.push(branchContext.issues ?? []);
     }
@@ -508,7 +530,7 @@ function unionResult(node: SchemaNode & { readonly kind: "union" }, input: unkno
   const branchResults: { readonly value: unknown; readonly issues: $ZodRawIssue[] }[] = [];
   for (const option of node.options) {
     const branchContext: ValidationContext = { ...context, issues: null };
-    const result = runSync(option, input, branchContext, path);
+    const result = runSync(option, input, branchContext, []);
     const issues = branchContext.issues ?? [];
     if (result !== FAIL && issues.length === 0) { return applyChecksSync(node, result, context, path); }
     branchResults.push({ value: result === FAIL ? input : result, issues });
@@ -518,7 +540,7 @@ function unionResult(node: SchemaNode & { readonly kind: "union" }, input: unkno
   if (nonaborted.length === 1) {
     const only = nonaborted[0];
     if (only) {
-      for (const iss of only.issues) addIssue(context, iss);
+      for (const iss of only.issues) addIssue(context, { ...iss, path: [...path, ...(iss.path ?? [])] });
       return FAIL;
     }
   }
@@ -542,11 +564,25 @@ function hostResult(node: SchemaNode & { readonly kind: "host" }, input: unknown
   if (node.op === "superRefine" || node.op === "check") return (context.issues?.length ?? 0) > before ? FAIL : applyChecksSync(node, base, context, path);
   // transform / preprocess / overwrite / codec_*: a fn that reported issues fails
   if ((context.issues?.length ?? 0) > before) return FAIL;
+  // $ZodTransform always marks the payload as a fallback value, which lets an
+  // outer `optional` clobber it when the original input was undefined.
+  if (node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode") {
+    context.fallback = (context.fallback ?? 0) + 1;
+  }
   return applyChecksSync(node, result, context, path);
 }
 
 function pipeResult(node: SchemaNode & { readonly kind: "pipe" }, input: unknown, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
   if (context.direction === "backward") {
+    if (node.checks.length > 0) {
+      // Zod runs a no-checks canary first; the pipe's own checks then see the
+      // ORIGINAL output-side value, never the backward-transformed one.
+      const canary = pipeResult({ ...node, checks: [] }, input, context, path);
+      if (canary === FAIL) return FAIL;
+      const checked = applyChecksSync(node, input, context, path);
+      if (checked === FAIL) return FAIL;
+      return checked === input ? canary : pipeResult({ ...node, checks: [] }, checked, context, path);
+    }
     if (node.codec === true) {
       // Codec backward: validate against the OUTPUT side, run the encode
       // transform, then validate against the INPUT side.
@@ -562,14 +598,11 @@ function pipeResult(node: SchemaNode & { readonly kind: "pipe" }, input: unknown
         if (isPromise(encoded)) throw new $ZodAsyncError();
         if ((context.issues?.length ?? 0) > before) return FAIL;
       }
-      const left = runSync(node.a, encoded, context, path);
-      if (left === FAIL) return FAIL;
-      return node.checks.length === 0 ? left : applyChecksSync(node, left, context, path);
+      return runSync(node.a, encoded, context, path);
     }
     const right = runSync(node.b, input, context, path);
     if (right === FAIL) return FAIL;
-    const left = runSync(node.a, right, context, path);
-    return left === FAIL ? FAIL : (node.checks.length === 0 ? left : applyChecksSync(node, left, context, path));
+    return runSync(node.a, right, context, path);
   }
   const first = runSync(node.a, input, context, path);
   if (first === FAIL) return FAIL;
@@ -602,26 +635,35 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
       const returnsSchema = node.output;
       if (!argsSchema && !returnsSchema) { output = input; break; }
       const fn = input as (...args: unknown[]) => unknown;
-      output = function (this: unknown, ...args: unknown[]) {
-        const parsedArgs = argsSchema ? runSync(argsSchema, args, { ...context, issues: null, async: false } as ValidationContext, []) : args;
-        if (parsedArgs === FAIL) {
-          const failing: ValidationContext = { issues: null, async: false };
-          runSync(argsSchema as SchemaNode, args, failing, []);
-          throw makeCallError(failing);
+      output = returnsSchema?.kind === "promise"
+        ? async function (this: unknown, ...args: unknown[]) {
+          const failingArgs: ValidationContext = { issues: null, async: true };
+          const parsedArgs = argsSchema ? await runAsync(argsSchema, args, failingArgs, []) : args;
+          if (parsedArgs === FAIL) throw makeCallError(failingArgs);
+          const returned = await fn.apply(this, parsedArgs as unknown[]);
+          if (!returnsSchema) return returned;
+          const failingReturns: ValidationContext = { issues: null, async: true };
+          const parsedReturn = await runAsync(returnsSchema, returned, failingReturns, []);
+          if (parsedReturn === FAIL) throw makeCallError(failingReturns);
+          return parsedReturn;
         }
-        const returned = fn.apply(this, parsedArgs as unknown[]);
-        if (!returnsSchema) return returned;
-        const failingReturns: ValidationContext = { issues: null, async: false };
-        const parsedReturn = runSync(returnsSchema, returned, failingReturns, []);
-        if (parsedReturn === FAIL) throw makeCallError(failingReturns);
-        return parsedReturn;
-      };
+        : function (this: unknown, ...args: unknown[]) {
+          const failingArgs: ValidationContext = { issues: null, async: false };
+          const parsedArgs = argsSchema ? runSync(argsSchema, args, failingArgs, []) : args;
+          if (parsedArgs === FAIL) throw makeCallError(failingArgs);
+          const returned = fn.apply(this, parsedArgs as unknown[]);
+          if (!returnsSchema) return returned;
+          const failingReturns: ValidationContext = { issues: null, async: false };
+          const parsedReturn = runSync(returnsSchema, returned, failingReturns, []);
+          if (parsedReturn === FAIL) throw makeCallError(failingReturns);
+          return parsedReturn;
+        };
       break;
     }
     case "undefined": case "void": if (input !== undefined) { issue(context, node, path, { expected: node.kind, code: "invalid_type" }, input); return FAIL; } output = input; break;
     case "null": if (input !== null) { issue(context, node, path, { expected: "null", code: "invalid_type" }, input); return FAIL; } output = input; break;
     case "nan": if (typeof input !== "number" || !Number.isNaN(input)) { issue(context, node, path, { expected: "nan", code: "invalid_type" }, input); return FAIL; } output = input; break;
-    case "date": if (!(input instanceof Date) || Number.isNaN(input.getTime())) { issue(context, node, path, { expected: "date", code: "invalid_type" }, input); return FAIL; } output = new Date(input.getTime()); break;
+    case "date": if (!(input instanceof Date) || Number.isNaN(input.getTime())) { issue(context, node, path, { expected: "date", code: "invalid_type", ...(input instanceof Date ? { received: "Invalid Date" } : {}) }, input); return FAIL; } output = new Date(input.getTime()); break;
     case "file": if (!isObject(input) || !("name" in input) || !("size" in input) || !("type" in input)) { issue(context, node, path, { expected: "file", code: "invalid_type" }, input); return FAIL; } output = input; break;
     case "literal": if (!node.values.some((value) => Object.is(value, input))) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
     case "enum": if (!node.values.includes(input as string | number)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
@@ -661,10 +703,11 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
       for (let index = 0; index < node.items.length; index += 1) {
         const child = node.items[index];
         if (!child) continue;
+        const before = context.issues?.length ?? 0;
         const childResult = runSync(child, input[index], context, [...path, index]);
         if (childResult === FAIL) {
           // Swallow only when BOTH input & output may be absent at this tail position.
-          if (index >= input.length && index >= optinStart && index >= optoutStart) { result.length = index; break; }
+          if (index >= input.length && index >= optinStart && index >= optoutStart) { if (context.issues) context.issues.length = before; result.length = index; break; }
           failed = true;
         } else {
           result[index] = childResult;
@@ -722,11 +765,11 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
         if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
         const value = (input as Record<PropertyKey, unknown>)[key];
         const keyContext: ValidationContext = { ...context, issues: null };
-        let parsedKey = runSync(node.key, key, keyContext, [...path, key]);
+        let parsedKey = runSync(node.key, key, keyContext, path);
         // Numeric-string fallback: a numeric key that failed as a string may pass as a number.
         if (parsedKey === FAIL && typeof key === "string" && key !== "" && !Number.isNaN(Number(key))) {
           const retry: ValidationContext = { ...context, issues: null };
-          const numericKey = runSync(node.key, Number(key), retry, [...path, key]);
+          const numericKey = runSync(node.key, Number(key), retry, path);
           if (numericKey !== FAIL) { parsedKey = numericKey; keyContext.issues = retry.issues; }
         }
         if (parsedKey === FAIL) {
@@ -793,46 +836,39 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
     }
     case "readonly": { const parsed = runSync(node.inner, input, context, path); if (parsed === FAIL) return FAIL; if (typeof parsed === "object" && parsed !== null) Object.freeze(parsed); return parsed; }
     case "lazy": return runSync(node.getter(), input, context, path);
-    case "promise": if (!isPromise(input)) { issue(context, node, path, { expected: "promise", code: "invalid_type" }, input); return FAIL; } return Promise.resolve(input).then((value) => runAsync(node.inner, value, { ...context, async: true }, path));
+    case "promise": throw new $ZodAsyncError();
     case "default": {
       if (context.direction === "backward") return runSync(node.inner, input, context, path);
-      if (input === undefined) return node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value);
+      const fallbackValue = (): unknown => node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value);
+      if (input === undefined) return applyChecksSync(node, fallbackValue(), context, path);
       const result = runSync(node.inner, input, context, path);
       if (result === FAIL) return FAIL;
-      return result === undefined ? (node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value)) : result;
+      return applyChecksSync(node, result === undefined ? fallbackValue() : result, context, path);
     }
     case "prefault": {
       if (context.direction === "backward") return runSync(node.inner, input, context, path);
       const value = input === undefined ? node.dynamic ? (node.value as (context?: { input: unknown }) => unknown)({ input }) : shallowClone(node.value) : input;
-      return runSync(node.inner, value, context, path);
+      const parsed = runSync(node.inner, value, context, path);
+      return parsed === FAIL ? FAIL : applyChecksSync(node, parsed, context, path);
     }
     case "catch": {
       if (context.direction === "backward") return runSync(node.inner, input, context, path);
       const local: ValidationContext = { ...context, issues: null };
       const parsed = runSync(node.inner, input, local, path);
-      if (parsed !== FAIL && !(local.issues?.length)) return parsed;
+      if (parsed !== FAIL && !(local.issues?.length)) return applyChecksSync(node, parsed, context, path);
       context.fallback = (context.fallback ?? 0) + 1;
-      return node.dynamic ? (node.value as (context?: { error?: unknown; input: unknown }) => unknown)({ error: { issues: local.issues ?? [] }, input }) : node.value;
+      const caught = node.dynamic ? (node.value as (context?: { error?: unknown; input: unknown }) => unknown)({ error: { issues: local.issues ?? [] }, input }) : node.value;
+      return applyChecksSync(node, caught, context, path);
     }
     case "pipe": return pipeResult(node, input, context, path);
     case "templateLiteral": if (typeof input !== "string" || !node.pattern.test(input)) { issue(context, node, path, { code: "invalid_format", format: "template_literal", pattern: node.pattern.source }, input); return FAIL; } output = input; break;
     case "host": return hostResult(node, input, context, path);
   }
-  return applyChecksSync(node, context.direction === "backward" ? input : output, context, path) === FAIL ? FAIL : outputAfterChecks(node, output, context, path);
-}
-
-/** Re-run checks on the real output when the first pass ran on the backward input. */
-function outputAfterChecks(node: SchemaNode, output: unknown, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
-  if (context.direction === "backward") {
-    // Backward canary: checks already ran against the pre-parse value; the parse
-    // itself does not transform leaf values, so the output stands.
-    return output;
-  }
-  return output;
+  return applyChecksSync(node, context.direction === "backward" ? input : output, context, path);
 }
 
 function makeCallError(context: ValidationContext): Error {
-  return new ZodError((context.issues ?? []) as never);
+  return new ZodError((context.issues ?? []).map((raw) => finalizeNested(raw, undefined)) as never);
 }
 
 async function applyChecksAsync(node: SchemaNode, initial: unknown, context: ValidationContext, path: PropertyKey[]): Promise<unknown | FailType> {
@@ -850,6 +886,9 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
     if (check.op === "refine" && !result) {
       const issuePath = runtime.path ? [...path, ...runtime.path] : path;
       addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
+    }
+    else if (check.op === "custom_format" && !result) {
+      addIssue(context, { code: "invalid_format", format: check.format ?? "unknown", input: value, inst: { error: runtime.error }, path, continue: runtime.abort !== true } as $ZodRawIssue);
     }
     else if (check.op === "overwrite" || check.op === "transform" || check.op === "preprocess") value = result;
     if ((context.issues?.length ?? 0) > before && abortedSince(context, before)) break;
@@ -873,10 +912,21 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     }
     if (node.op === "superRefine" || node.op === "check") return (context.issues?.length ?? 0) > before ? FAIL : base;
     if ((context.issues?.length ?? 0) > before) return FAIL;
+    if (node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode") {
+      context.fallback = (context.fallback ?? 0) + 1;
+    }
     return result;
   }
   if (node.kind === "pipe") {
     if (context.direction === "backward") {
+      if (node.checks.length > 0) {
+        // Canary: the pipe's own checks see the ORIGINAL output-side value.
+        const canary = await runAsync({ ...node, checks: [] }, input, context, path);
+        if (canary === FAIL) return FAIL;
+        const checked = await applyChecksAsync(node, input, context, path);
+        if (checked === FAIL) return FAIL;
+        return checked === input ? canary : runAsync({ ...node, checks: [] }, checked, context, path);
+      }
       if (node.codec === true) {
         const inner = node.b;
         const outputSide = inner.kind === "pipe" ? inner.b : inner;
@@ -888,15 +938,11 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
           encoded = await node.encodeHost(right, makeRefinementContext(context, node, path, right));
           if ((context.issues?.length ?? 0) > before) return FAIL;
         }
-        const left = await runAsync(node.a, encoded, context, path);
-        if (left === FAIL) return FAIL;
-        return node.checks.length === 0 ? left : applyChecksAsync(node, left, context, path);
+        return runAsync(node.a, encoded, context, path);
       }
       const right = await runAsync(node.b, input, context, path);
       if (right === FAIL) return FAIL;
-      const left = await runAsync(node.a, right, context, path);
-      if (left === FAIL) return FAIL;
-      return node.checks.length === 0 ? left : applyChecksAsync(node, left, context, path);
+      return runAsync(node.a, right, context, path);
     }
     const first = await runAsync(node.a, input, context, path);
     return first === FAIL ? FAIL : runAsync(node.b, first, context, path);
@@ -943,6 +989,14 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     return FAIL;
   }
   if (node.kind === "object" && isObject(input)) {
+    if (context.direction === "backward" && node.checks.length > 0) {
+      // Canary: the object's own checks see the ORIGINAL output-side value.
+      const canary = await runAsync({ ...node, checks: [] }, input, context, path);
+      if (canary === FAIL) return FAIL;
+      const checked = await applyChecksAsync(node, input, context, path);
+      if (checked === FAIL) return FAIL;
+      return checked === input ? canary : runAsync({ ...node, checks: [] }, checked, context, path);
+    }
     const result: Record<string, unknown> = {}; let failed = false; const known: Record<string, true> = Object.create(null) as Record<string, true>;
     for (const [key, child] of Object.entries(node.shape)) {
       known[key] = true;
@@ -998,9 +1052,10 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     for (let index = 0; index < node.items.length; index += 1) {
       const child = node.items[index];
       if (!child) continue;
+      const before = context.issues?.length ?? 0;
       const parsed = await runAsync(child, input[index], context, [...path, index]);
       if (parsed === FAIL) {
-        if (index >= input.length && index >= optinStart && index >= optoutStart) { result.length = index; break; }
+        if (index >= input.length && index >= optinStart && index >= optoutStart) { if (context.issues) context.issues.length = before; result.length = index; break; }
         failed = true;
       } else {
         result[index] = parsed;
@@ -1028,7 +1083,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
       }
       const results = await Promise.all(node.options.map((option) => {
         const branch: ValidationContext = { ...context, issues: null };
-        return runAsync(option, input, branch, path).then((parsed) => ({ parsed, issues: branch.issues ?? [] }));
+        return runAsync(option, input, branch, []).then((parsed) => ({ parsed, issues: branch.issues ?? [] }));
       }));
       const successes = results.filter((entry) => entry.parsed !== FAIL && entry.issues.length === 0);
       if (successes.length === 1) return successes[0]?.parsed;
@@ -1042,7 +1097,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     const branchResults: { readonly value: unknown; readonly issues: $ZodRawIssue[] }[] = [];
     for (const option of node.options) {
       const branch: ValidationContext = { ...context, issues: null };
-      const parsed = await runAsync(option, input, branch, path);
+      const parsed = await runAsync(option, input, branch, []);
       const issues = branch.issues ?? [];
       if (parsed !== FAIL && issues.length === 0) return applyChecksAsync(node, parsed, context, path);
       branchResults.push({ value: parsed === FAIL ? input : parsed, issues });
@@ -1051,7 +1106,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     if (nonaborted.length === 1) {
       const only = nonaborted[0];
       if (only) {
-        for (const iss of only.issues) addIssue(context, iss);
+        for (const iss of only.issues) addIssue(context, { ...iss, path: [...path, ...(iss.path ?? [])] });
         return FAIL;
       }
     }
@@ -1082,26 +1137,29 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
   }
   if (node.kind === "readonly") { const parsed = await runAsync(node.inner, input, context, path); if (parsed !== FAIL && typeof parsed === "object" && parsed !== null) Object.freeze(parsed); return parsed; }
   if (node.kind === "lazy") return runAsync(node.getter(), input, context, path);
-  if (node.kind === "promise" && isPromise(input)) return runAsync(node.inner, await input, context, path);
+  if (node.kind === "promise") return runAsync(node.inner, await Promise.resolve(input), context, path);
   if (node.kind === "default") {
     if (context.direction === "backward") return runAsync(node.inner, input, context, path);
-    if (input === undefined) return node.dynamic ? await (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value);
+    const fallbackValue = (): unknown => node.dynamic ? (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value);
+    if (input === undefined) return applyChecksAsync(node, await fallbackValue(), context, path);
     const result = await runAsync(node.inner, input, context, path);
     if (result === FAIL) return FAIL;
-    return result === undefined ? (node.dynamic ? await (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value)) : result;
+    return applyChecksAsync(node, result === undefined ? await fallbackValue() : result, context, path);
   }
   if (node.kind === "prefault") {
     if (context.direction === "backward") return runAsync(node.inner, input, context, path);
     const value = input === undefined ? node.dynamic ? await (node.value as (context?: { input: unknown }) => MaybeAsync<unknown>)({ input }) : shallowClone(node.value) : input;
-    return runAsync(node.inner, value, context, path);
+    const parsed = await runAsync(node.inner, value, context, path);
+    return parsed === FAIL ? FAIL : applyChecksAsync(node, parsed, context, path);
   }
   if (node.kind === "catch") {
     if (context.direction === "backward") return runAsync(node.inner, input, context, path);
     const local: ValidationContext = { ...context, issues: null };
     const parsed = await runAsync(node.inner, input, local, path);
-    if (parsed !== FAIL && !(local.issues?.length)) return parsed;
+    if (parsed !== FAIL && !(local.issues?.length)) return applyChecksAsync(node, parsed, context, path);
     context.fallback = (context.fallback ?? 0) + 1;
-    return node.dynamic ? await (node.value as (context?: { error?: unknown; input: unknown }) => MaybeAsync<unknown>)({ error: { issues: local.issues ?? [] }, input }) : node.value;
+    const caught = node.dynamic ? await (node.value as (context?: { error?: unknown; input: unknown }) => MaybeAsync<unknown>)({ error: { issues: local.issues ?? [] }, input }) : node.value;
+    return applyChecksAsync(node, caught, context, path);
   }
   if (node.kind === "record" && isObject(input)) {
     const result: Record<PropertyKey, unknown> = {}; let failed = false;
@@ -1125,10 +1183,10 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
       if (!Object.prototype.propertyIsEnumerable.call(input, key)) continue;
       const value = (input as Record<PropertyKey, unknown>)[key];
       const keyContext: ValidationContext = { ...context, issues: null };
-      let parsedKey = await runAsync(node.key, key, keyContext, []);
+      let parsedKey = await runAsync(node.key, key, keyContext, path);
       if (parsedKey === FAIL && typeof key === "string" && key !== "" && !Number.isNaN(Number(key))) {
         const retry: ValidationContext = { ...context, issues: null };
-        const numeric = await runAsync(node.key, Number(key), retry, []);
+        const numeric = await runAsync(node.key, Number(key), retry, path);
         if (numeric !== FAIL) { parsedKey = numeric; keyContext.issues = retry.issues; }
       }
       if (parsedKey === FAIL) {
@@ -1191,6 +1249,8 @@ function keyValuesOf(node: SchemaNode): (string | number)[] | undefined {
       return [...node.values];
     case "literal":
       return node.values.filter((value): value is string | number => typeof value === "string" || typeof value === "number");
+    case "pipe":
+      return keyValuesOf(node.a);
     case "union": {
       const all: (string | number)[] = [];
       for (const option of node.options) {

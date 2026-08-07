@@ -41,25 +41,7 @@ export type {
 } from "./json-schema.js";
 export * as JSONSchema from "./json-schema-types.js";
 
-/**
- * Lazily probes whether `new Function` code generation is usable, short-circuiting
- * to `false` when `config().jitless` is set (the probe never runs under jitless).
- */
-let allowsEvalCache: boolean | undefined;
-export const allowsEval: { readonly value: boolean } = {
-  get value() {
-    if (config().jitless) return false;
-    if (allowsEvalCache !== undefined) return allowsEvalCache;
-    try {
-      // eslint-disable-next-line no-new-func
-      new Function("return true")();
-      allowsEvalCache = true;
-    } catch {
-      allowsEvalCache = false;
-    }
-    return allowsEvalCache;
-  },
-};
+export { allowsEval } from "./util.js";
 
 interface SchemaLike { readonly _zod: { readonly node: { readonly kind: string; readonly codec?: boolean } } }
 type CoreMatcher = { readonly [Symbol.hasInstance]: (value: unknown) => boolean };

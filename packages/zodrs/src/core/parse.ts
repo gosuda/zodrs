@@ -1,7 +1,8 @@
 import { config } from "./config.js";
-import { finalizeIssue, ZodError } from "./errors.js";
+import { finalizeIssue, finalizeNested, ZodError } from "./errors.js";
 import type { $ZodIssue, $ZodRawIssue, ParseContext } from "./errors.js";
 import type { AsyncValidator, ValidationContext, Validator } from "./interpreter.js";
+import { $ZodAsyncError, isPromise } from "./interpreter.js";
 import { validateJson as validateNativeJson } from "./native.js";
 import type { CompiledPlan } from "./plan.js";
 import { FAIL } from "./util.js";
@@ -37,24 +38,22 @@ export interface SafeParseSuccess<T> { readonly success: true; readonly data: T;
 export interface SafeParseError<T> { readonly success: false; readonly error: ZodError<T>; readonly data?: never }
 export type SafeParseResult<T> = SafeParseSuccess<T> | SafeParseError<T>;
 
-function finalizeNested(raw: $ZodRawIssue, context: ParseContext | undefined): $ZodIssue {
-  const global = config();
-  if (raw.code === "invalid_union" && Array.isArray(raw.errors)) {
-    const errors = raw.errors.map((branch: unknown) => Array.isArray(branch)
-      ? branch.map((entry: unknown) => finalizeNested(entry as $ZodRawIssue, context))
-      : []);
-    return finalizeIssue({ ...raw, errors } as $ZodRawIssue, context, global);
-  }
-  if ((raw.code === "invalid_key" || raw.code === "invalid_element") && Array.isArray(raw.issues)) {
-    const issues = raw.issues.map((entry: unknown) => finalizeNested(entry as $ZodRawIssue, context));
-    return finalizeIssue({ ...raw, issues } as $ZodRawIssue, context, global);
-  }
-  return finalizeIssue(raw, context, global);
-}
-
 function makeError<T>(raw: $ZodRawIssue[] | null, context: ParseContext | undefined): ZodError<T> {
   return new ZodError<T>((raw ?? []).map((issue) => finalizeNested(issue, context)));
 }
+
+/** True when the context carries any non-continuable (fatal) issue.
+ *  The strict-object path records `unrecognized_keys` without returning FAIL so
+ *  intersections can merge the stripped value; this guard makes the top-level
+ *  parse fail on those issues while continuable refinements still pass through. */
+function hasFatalIssue(issues: $ZodRawIssue[] | null): boolean {
+  if (!issues) return false;
+  for (let i = 0; i < issues.length; i += 1) {
+    if (issues[i]?.continue !== true) return true;
+  }
+  return false;
+}
+
 
 function validationContext(context: ParseContext | undefined, async: boolean, direction: "forward" | "backward" = "forward"): ValidationContext {
   return { ...context, issues: null, async, direction };
@@ -63,14 +62,16 @@ function validationContext(context: ParseContext | undefined, async: boolean, di
 export function parse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): output<T> {
   const ctx = validationContext(context, false);
   const result = schema._zod.validate(value, ctx);
-  if (result === FAIL) throw makeError<output<T>>(ctx.issues, context);
+  if (isPromise(result)) throw new $ZodAsyncError();
+  if (result === FAIL || hasFatalIssue(ctx.issues)) throw makeError<output<T>>(ctx.issues, context);
   return result as output<T>;
 }
 
 export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): SafeParseResult<output<T>> {
   const ctx = validationContext(context, false);
   const result = schema._zod.validate(value, ctx);
-  return result === FAIL
+  if (isPromise(result)) throw new $ZodAsyncError();
+  return result === FAIL || hasFatalIssue(ctx.issues)
     ? { success: false, error: makeError<output<T>>(ctx.issues, context) }
     : { success: true, data: result as output<T> };
 }
@@ -78,14 +79,14 @@ export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, co
 export async function parseAsync<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): Promise<output<T>> {
   const ctx = validationContext(context, true);
   const result = await schema._zod.validateAsync(value, ctx);
-  if (result === FAIL) throw makeError<output<T>>(ctx.issues, context);
+  if (result === FAIL || hasFatalIssue(ctx.issues)) throw makeError<output<T>>(ctx.issues, context);
   return result as output<T>;
 }
 
 export async function safeParseAsync<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): Promise<SafeParseResult<output<T>>> {
   const ctx = validationContext(context, true);
   const result = await schema._zod.validateAsync(value, ctx);
-  return result === FAIL
+  return result === FAIL || hasFatalIssue(ctx.issues)
     ? { success: false, error: makeError<output<T>>(ctx.issues, context) }
     : { success: true, data: result as output<T> };
 }
@@ -102,28 +103,33 @@ export function decodeAsync<T extends RuntimeSchema>(schema: T, value: input<T>,
 export function safeDecodeAsync<T extends RuntimeSchema>(schema: T, value: input<T>, context?: ParseContext): Promise<SafeParseResult<output<T>>> {
   return safeParseAsync(schema, value, context);
 }
-
 export function encode<T extends RuntimeSchema>(schema: T, value: output<T>, context?: ParseContext): input<T> {
   const ctx = validationContext(context, false, "backward");
   const result = schema._zod.validate(value, ctx);
-  if (result === FAIL) throw makeError<input<T>>(ctx.issues, context);
+  if (isPromise(result)) throw new $ZodAsyncError();
+  if (result === FAIL || hasFatalIssue(ctx.issues)) throw makeError<input<T>>(ctx.issues, context);
   return result as input<T>;
 }
 export function safeEncode<T extends RuntimeSchema>(schema: T, value: output<T>, context?: ParseContext): SafeParseResult<input<T>> {
   const ctx = validationContext(context, false, "backward");
   const result = schema._zod.validate(value, ctx);
-  return result === FAIL ? { success: false, error: makeError<input<T>>(ctx.issues, context) } : { success: true, data: result as input<T> };
+  if (isPromise(result)) throw new $ZodAsyncError();
+  return result === FAIL || hasFatalIssue(ctx.issues)
+    ? { success: false, error: makeError<input<T>>(ctx.issues, context) }
+    : { success: true, data: result as input<T> };
 }
 export async function encodeAsync<T extends RuntimeSchema>(schema: T, value: output<T>, context?: ParseContext): Promise<input<T>> {
   const ctx = validationContext(context, true, "backward");
   const result = await schema._zod.validateAsync(value, ctx);
-  if (result === FAIL) throw makeError<input<T>>(ctx.issues, context);
+  if (result === FAIL || hasFatalIssue(ctx.issues)) throw makeError<input<T>>(ctx.issues, context);
   return result as input<T>;
 }
 export async function safeEncodeAsync<T extends RuntimeSchema>(schema: T, value: output<T>, context?: ParseContext): Promise<SafeParseResult<input<T>>> {
   const ctx = validationContext(context, true, "backward");
   const result = await schema._zod.validateAsync(value, ctx);
-  return result === FAIL ? { success: false, error: makeError<input<T>>(ctx.issues, context) } : { success: true, data: result as input<T> };
+  return result === FAIL || hasFatalIssue(ctx.issues)
+    ? { success: false, error: makeError<input<T>>(ctx.issues, context) }
+    : { success: true, data: result as input<T> };
 }
 
 declare const TextEncoder: { new (): { encode(input?: string): Uint8Array } };

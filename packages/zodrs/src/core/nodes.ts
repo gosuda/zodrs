@@ -65,11 +65,11 @@ export interface RefinementContext {
   addIssue(issue: $ZodRawIssue | string): void;
 }
 
-export type HostOperation = "refine" | "superRefine" | "check" | "transform" | "preprocess" | "overwrite" | "codec_decode" | "codec_encode";
+export type HostOperation = "refine" | "superRefine" | "check" | "transform" | "preprocess" | "overwrite" | "codec_decode" | "codec_encode" | "custom_format";
 export type HostFunction = (value: unknown, context: RefinementContext) => MaybeAsync<unknown>;
 export type DynamicValue = (context?: { readonly error?: unknown; readonly input: unknown }) => unknown;
 
-export type HostRuntimeCheck = { readonly c: "host_runtime"; readonly op: HostOperation; readonly fn: HostFunction };
+export type HostRuntimeCheck = { readonly c: "host_runtime"; readonly op: HostOperation; readonly fn: HostFunction; readonly format?: string; readonly pattern?: RegExp | undefined };
 export type PropertyBuildCheck = { readonly c: "property"; readonly key: string; readonly schema: SchemaNode };
 export type WireCheck = Exclude<Check, { readonly c: "property" } | { readonly c: "host" }>;
 

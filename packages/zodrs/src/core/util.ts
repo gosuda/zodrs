@@ -1,5 +1,7 @@
 /** Shared internal helpers for the zodrs core. No public surface. */
 
+import { config } from "./config.js";
+
 export type Primitive = string | number | symbol | bigint | boolean | null | undefined;
 
 export type JSONType = string | number | boolean | null | JSONType[] | { [key: string]: JSONType };
@@ -177,3 +179,17 @@ export type Flatten<T> = T extends unknown ? { [K in keyof T]: T[K] } : never;
 export type NoUndefined<T> = T extends undefined ? never : T;
 export type Identity<T> = T;
 export type AnyFunc = (...args: never[]) => unknown;
+
+/**
+ * Mirrors Zod's `core.util.allowsEval`. zodrs never evaluates generated source
+ * (the codegen tier emits closures and the interpreter tier walks the tree), so
+ * no capability probe is ever attempted — under strict CSP this reports no
+ * violation, and `config().jitless` short-circuits the value to `false`.
+ */
+let allowsEvalCache: boolean | undefined;
+export const allowsEval: { readonly value: boolean } = {
+  get value() {
+    if (config().jitless) return false;
+    return (allowsEvalCache ??= true);
+  },
+};

@@ -1,4 +1,5 @@
 import type { FormatId, MetadataBag, SchemaNode } from "./nodes.js";
+import { patternForFormat } from "./formats.js";
 import { escapeRegex } from "./util.js";
 
 /**
@@ -92,8 +93,31 @@ export function bagOf(node: SchemaNode): CheckBag {
       case "size":
         bag = { ...bag, minimum: check.v, maximum: check.v };
         break;
-      case "format":
-        bag = { ...bag, format: check.v };
+      case "format": {
+        bag = { ...bag, format: check.v === "uuidv4" || check.v === "uuidv6" || check.v === "uuidv7" ? "uuid" : check.v };
+        // Zod assigns `def.pattern` on most format schemas; it lands in bag.patterns.
+        const pattern = patternForFormat(check.v, check.params);
+        if (pattern) bag = { ...bag, patterns: [...(bag.patterns ?? []), pattern] };
+        break;
+      }
+      case "regex":
+        bag = { ...bag, patterns: [...(bag.patterns ?? []), new RegExp(check.src, check.flags)] };
+        break;
+      case "lowercase":
+        bag = { ...bag, patterns: [...(bag.patterns ?? []), /^[^A-Z]*$/] };
+        break;
+      case "uppercase":
+        bag = { ...bag, patterns: [...(bag.patterns ?? []), /^[^a-z]*$/] };
+        break;
+      case "starts_with":
+        bag = { ...bag, patterns: [...(bag.patterns ?? []), new RegExp(`^${escapeRegex(check.v)}.*`)] };
+        break;
+      case "ends_with":
+        bag = { ...bag, patterns: [...(bag.patterns ?? []), new RegExp(`.*${escapeRegex(check.v)}$`)] };
+        break;
+      case "host_runtime":
+        if (check.op === "custom_format" && check.format !== undefined) bag = { ...bag, format: check.format };
+        if (check.op === "custom_format" && check.pattern) bag = { ...bag, patterns: [...(bag.patterns ?? []), check.pattern] };
         break;
       default:
         break;
@@ -160,6 +184,8 @@ function computeValues(node: SchemaNode): ReadonlySet<unknown> | undefined {
 }
 
 /** The validation pattern a schema implies, mirroring Zod's `_zod.pattern`. */
+const lazyPatternInProgress = new Set<SchemaNode>();
+
 export function patternOf(node: SchemaNode): RegExp | undefined {
   if (patternCache.has(node)) return patternCache.get(node);
   const computed = computePattern(node);
@@ -188,7 +214,6 @@ function computePattern(node: SchemaNode): RegExp | undefined {
     case "boolean":
       return /^(?:true|false)$/i;
     case "undefined":
-    case "void":
       return /^undefined$/i;
     case "null":
       return /^null$/i;
@@ -206,8 +231,17 @@ function computePattern(node: SchemaNode): RegExp | undefined {
       return inner ? new RegExp(`^(${cleanSource(inner.source)}|null)$`) : undefined;
     }
     case "readonly":
-    case "lazy":
-      return undefined;
+      return patternOf(node.inner);
+    case "lazy": {
+      // Delegate like Zod's $ZodLazy; guard cycles from recursive schemas.
+      if (lazyPatternInProgress.has(node)) return undefined;
+      lazyPatternInProgress.add(node);
+      try {
+        return patternOf(node.getter());
+      } finally {
+        lazyPatternInProgress.delete(node);
+      }
+    }
     case "union":
     case "discunion": {
       const sources: string[] = [];

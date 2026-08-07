@@ -21,7 +21,7 @@ const PATTERNS: Readonly<Record<string, RegExp>> = {
   uuidv4: /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/,
   uuidv6: /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/,
   uuidv7: /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/,
-  email: /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/,
+  email: /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/,
   html5Email: /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/,
   rfc5322Email: /^(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/,
   unicodeEmail: /^[^\s@"]{1,64}@[^\s@]{1,255}$/u,
@@ -121,16 +121,17 @@ export interface UrlVerdict {
  * protocol/hostname constraints, rewrites to trimmed or normalized href. */
 export function checkUrl(input: string, params: Readonly<Record<string, unknown>> = {}, httpOnly = false): UrlVerdict {
   const normalize = params["normalize"] === true;
-  const protocolSource = httpOnly
-    ? "^https?$"
-    : typeof params["protocol"] === "string"
-      ? (params["protocol"] as string)
-      : undefined;
-  const hostnameSource = typeof params["hostname"] === "string" ? (params["hostname"] as string) : undefined;
+  const asRegExp = (value: unknown): RegExp | undefined => {
+    if (value instanceof RegExp) return value;
+    if (typeof value === "string") return new RegExp(value);
+    return undefined;
+  };
+  const protocol = httpOnly ? /^https?$/ : asRegExp(params["protocol"]);
+  const hostname = asRegExp(params["hostname"]);
   const trimmed = input.trim();
 
   // When normalize is off, require :// for http/https URLs
-  if (!normalize && protocolSource === "^https?$") {
+  if (!normalize && protocol?.source === "^https?$") {
     if (!/^https?:\/\//i.test(trimmed)) {
       return { ok: false, value: trimmed, note: "Invalid URL format" };
     }
@@ -143,21 +144,31 @@ export function checkUrl(input: string, params: Readonly<Record<string, unknown>
     return { ok: false, value: trimmed };
   }
 
-  if (hostnameSource !== undefined) {
-    const hostname = new RegExp(hostnameSource);
+  let ok = true;
+  let note: string | undefined;
+  let pattern: string | undefined;
+  if (hostname) {
+    hostname.lastIndex = 0;
     if (!hostname.test(url.hostname)) {
-      return { ok: false, value: trimmed, note: "Invalid hostname", pattern: hostname.source };
+      ok = false;
+      note = "Invalid hostname";
+      pattern = hostname.source;
     }
   }
 
-  if (protocolSource !== undefined) {
-    const protocol = new RegExp(protocolSource);
+  if (protocol) {
+    protocol.lastIndex = 0;
     const candidate = url.protocol.endsWith(":") ? url.protocol.slice(0, -1) : url.protocol;
     if (!protocol.test(candidate)) {
-      return { ok: false, value: trimmed, note: "Invalid protocol", pattern: protocol.source };
+      ok = false;
+      if (note === undefined) {
+        note = "Invalid protocol";
+        pattern = protocol.source;
+      }
     }
   }
 
+  if (!ok) return { ok: false, value: trimmed, ...(note ? { note } : {}), ...(pattern ? { pattern } : {}) };
   return { ok: true, value: normalize ? url.href : trimmed };
 }
 
@@ -171,6 +182,14 @@ export function testFormat(format: FormatId, input: string, params: Readonly<Rec
   }
   if (format === "base64") return isValidBase64(input);
   if (format === "base64url") return isValidBase64URL(input);
+  if (format === "ipv6") {
+    try {
+      new URL(`http://[${input}]`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (format === "date") return DATE.test(input);
   if (format === "time") {
     return new RegExp(`^${timeSource(params)}$`).test(input);
