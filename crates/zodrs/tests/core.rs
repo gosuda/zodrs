@@ -577,7 +577,8 @@ fn k4_catch_fires_on_failure() {
     assert_eq!(ok.status, 0, "clean success: {ok:?}");
 }
 
-// K5: regex issue carries the JS `pattern` source and omits `origin`.
+// K5: regex issue carries the JS `pattern` source and `origin: "string"`,
+// matching zod v4's `$ZodIssueInvalidStringFormat` (verified against 4.4.3).
 #[test]
 fn k5_regex_issue_has_pattern() {
     let compiled = plan(&json!([
@@ -586,7 +587,7 @@ fn k5_regex_issue_has_pattern() {
     let v = validate(&compiled, br#""ABC""#);
     assert_issue(
         &v,
-        &json!({"code":"invalid_format","format":"regex","pattern":"/^[a-z]+$/","path":[]}),
+        &json!({"code":"invalid_format","origin":"string","format":"regex","pattern":"/^[a-z]+$/","path":[]}),
     );
 }
 

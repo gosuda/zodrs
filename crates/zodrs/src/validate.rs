@@ -603,10 +603,12 @@ impl<'p> Validator<'p> {
                     if let Some(Some(CompiledCheck::Regex(re))) = compiled.get(ci)
                         && !re.is_match(&cur)
                     {
-                        // Canonical regex issue carries the JS pattern source
-                        // and no `origin`; the message interpolates it.
+                        // Canonical regex issue carries `origin: "string"`
+                        // alongside the JS pattern source, which the message
+                        // interpolates (zod v4 `$ZodIssueInvalidStringFormat`).
                         self.emit(|p| {
                             Issue::new_check("invalid_format", p)
+                                .with("origin", Json::from("string"))
                                 .with("format", Json::from("regex"))
                                 .with("pattern", Json::from(format!("/{src}/{flags}")))
                         });

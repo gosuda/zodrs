@@ -12,16 +12,13 @@
  */
 
 import { readFileSync } from "node:fs";
-import { deepEqual, type BothResults } from "./compare.js";
 import type { FuzzCase } from "./genInput.js";
 
 export interface LedgerEntry {
   id: string;
   title: string;
   rootCause: string;
-  skip:
-    | { rule: "case-kind"; kinds: string[] }
-    | { rule: "issues-equal-modulo-extra-native-fields" };
+  skip: { rule: "case-kind"; kinds: string[] };
   repro: {
     schemaDescriptor: unknown;
     inputText: string;
@@ -37,35 +34,10 @@ export function loadLedger(): LedgerEntry[] {
   return (JSON.parse(readFileSync(url, "utf8")) as LedgerFile).entries;
 }
 
-/**
- * Deep-clones a value dropping the fields the native byte path over-reports:
- * `input` everywhere (canonical zod v4 strips it unless reportInput is set)
- * and `origin` on invalid_format (the canonical issue shape has no origin).
- */
-function stripOverReportedFields(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripOverReportedFields);
-  if (value === null || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  const noOriginCanonically = source.code === "invalid_format" || source.code === "not_multiple_of";
-  for (const key of Object.keys(source)) {
-    if (key === "input") continue;
-    if (noOriginCanonically && key === "origin") continue;
-    out[key] = stripOverReportedFields(source[key]);
-  }
-  return out;
-}
-
 /** Returns the ledger entry id explaining this mismatch, or null if it is new. */
-export function classifyMismatch(entries: LedgerEntry[], fuzzCase: FuzzCase, both: BothResults): string | null {
+export function classifyMismatch(entries: LedgerEntry[], fuzzCase: FuzzCase): string | null {
   for (const entry of entries) {
-    if (entry.skip.rule === "case-kind") {
-      if (entry.skip.kinds.includes(fuzzCase.kind)) return entry.id;
-    } else if (both.ref !== null && !both.ref.success && both.native !== null && !both.native.success) {
-      const refStripped = stripOverReportedFields(both.ref.error.issues);
-      const nativeStripped = stripOverReportedFields(both.native.error.issues);
-      if (deepEqual(refStripped, nativeStripped, "$").eq) return entry.id;
-    }
+    if (entry.skip.kinds.includes(fuzzCase.kind)) return entry.id;
   }
   return null;
 }

@@ -45,30 +45,6 @@
         "refOutcome": "safeParse(JSON.parse(...)) -> { success: true, data: { name: \"Ada\", age: 36 } } (last key wins)",
         "nativeOutcome": "safeParseJson(bytes) -> { success: false, issues: [too_small @ path [\"name\"]] } (first key wins)"
       }
-    },
-    {
-      "id": "native-over-reports-issue-fields",
-      "title": "Native byte path attaches non-canonical fields to issues: `input` on every issue and `origin` on invalid_format and not_multiple_of",
-      "rootCause": "Canonical zod v4 strips `input` from issue objects unless reportInput is true (.references/zod/packages/zod/src/v4/core/util.ts finalizeIssue: destructures input out, re-adds only when ctx.reportInput; ParseContext.reportInput defaults to false in schemas.ts). Vendored corpus snapshots confirm default safeParse issues carry no `input`. But packages/zodrs/src/core/parse.ts parseJson() status-2 branch calls makeError(raw, { ...context, reportInput: true }) after back-filling input on every raw issue, so safeParseJson failures always carry `input` where safeParse failures do not. Separately, the Rust issue serializer emits origin on invalid_format and not_multiple_of issues; the canonical shapes ($ZodIssueInvalidStringFormat errors.ts:70-75, $ZodIssueNotMultipleOf) have no origin field. Note: the plan's own \u00a7Verification-3(b) expectation showing input on byte-path issues contradicts canonical zod v4 behavior; the drop-in contract (and the differential invariant) outranks the plan text. Sub-note: native also leaves an own `input: undefined` property on invalid_union sub-issues (canonically absent) and does not backfill sub-issue inputs at all \u2014 see the separate union-sub-issue class in the fuzz report.",
-      "skip": {
-        "rule": "issues-equal-modulo-extra-native-fields"
-      },
-      "repro": {
-        "schemaDescriptor": {
-          "k": "number",
-          "checks": [
-            {
-              "c": "int"
-            },
-            {
-              "c": "positive"
-            }
-          ]
-        },
-        "inputText": "[[[1]]]",
-        "refOutcome": "safeParse(JSON.parse(...)) -> issues: [{ expected: \"number\", code: \"invalid_type\", path: [], message: \"Invalid input: expected number, received array\" }]",
-        "nativeOutcome": "safeParseJson(bytes) -> issues: [{ code: \"invalid_type\", expected: \"number\", path: [], message: \"...\", input: [[[1]]] }] (extra `input`)"
-      }
     }
   ]
 }

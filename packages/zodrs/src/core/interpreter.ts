@@ -210,7 +210,7 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
         }
         case "multiple_of": {
           if (typeof value === "bigint" ? value % BigInt(check.v) !== 0n : typeof value !== "number" || floatSafeRemainder(value, Number(check.v)) !== 0) {
-            checkPayloadIssues(context, node, path, { code: "not_multiple_of", divisor: Number(check.v) }, value, runtime);
+            checkPayloadIssues(context, node, path, { code: "not_multiple_of", origin: typeof value, divisor: Number(check.v) }, value, runtime);
           }
           break;
         }

@@ -213,7 +213,7 @@ function compileWireCheck(check: WireCheck, error: unknown, kind: SchemaNode["ki
           ? value % BigInt(raw) !== 0n
           : typeof value !== "number" || floatSafeRemainder(value, divisor) !== 0;
         return bad
-          ? (checkIssue(context, error, { code: "not_multiple_of", divisor }, value, path, key), FAIL)
+          ? (checkIssue(context, error, { code: "not_multiple_of", origin: typeof value, divisor }, value, path, key), FAIL)
           : value;
       };
     }
