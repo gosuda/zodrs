@@ -9,7 +9,7 @@
  * Exits non-zero on the first contract violation.
  */
 
-import { loaderDiagnostics } from "./loader.js";
+import { loaderDiagnostics, loaderSettled } from "./loader.js";
 import { isNativeAvailable, validateJson } from "./native.js";
 import { compilePlan } from "./plan.js";
 import { object, string } from "../classic/schemas.js";
@@ -34,6 +34,9 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 }
 
 const tier = typeof process !== "undefined" ? (process.env["ZODRS_LOADER"] ?? "native") : "native";
+
+// Wait for async tier resolution (wasm registers fire-and-forget).
+await loaderSettled;
 
 // z.object({ a: z.string().min(3) })
 const schema = object({ a: string().min(3) });

@@ -158,23 +158,30 @@ function inputAtPath(root: unknown, path: readonly PropertyKey[]): unknown {
   let current = root;
   for (const segment of path) {
     if (current === null || current === undefined || (typeof current !== "object" && typeof current !== "function")) return undefined;
-    if (!(segment in current)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
     current = current[segment as keyof typeof current];
   }
   return current;
 }
 
-/** Back-fill `input` on an issue and, recursively, on any nested sub-issues. */
-function backFillInput(raw: $ZodRawIssue, original: unknown): $ZodRawIssue {
-  const withInput = { ...raw, input: inputAtPath(original, raw.path ?? []) } as $ZodRawIssue;
+/** Back-fill `input` on an issue and, recursively, on any nested sub-issues.
+ *  Sub-issues inside `errors`/`issues` carry paths relative to their parent,
+ *  so the parent's path is prepended when walking `original`. */
+function backFillInput(
+  raw: $ZodRawIssue,
+  original: unknown,
+  parentPath: readonly PropertyKey[] = [],
+): $ZodRawIssue {
+  const fullPath = [...parentPath, ...(raw.path ?? [])];
+  const withInput = { ...raw, input: inputAtPath(original, fullPath) } as $ZodRawIssue;
   if (Array.isArray(withInput.errors)) {
     const errors = withInput.errors.map((branch: unknown) => Array.isArray(branch)
-      ? branch.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original))
+      ? branch.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original, fullPath))
       : branch);
     return { ...withInput, errors } as $ZodRawIssue;
   }
   if (Array.isArray(withInput.issues)) {
-    const issues = withInput.issues.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original));
+    const issues = withInput.issues.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original, fullPath));
     return { ...withInput, issues } as $ZodRawIssue;
   }
   return withInput;

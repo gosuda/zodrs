@@ -4,50 +4,67 @@
   "description": "TypeScript-first schema validation with static type inference, backed by a Rust core. Drop-in replacement for zod v4.",
   "license": "MIT",
   "type": "module",
-  "main": "./dist/classic/index.js",
+  "main": "./dist-cjs/classic/index.js",
   "types": "./dist/classic/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/classic/index.d.ts",
-      "import": "./dist/classic/index.js"
+      "import": "./dist/classic/index.js",
+      "require": "./dist-cjs/classic/index.js"
     },
     "./mini": {
       "types": "./dist/mini/index.d.ts",
-      "import": "./dist/mini/index.js"
+      "import": "./dist/mini/index.js",
+      "require": "./dist-cjs/mini/index.js"
     },
     "./core": {
       "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
+      "import": "./dist/core/index.js",
+      "require": "./dist-cjs/core/index.js"
     },
     "./locales": {
       "types": "./dist/locales/index.d.ts",
-      "import": "./dist/locales/index.js"
+      "import": "./dist/locales/index.js",
+      "require": "./dist-cjs/locales/index.js"
     },
     "./v4": {
       "types": "./dist/classic/index.d.ts",
-      "import": "./dist/classic/index.js"
+      "import": "./dist/classic/index.js",
+      "require": "./dist-cjs/classic/index.js"
     },
     "./v4/core": {
       "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
+      "import": "./dist/core/index.js",
+      "require": "./dist-cjs/core/index.js"
     },
     "./v4/locales": {
       "types": "./dist/locales/index.d.ts",
-      "import": "./dist/locales/index.js"
+      "import": "./dist/locales/index.js",
+      "require": "./dist-cjs/locales/index.js"
     },
     "./v4-mini": {
       "types": "./dist/mini/index.d.ts",
-      "import": "./dist/mini/index.js"
+      "import": "./dist/mini/index.js",
+      "require": "./dist-cjs/mini/index.js"
     },
     "./package.json": "./package.json"
   },
+  "imports": {
+    "#module-url": {
+      "import": "./dist/core/module-url.js",
+      "require": "./dist-cjs/core/module-url-cjs.js"
+    }
+  },
   "files": [
     "dist",
+    "dist-cjs",
     "native",
     "wasm"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
+    "build:esm": "tsc -p tsconfig.build.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
     "test": "vitest run"
   },
   "napi": {

@@ -12,19 +12,27 @@
  *                         platform loader), then the WASM addon
  *                         (packages/zodrs/wasm/), then unavailable.
  *
+ * **Native tier — synchronous.** The generated napi-rs loader
+ * (`native/index.js`) is TLA-free ESM, so `require(esm)` (Node 22.12+)
+ * loads it without async. `createRequire(moduleUrl)` provides the `require`
+ * function in both ESM and CJS contexts.
+ *
+ * **WASM tier — async, fire-and-forget.** WASI instantiation is inherently
+ * async. The `import()` call returns a Promise that registers the backend
+ * when it resolves. Until then, `parseJson` falls back to `JSON.parse` plus
+ * the TypeScript validator — identical observable results, lower throughput.
+ * `loaderSettled` exposes the Promise so callers (e.g. the self-test) can
+ * await registration if needed.
+ *
  * With no backend registered, `parseJson` falls back to `JSON.parse` plus the
  * TypeScript validator, so every tier yields identical observable results.
- *
- * Both addons are loaded with `await import()` because they are
- * platform-specific build artifacts that do not exist on every machine or in
- * every tier: a static import would fail at build/bundle time instead of
- * degrading to the next loader tier at runtime.
  */
 
+import { createRequire } from "node:module";
+import { moduleUrl } from "#module-url";
 import { registerNativeBackend, type NativeBackend, type NativeVerdict } from "./native.js";
 
 declare const process: { readonly env: Record<string, string | undefined> } | undefined;
-declare const URL: { new (url: string, base?: string): { readonly href: string } };
 declare global {
   interface ImportMeta {
     readonly url: string;
@@ -95,44 +103,69 @@ function pickAddon(mod: unknown, tier: string): RawAddon | null {
   return null;
 }
 
-/** The native addon, via its generated platform-selecting ESM loader. */
-async function loadNative(): Promise<RawAddon | null> {
+/**
+ * A `require` function anchored at this module's location. In ESM,
+ * `createRequire(import.meta.url)`; in CJS, `createRequire(__filename)`.
+ * Both resolve relative specifiers against the compiled loader file, so
+ * `req("../../native/index.js")` finds the same artifact from either build.
+ */
+const req = createRequire(moduleUrl);
+
+/** The native addon, via its generated platform-selecting ESM loader (sync). */
+function loadNativeSync(): RawAddon | null {
   try {
-    return pickAddon(await import(new URL("../../native/index.js", import.meta.url).href), "native");
+    return pickAddon(req("../../native/index.js"), "native");
   } catch (error: unknown) {
     loaderDiagnostics.push(`native: ${describe(error)}`);
     return null;
   }
 }
 
-/** The WASM addon, via its generated Node WASI loader (CommonJS). */
-async function loadWasm(): Promise<RawAddon | null> {
-  try {
-    return pickAddon(await import(new URL("../../wasm/zodrs_node.wasi.cjs", import.meta.url).href), "wasm");
-  } catch (error: unknown) {
-    loaderDiagnostics.push(`wasm: ${describe(error)}`);
-    return null;
-  }
+/**
+ * The WASM addon, via its generated Node WASI loader (CommonJS).
+ * Fire-and-forget: returns a Promise that registers the backend when it
+ * resolves. The caller does NOT await this at the top level.
+ */
+function loadWasmAsync(): Promise<void> {
+  // Non-literal specifier so tsc does not try to resolve the .cjs types
+  // (which would fail under moduleResolution: node10).
+  const specifier: string = "../../wasm/zodrs_node.wasi.cjs";
+  return import(specifier)
+    .then((mod: unknown) => {
+      const addon = pickAddon(mod, "wasm");
+      if (addon) {
+        registerNativeBackend(wrapAddon(addon));
+        loaderDiagnostics.push("wasm: registered (async)");
+      }
+    })
+    .catch((error: unknown) => {
+      loaderDiagnostics.push(`wasm: ${describe(error)}`);
+    });
 }
 
 const requestedTier: string | undefined =
   typeof process !== "undefined" ? process.env["ZODRS_LOADER"] : undefined;
 
-if (requestedTier === "none") {
-  loaderDiagnostics.push("none: ZODRS_LOADER=none, backend disabled");
-} else {
-  let addon: RawAddon | null = null;
+function resolveTiers(): Promise<void> {
+  if (requestedTier === "none") {
+    loaderDiagnostics.push("none: ZODRS_LOADER=none, backend disabled");
+    return Promise.resolve();
+  }
+
+  // Native tier: synchronous.
   if (requestedTier !== "wasm") {
-    addon = await loadNative();
-    if (addon) loaderDiagnostics.push("native: registered");
+    const native = loadNativeSync();
+    if (native) {
+      registerNativeBackend(wrapAddon(native));
+      loaderDiagnostics.push("native: registered");
+      return Promise.resolve();
+    }
   }
-  if (!addon) {
-    addon = await loadWasm();
-    if (addon) loaderDiagnostics.push("wasm: registered");
-  }
-  if (addon) {
-    registerNativeBackend(wrapAddon(addon));
-  } else {
-    loaderDiagnostics.push("unavailable: no native or WASM backend loaded; TypeScript fallback active");
-  }
+
+  // WASM tier: async, fire-and-forget.
+  // Before registration, parseJson falls back to TS (identical observable results).
+  return loadWasmAsync();
 }
+
+/** Resolves when tier resolution is complete (immediately for native/none). */
+export const loaderSettled: Promise<void> = resolveTiers();

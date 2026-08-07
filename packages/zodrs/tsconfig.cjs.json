@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "bundler",
+    "outDir": "dist-cjs",
+    "rootDir": "src",
+    "declaration": false,
+    "declarationMap": false,
+    "isolatedDeclarations": false,
+    "verbatimModuleSyntax": false,
+    "sourceMap": false,
+    "noEmit": false,
+    "paths": {
+      "#module-url": ["./src/core/module-url-cjs.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["src/core/module-url.ts", "src/core/loader.selftest.ts"]
+}
