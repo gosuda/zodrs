@@ -16,14 +16,13 @@ export interface CompiledPlan {
 }
 
 /**
- * `Object.prototype` members, minus `__proto__` which every layer already
- * special-cases. A shape key naming one of these reads through the prototype
- * on a plain object, which the byte path cannot reproduce. Derived from the
- * runtime rather than hand-listed, so it cannot drift.
+ * `Object.prototype` members. A shape key naming one of these reads through the
+ * prototype when the input omits the key, so the TS walk sees the inherited
+ * member where the byte scanner sees nothing. `__proto__` belongs here too: it
+ * is a real shape key once the schema declares one. Derived from the runtime
+ * rather than hand-listed, so it cannot drift.
  */
-const PROTO_KEYS: ReadonlySet<string> = new Set(
-  Object.getOwnPropertyNames(Object.prototype).filter((k) => k !== "__proto__"),
-);
+const PROTO_KEYS: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
 
 interface EmitState {
   readonly nodes: (PlanNode | null)[];

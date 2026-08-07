@@ -543,11 +543,12 @@ function compilePrimitive(node: SchemaNode): CNode {
       };
       break;
     case "literal": {
+      // zod matches with `Set.has`, i.e. SameValueZero: `-0` satisfies a `0`
+      // literal, where `Object.is` would reject it.
       const values = node.values;
-      const single = values.length === 1;
-      const only = single ? values[0] : undefined;
+      const accepted = new Set<unknown>(values);
       fn = (input, context, path, key) => {
-        const ok = single ? Object.is(input, only) : values.some((value) => Object.is(value, input));
+        const ok = accepted.has(input);
         if (!ok) {
           nodeIssue(context, error, { code: "invalid_value", values: [...values] }, input, path, key);
           return FAIL;
@@ -741,9 +742,10 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
       if (values.some((value) => value === undefined)) return undefined;
       const single = values.length === 1;
       const only = single ? values[0] : undefined;
-      // `Object.is` differs from `===` only at NaN and -0, neither of which a
-      // string, boolean or null literal can be, so those compare directly.
+      // `===` equals SameValueZero for a string, boolean or null literal, so a
+      // single one of those skips the set entirely.
       const strictEq = single && (typeof only === "string" || typeof only === "boolean" || only === null);
+      const accepted = strictEq ? null : new Set<unknown>(values);
       return (key, optIn, optOut, dangerous) => {
         const swallow = optIn && optOut;
         return (input, result, context, path) => {
@@ -753,7 +755,7 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             if (dangerous) defineValue(result, key, null); else result[key] = null;
             return false;
           }
-          const matched = strictEq ? v === only : single ? Object.is(v, only) : values.some((value) => Object.is(value, v));
+          const matched = accepted === null ? v === only : accepted.has(v);
           if (!matched) {
             nodeIssue(context, error, { code: "invalid_value", values: [...values] }, v, path, key);
             return true;

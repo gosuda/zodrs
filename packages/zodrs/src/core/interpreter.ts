@@ -681,7 +681,7 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
     case "nan": if (typeof input !== "number" || !Number.isNaN(input)) { issue(context, node, path, { expected: "nan", code: "invalid_type" }, input); return FAIL; } output = input; break;
     case "date": if (!(input instanceof Date) || Number.isNaN(input.getTime())) { issue(context, node, path, { expected: "date", code: "invalid_type", ...(input instanceof Date ? { received: "Invalid Date" } : {}) }, input); return FAIL; } output = new Date(input.getTime()); break;
     case "file": if (!isObject(input) || !("name" in input) || !("size" in input) || !("type" in input)) { issue(context, node, path, { expected: "file", code: "invalid_type" }, input); return FAIL; } output = input; break;
-    case "literal": if (!node.values.some((value) => Object.is(value, input))) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
+    case "literal": if (!new Set<unknown>(node.values).has(input)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
     case "enum": if (!node.values.includes(input as string | number)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
     case "object": return objectResult(node, input, context, path);
     case "array": {

@@ -152,7 +152,8 @@ fn pack_key(kb: &[u8]) -> u64 {
 fn is_proto_key(key: &str) -> bool {
     matches!(
         key,
-        "constructor"
+        "__proto__"
+            | "constructor"
             | "__defineGetter__"
             | "__defineSetter__"
             | "hasOwnProperty"

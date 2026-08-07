@@ -1080,7 +1080,9 @@ function lazyShapeFromSchemas(source: Readonly<Record<string, SomeType>>): Recor
     const descriptor = Object.getOwnPropertyDescriptor(source, key);
     if (descriptor && typeof descriptor.get === "function") { hasGetter = true; break; }
   }
-  const nodes: Record<string, SchemaNode> = {};
+  // Null prototype: plain assignment of a `__proto__` key would otherwise hit
+  // the inherited setter and drop the field, leaving it unvalidated.
+  const nodes: Record<string, SchemaNode> = Object.create(null) as Record<string, SchemaNode>;
   if (hasGetter) {
     for (const key of keys) defineLazyNode(nodes, key, () => resolveShapeNode(source, key));
   } else {

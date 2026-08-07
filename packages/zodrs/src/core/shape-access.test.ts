@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as z from "../classic/index.js";
+import { compilePlan } from "./plan.js";
 
 /**
  * Object shape steps read `input[key]` directly rather than gating the read
@@ -73,5 +74,36 @@ describe("object shape property access", () => {
     expect(r.success).toBe(false);
     if (r.success) return;
     expect(r.error.issues[0]?.message).toBe("Invalid input: expected string, received function");
+  });
+
+  // A `__proto__` shape key used to vanish: the shape was built by plain
+  // assignment, so the key hit the inherited setter and the field was never
+  // validated at all. It is an ordinary key now.
+  it("validates a declared __proto__ field", () => {
+    const S = z.object({ ["__proto__"]: z.string() });
+    expect(S.safeParse(JSON.parse('{"__proto__":123}')).success).toBe(false);
+    expect(S.safeParse(JSON.parse('{"__proto__":"s"}')).success).toBe(true);
+  });
+
+  // zod assigns results with `result[key] = value`, so a valid `__proto__`
+  // field hits the setter and disappears from its output. zodrs defines the
+  // property instead and keeps the field. Recorded in docs/DIVERGENCE.md.
+  it("keeps a valid __proto__ field in the output", () => {
+    const S = z.object({ ["__proto__"]: z.string() });
+    const parsed = S.parse(JSON.parse('{"__proto__":"s"}')) as Record<string, unknown>;
+    expect(Object.getOwnPropertyNames(parsed)).toEqual(["__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(parsed, "__proto__")?.value).toBe("s");
+  });
+
+  it("keeps a plan with a __proto__ shape key off the byte path", () => {
+    expect(compilePlan(z.object({ ["__proto__"]: z.string() })._zod.node).jsonEligible).toBe(false);
+  });
+
+  // zod matches literals with `Set.has`, i.e. SameValueZero, so `-0` satisfies
+  // a `0` literal. `Object.is` would reject it.
+  it("accepts -0 for a 0 literal", () => {
+    expect(z.literal(0).safeParse(-0).success).toBe(true);
+    expect(z.object({ a: z.literal(0) }).safeParse({ a: -0 }).success).toBe(true);
+    expect(z.object({ a: z.literal(0) }).safeParse({ a: 1 }).success).toBe(false);
   });
 });

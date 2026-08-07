@@ -363,15 +363,19 @@ fn object_passthrough_retains_unknown() {
     assert_eq!(out["extra"], json!(1));
 }
 
-// `__proto__` is an ordinary data key.
+// A `__proto__` shape key leaves the plan byte-path ineligible: JS resolves the
+// key through `Object.prototype` when the input omits it, which the scanner
+// cannot see, so the TS walk owns the schema. Mirrors `PROTO_KEYS` in
+// packages/zodrs/src/core/plan.ts.
 #[test]
 fn proto_key_is_ordinary_data() {
     let compiled = plan(&json!([
         {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
         {"k":"number","checks":[]}
     ]));
+    assert!(!compiled.json_eligible);
     let v = validate(&compiled, br#"{"__proto__":1}"#);
-    assert_eq!(v.status, 0, "{v:?}");
+    assert_eq!(v.status, 3, "defers to the TS path: {v:?}");
 }
 
 // ------------------------------------------------------------------------
@@ -753,19 +757,16 @@ fn object_unknown_proto_dropped_in_all_modes() {
 }
 
 #[test]
-fn object_shape_key_named_proto_is_validated_and_retained() {
+fn object_shape_key_named_proto_defers_to_the_ts_path() {
     let obj = plan(&json!([
         {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
         {"k":"string","checks":[]}
     ]));
-    // Present: validated and emitted like any shape key.
-    let v = validate(&obj, br#"{"__proto__":"x"}"#);
-    assert_eq!(v.status, 0, "clean parse: {v:?}");
-    // Wrong type: invalid_type at the key path.
-    assert_issue(
-        &validate(&obj, br#"{"__proto__":1}"#),
-        &json!({"code":"invalid_type","expected":"string","path":["__proto__"]}),
-    );
+    // The scanner cannot tell an absent `__proto__` from the inherited one the
+    // TS walk reads, so the whole plan stays off the byte path either way.
+    assert!(!obj.json_eligible);
+    assert_eq!(validate(&obj, br#"{"__proto__":"x"}"#).status, 3);
+    assert_eq!(validate(&obj, br#"{"__proto__":1}"#).status, 3);
 }
 
 // ------------------------------------------------------------------------
