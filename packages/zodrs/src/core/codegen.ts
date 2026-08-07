@@ -949,6 +949,43 @@ function compileObject(node: SchemaNode & { readonly kind: "object" }, compile: 
   const mode = node.mode;
   const catchall = node.catchall ? compile(node.catchall) : null;
 
+  // The unknown-key policy is fixed when the schema is compiled, so resolve it
+  // once here rather than re-testing `catchall` and two mode strings on every
+  // parse. `strip` — the default and the common case — needs no pass at all,
+  // so it resolves to null and costs a single null check.
+  const extras: ShapeStep | null =
+    catchall
+      ? (input, result, context, path) => {
+          let failed = false;
+          for (const extraKey of Object.keys(input)) {
+            if (known[extraKey] === true || extraKey === "__proto__") continue;
+            const childResult = catchall(input[extraKey], context, path, extraKey);
+            if (childResult === FAIL) failed = true;
+            else defineValue(result, extraKey, childResult);
+          }
+          return failed;
+        }
+      : mode === "passthrough"
+        ? (input, result) => {
+            for (const extraKey of Object.keys(input)) {
+              if (known[extraKey] === true || extraKey === "__proto__") continue;
+              defineValue(result, extraKey, input[extraKey]);
+            }
+            return false;
+          }
+        : mode === "strict"
+          ? (input, _result, context, path) => {
+              let extra: string[] | null = null;
+              for (const extraKey of Object.keys(input)) {
+                if (known[extraKey] !== true && extraKey !== "__proto__") (extra ??= []).push(extraKey);
+              }
+              // unrecognized_keys is recorded but the stripped value stays usable (the
+              // top-level parse fails it via the non-continuable continue field).
+              if (extra) nodeIssue(context, error, { code: "unrecognized_keys", keys: extra }, input, path, undefined);
+              return false;
+            }
+          : null;
+
   const fn: CNode = (input, context, path, key) => {
     if (!isObject(input)) {
       nodeIssue(context, error, { expected: "object", code: "invalid_type" }, input, path, key);
@@ -957,34 +994,7 @@ function compileObject(node: SchemaNode & { readonly kind: "object" }, compile: 
     if (key !== undefined) path.push(key);
     const result: Record<string, unknown> = {};
     let failed = runShape(input, result, context, path);
-
-    if (catchall) {
-      const keys = Object.keys(input);
-      for (let index = 0; index < keys.length; index += 1) {
-        const extraKey = keys[index] as string;
-        if (known[extraKey] === true || extraKey === "__proto__") continue;
-        const childResult = catchall(input[extraKey], context, path, extraKey);
-        if (childResult === FAIL) failed = true;
-        else defineValue(result, extraKey, childResult);
-      }
-    } else if (mode === "passthrough") {
-      const keys = Object.keys(input);
-      for (let index = 0; index < keys.length; index += 1) {
-        const extraKey = keys[index] as string;
-        if (known[extraKey] === true || extraKey === "__proto__") continue;
-        defineValue(result, extraKey, input[extraKey]);
-      }
-    } else if (mode === "strict") {
-      let extra: string[] | null = null;
-      const keys = Object.keys(input);
-      for (let index = 0; index < keys.length; index += 1) {
-        const extraKey = keys[index] as string;
-        if (known[extraKey] !== true && extraKey !== "__proto__") (extra ??= []).push(extraKey);
-      }
-      // unrecognized_keys is recorded but the stripped value stays usable (the
-      // top-level parse fails it via the non-continuable continue field).
-      if (extra) nodeIssue(context, error, { code: "unrecognized_keys", keys: extra }, input, path, undefined);
-    }
+    if (extras && extras(input, result, context, path)) failed = true;
 
     let output: unknown;
     if (failed) {
