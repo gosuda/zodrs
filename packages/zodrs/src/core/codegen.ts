@@ -71,6 +71,39 @@ type UndefMode =
   | { readonly m: 2 } // nullable: null short-circuits to null, undefined falls through to rejection
   | { readonly m: 3; readonly dv: unknown }; // default: undefined short-circuits to dv (primitive)
 
+/**
+ * Cold half of a fused primitive step: the value read came back `undefined`.
+ *
+ * Every branch that needs to tell "absent" from "present and undefined" lives
+ * here, so the hot path costs one `=== undefined` compare instead of an
+ * `Object.hasOwn` call plus one compare per wrapper mode. Returns `true` when
+ * the step is finished and the caller returns `false` (no issue); `false`
+ * when the leaf test should still run and reject the `undefined`.
+ */
+function settledUndefined(
+  undef: UndefMode,
+  input: Record<string, unknown>,
+  result: Record<string, unknown>,
+  key: string,
+  dangerous: boolean,
+  swallow: boolean,
+): boolean {
+  const present = hasOwn(input, key);
+  if (undef.m === 1) {
+    if (present) result[key] = undefined;
+    return true;
+  }
+  if (undef.m === 3) {
+    const d = undef.dv;
+    if (d === undefined) {
+      if (present) result[key] = undefined;
+    } else if (dangerous) defineValue(result, key, d);
+    else result[key] = d;
+    return true;
+  }
+  return swallow && !present;
+}
+
 /** A single wire check whose test can inline into a fused leaf step. */
 type InlineSingle =
   | { readonly i: "numfmt"; readonly format: string; readonly integer: boolean; readonly min: number; readonly max: number; readonly rangeOrigin: string }
@@ -577,25 +610,13 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
       return (key, optIn, optOut, dangerous) => {
         const swallow = optIn && optOut;
         return (input, result, context, path) => {
-          const present = hasOwn(input, key);
-          const v = present ? input[key] : undefined;
-          if (undef.m === 1 && v === undefined) {
-            if (present) result[key] = undefined;
-            return false;
-          }
-          if (undef.m === 3 && v === undefined) {
-            const d = undef.dv;
-            if (d === undefined) { if (present) result[key] = undefined; }
-            else if (dangerous) defineValue(result, key, d);
-            else result[key] = d;
-            return false;
-          }
+          const v = input[key];
+          if (v === undefined && settledUndefined(undef, input, result, key, dangerous, swallow)) return false;
           if (undef.m === 2 && v === null) {
             if (dangerous) defineValue(result, key, null); else result[key] = null;
             return false;
           }
           if (typeof v !== "string") {
-            if (swallow && !present) return false;
             nodeIssue(context, error, { expected: "string", code: "invalid_type" }, v, path, key);
             return true;
           }
@@ -608,16 +629,11 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
             return false;
           }
           if (checks) {
-            const before = swallow ? (context.issues?.length ?? 0) : 0;
+            // `v` is defined here, so the key counts as present: the
+            // absent-key suppression `swallow` exists for cannot apply.
             const r = checks(v, context, path, key);
-            if (r === FAIL) {
-              if (swallow && !present) {
-                if (context.issues) context.issues.length = before;
-                return false;
-              }
-              return true;
-            }
-            if (r === undefined) { if (present) result[key] = undefined; }
+            if (r === FAIL) return true;
+            if (r === undefined) result[key] = undefined;
             else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
@@ -632,25 +648,13 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
       return (key, optIn, optOut, dangerous) => {
         const swallow = optIn && optOut;
         return (input, result, context, path) => {
-          const present = hasOwn(input, key);
-          const v = present ? input[key] : undefined;
-          if (undef.m === 1 && v === undefined) {
-            if (present) result[key] = undefined;
-            return false;
-          }
-          if (undef.m === 3 && v === undefined) {
-            const d = undef.dv;
-            if (d === undefined) { if (present) result[key] = undefined; }
-            else if (dangerous) defineValue(result, key, d);
-            else result[key] = d;
-            return false;
-          }
+          const v = input[key];
+          if (v === undefined && settledUndefined(undef, input, result, key, dangerous, swallow)) return false;
           if (undef.m === 2 && v === null) {
             if (dangerous) defineValue(result, key, null); else result[key] = null;
             return false;
           }
           if (typeof v !== "number" || Number.isNaN(v) || !Number.isFinite(v)) {
-            if (swallow && !present) return false;
             const received = typeof v === "number" ? (Number.isNaN(v) ? "NaN" : "Infinity") : undefined;
             nodeIssue(context, error, received
               ? { expected: "number", code: "invalid_type", received }
@@ -686,16 +690,10 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
             return false;
           }
           if (checks) {
-            const before = swallow ? (context.issues?.length ?? 0) : 0;
+            // `v` is defined here, so the key counts as present.
             const r = checks(v, context, path, key);
-            if (r === FAIL) {
-              if (swallow && !present) {
-                if (context.issues) context.issues.length = before;
-                return false;
-              }
-              return true;
-            }
-            if (r === undefined) { if (present) result[key] = undefined; }
+            if (r === FAIL) return true;
+            if (r === undefined) result[key] = undefined;
             else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
@@ -707,75 +705,24 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
         };
       };
     case "boolean":
-      if (undef.m !== 0) {
-        return (key, optIn, optOut, dangerous) => {
-          const swallow = optIn && optOut;
-          return (input, result, context, path) => {
-            const present = hasOwn(input, key);
-            const v = present ? input[key] : undefined;
-            if (undef.m === 1 && v === undefined) {
-              if (present) result[key] = undefined;
-              return false;
-            }
-            if (undef.m === 3 && v === undefined) {
-              const d = undef.dv;
-              if (d === undefined) { if (present) result[key] = undefined; }
-              else if (dangerous) defineValue(result, key, d);
-              else result[key] = d;
-              return false;
-            }
-            if (undef.m === 2 && v === null) {
-              if (dangerous) defineValue(result, key, null); else result[key] = null;
-              return false;
-            }
-            if (typeof v !== "boolean") {
-              if (swallow && !present) return false;
-              nodeIssue(context, error, { expected: "boolean", code: "invalid_type" }, v, path, key);
-              return true;
-            }
-            if (checks) {
-              const before = swallow ? (context.issues?.length ?? 0) : 0;
-              const r = checks(v, context, path, key);
-              if (r === FAIL) {
-                if (swallow && !present) {
-                  if (context.issues) context.issues.length = before;
-                  return false;
-                }
-                return true;
-              }
-              if (r === undefined) { if (present) result[key] = undefined; }
-              else if (dangerous) defineValue(result, key, r);
-              else result[key] = r;
-            } else if (dangerous) {
-              defineValue(result, key, v);
-            } else {
-              result[key] = v;
-            }
-            return false;
-          };
-        };
-      }
       return (key, optIn, optOut, dangerous) => {
         const swallow = optIn && optOut;
         return (input, result, context, path) => {
-          const present = hasOwn(input, key);
-          const v = present ? input[key] : undefined;
+          const v = input[key];
+          if (v === undefined && settledUndefined(undef, input, result, key, dangerous, swallow)) return false;
+          if (undef.m === 2 && v === null) {
+            if (dangerous) defineValue(result, key, null); else result[key] = null;
+            return false;
+          }
           if (typeof v !== "boolean") {
-            if (swallow && !present) return false;
             nodeIssue(context, error, { expected: "boolean", code: "invalid_type" }, v, path, key);
             return true;
           }
           if (checks) {
-            const before = swallow ? (context.issues?.length ?? 0) : 0;
+            // `v` is defined here, so the key counts as present.
             const r = checks(v, context, path, key);
-            if (r === FAIL) {
-              if (swallow && !present) {
-                if (context.issues) context.issues.length = before;
-                return false;
-              }
-              return true;
-            }
-            if (r === undefined) { if (present) result[key] = undefined; }
+            if (r === FAIL) return true;
+            if (r === undefined) result[key] = undefined;
             else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {

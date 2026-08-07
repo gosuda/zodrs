@@ -15,12 +15,24 @@ export interface CompiledPlan {
   readonly jsonEligible: boolean;
 }
 
+/**
+ * `Object.prototype` members, minus `__proto__` which every layer already
+ * special-cases. A shape key naming one of these reads through the prototype
+ * on a plain object, which the byte path cannot reproduce. Derived from the
+ * runtime rather than hand-listed, so it cannot drift.
+ */
+const PROTO_KEYS: ReadonlySet<string> = new Set(
+  Object.getOwnPropertyNames(Object.prototype).filter((k) => k !== "__proto__"),
+);
+
 interface EmitState {
   readonly nodes: (PlanNode | null)[];
   readonly ids: Map<SchemaNode, NodeId>;
   readonly hostFns: HostFunction[];
   /** Set when a bigint node is emitted; `compilePlan` explains why that disqualifies the byte path. */
   bigint: boolean;
+  /** Set when a shape key names an `Object.prototype` member; see `PROTO_KEYS`. */
+  protoKey: boolean;
 }
 
 function toJsonValue(value: unknown): JSONType | null {
@@ -92,6 +104,11 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
       const values: NodeId[] = [];
       const optional: boolean[] = [];
       for (const key of keys) {
+        // A shape key that names an `Object.prototype` member resolves
+        // through the prototype when absent from the input, so the TS walk
+        // sees `Object.prototype.constructor` where the byte scanner sees
+        // only a missing key. `__proto__` is already handled everywhere.
+        if (PROTO_KEYS.has(key)) state.protoKey = true;
         const child = schema.shape[key];
         if (!child) continue;
         values.push(emit(child, state));
@@ -193,15 +210,17 @@ function emit(schema: SchemaNode, state: EmitState): NodeId {
 }
 
 export function compilePlan(root: SchemaNode): CompiledPlan {
-  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false };
+  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false, protoKey: false };
   emit(root, state);
   return {
     json: JSON.stringify(state.nodes),
     hostFns: state.hostFns,
-    // A bigint node disqualifies the byte path outright. Its parsed output is
-    // a JS `BigInt`, which has no JSON encoding, so the Rust walk can neither
-    // return the right value (it would hand back a `number`) nor compare
-    // against bounds the plan carries as decimal strings. The TS path owns it.
-    jsonEligible: state.hostFns.length === 0 && !state.bigint,
+    // Two shapes disqualify the byte path outright. A bigint node parses to a
+    // JS `BigInt`, which has no JSON encoding, so the Rust walk can neither
+    // return the right value nor compare against bounds the plan carries as
+    // decimal strings. A shape key naming an `Object.prototype` member reads
+    // through the prototype when absent, which the scanner cannot see. The TS
+    // path owns both.
+    jsonEligible: state.hostFns.length === 0 && !state.bigint && !state.protoKey,
   };
 }

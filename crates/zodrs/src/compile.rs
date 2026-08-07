@@ -143,6 +143,29 @@ fn pack_key(kb: &[u8]) -> u64 {
     w
 }
 
+/// `Object.prototype`'s own property names, minus `__proto__` which every
+/// layer already special-cases. Mirrors `PROTO_KEYS` in
+/// `packages/zodrs/src/core/plan.ts`, which derives the list from the JS
+/// runtime; Rust has no such runtime, so the names are spelled out. A shape
+/// key naming one of these resolves through the prototype in JS when the
+/// input omits it, so the byte path cannot reproduce the TS walk.
+fn is_proto_key(key: &str) -> bool {
+    matches!(
+        key,
+        "constructor"
+            | "__defineGetter__"
+            | "__defineSetter__"
+            | "hasOwnProperty"
+            | "__lookupGetter__"
+            | "__lookupSetter__"
+            | "isPrototypeOf"
+            | "propertyIsEnumerable"
+            | "toString"
+            | "valueOf"
+            | "toLocaleString"
+    )
+}
+
 impl ObjectDispatch {
     pub fn find(&self, key: &str) -> Option<usize> {
         self.find_bytes(key.as_bytes())
@@ -250,6 +273,12 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                 let mut words = Vec::with_capacity(keys.len());
                 let mut long = Vec::new();
                 for (schema_i, key) in keys.iter().enumerate() {
+                    // Mirrors `PROTO_KEYS` in packages/zodrs/src/core/plan.ts:
+                    // JS resolves such a key through `Object.prototype` when
+                    // the input omits it, which the byte walk cannot see.
+                    if is_proto_key(key) {
+                        eligible = false;
+                    }
                     let kb = key.as_bytes();
                     if kb.len() <= 8 {
                         words.push(KeyWord {
