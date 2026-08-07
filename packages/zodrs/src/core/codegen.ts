@@ -584,8 +584,8 @@ function compilePrimitive(node: SchemaNode): CNode {
       return fallback(node);
   }
   if (!coerce) {
-    fn.stepInto = primitiveStepFactory(kind, checks, error, REJECT_UNDEF);
-    fn.stepIntoUndef = (undef) => primitiveStepFactory(kind, checks, error, undef);
+    fn.stepInto = primitiveStepFactory(node, checks, error, REJECT_UNDEF);
+    fn.stepIntoUndef = (undef) => primitiveStepFactory(node, checks, error, undef);
     if (!checks && (kind === "string" || kind === "number" || kind === "boolean")) fn.rawLeaf = kind;
   }
   return fn;
@@ -602,7 +602,8 @@ const NULLABLE_UNDEF: UndefMode = { m: 2 };
  * the same body; `checks.inline` replaces the single-check call with the
  * test itself (issue payloads mirror compileWireCheck exactly).
  */
-function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks | null, error: unknown, undef: UndefMode): CNode["stepInto"] {
+function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, error: unknown, undef: UndefMode): CNode["stepInto"] {
+  const kind = node.kind;
   const inline = checks?.inline;
   const inlineError = checks?.inlineError;
   switch (kind) {
@@ -733,6 +734,45 @@ function primitiveStepFactory(kind: SchemaNode["kind"], checks: CompiledChecks |
           return false;
         };
       };
+    case "literal": {
+      const values = node.values;
+      // A literal `undefined` needs the absent-vs-present distinction that the
+      // generic step draws, so leave those on the slow path.
+      if (values.some((value) => value === undefined)) return undefined;
+      const single = values.length === 1;
+      const only = single ? values[0] : undefined;
+      // `Object.is` differs from `===` only at NaN and -0, neither of which a
+      // string, boolean or null literal can be, so those compare directly.
+      const strictEq = single && (typeof only === "string" || typeof only === "boolean" || only === null);
+      return (key, optIn, optOut, dangerous) => {
+        const swallow = optIn && optOut;
+        return (input, result, context, path) => {
+          const v = input[key];
+          if (v === undefined && settledUndefined(undef, input, result, key, dangerous, swallow)) return false;
+          if (undef.m === 2 && v === null && !values.includes(null)) {
+            if (dangerous) defineValue(result, key, null); else result[key] = null;
+            return false;
+          }
+          const matched = strictEq ? v === only : single ? Object.is(v, only) : values.some((value) => Object.is(value, v));
+          if (!matched) {
+            nodeIssue(context, error, { code: "invalid_value", values: [...values] }, v, path, key);
+            return true;
+          }
+          if (checks) {
+            const r = checks(v, context, path, key);
+            if (r === FAIL) return true;
+            if (r === undefined) result[key] = undefined;
+            else if (dangerous) defineValue(result, key, r);
+            else result[key] = r;
+          } else if (dangerous) {
+            defineValue(result, key, v);
+          } else {
+            result[key] = v;
+          }
+          return false;
+        };
+      };
+    }
     case "any":
     case "unknown":
       if (undef.m !== 0) return undefined;
