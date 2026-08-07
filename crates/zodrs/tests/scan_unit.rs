@@ -171,8 +171,11 @@ fn clean_int64_max() {
 #[test]
 fn defer_int64_over() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"int64"}]}]"#;
-    // 1e19 is clearly > int64 max (9.22e18) in f64, unlike 9223372036854775808 which rounds to max
-    assert_eq!(scan(plan, b"1e19"), Scan::Defer);
+    // int64 max (2^63-1) rounds up to exactly 2^63 in f64, so 2^63 itself
+    // still compares equal to the bound. 9223372036854777856 is the NEXT
+    // representable f64 above it (ulp at 2^63 is 2048) — the tightest value
+    // that can defer, so a loosened bound has nowhere to hide.
+    assert_eq!(scan(plan, b"9223372036854777856"), Scan::Defer);
 }
 
 #[test]
@@ -186,8 +189,9 @@ fn clean_uint64_max() {
 #[test]
 fn defer_uint64_over() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
-    // 2e19 is clearly > uint64 max (1.84e19) in f64
-    assert_eq!(scan(plan, b"2e19"), Scan::Defer);
+    // Same one-ulp reasoning at the uint64 bound: 2^64 rounds to the bound,
+    // and 18446744073709555712 is the next representable f64 (ulp 4096).
+    assert_eq!(scan(plan, b"18446744073709555712"), Scan::Defer);
 }
 
 #[test]
@@ -205,15 +209,27 @@ fn clean_float32_max() {
 #[test]
 fn defer_float32_over() {
     let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float32"}]}]"#;
-    assert_eq!(scan(plan, b"6e38"), Scan::Defer);
+    // One ulp above f32::MAX in f64 space — the tightest float32 rejection.
+    assert_eq!(scan(plan, b"3.402823466385289e38"), Scan::Defer);
 }
 
 #[test]
 fn clean_float64_max() {
     let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float64"}]}]"#;
-    // 1.7976931348623157e308 is near f64::MAX; any finite JSON number is Clean
-    // for float64, but this pins the scanner does not spuriously Defer.
+    // Every finite f64 clears the float64 range, so this only pins that the
+    // scanner does not spuriously defer; `defer_float64_over` carries the
+    // load-bearing half of the contract.
     assert_eq!(scan(plan, b"1.7976931348623157e308"), Scan::Clean);
+}
+
+#[test]
+fn defer_float64_over() {
+    let plan = r#"[{"k":"number","checks":[{"c":"number_format","v":"float64"}]}]"#;
+    // 1e309 overflows to infinity. The range check cannot catch it (nothing
+    // finite exceeds f64::MAX), so this pins `number_token`'s is_finite guard
+    // — the only thing standing between an overflowing literal and a Clean
+    // verdict that zod would reject.
+    assert_eq!(scan(plan, b"1e309"), Scan::Defer);
 }
 
 #[test]
@@ -247,4 +263,21 @@ fn defer_strict_unknown_key() {
     ]"#;
     // Strict mode unknown key is a hard failure -> Defer (not dirty write but still not Clean)
     assert_eq!(scan(plan, br#"{"a":1,"b":2}"#), Scan::Defer);
+}
+
+#[test]
+fn bigint_plan_is_not_json_eligible() {
+    // A bigint parses to a JS `BigInt`: no JSON encoding, and its bounds
+    // arrive as decimal strings the f64 walk cannot compare. Letting such a
+    // plan onto the byte path returned a `number` and skipped every bound
+    // check, so `safeParseJson` accepted input `safeParse` rejected.
+    // Mirrors `compilePlan`'s rule in packages/zodrs/src/core/plan.ts.
+    let p = r#"[{"k":"bigint","checks":[{"c":"lt","v":"9223372036854775807","inclusive":true,"bigint":true}],"coerce":true}]"#;
+    assert!(!compile(p).unwrap().json_eligible);
+    // Nested behind a container, not just at the root.
+    let nested = r#"[{"k":"object","keys":["id"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"bigint","checks":[],"coerce":true}]"#;
+    assert!(!compile(nested).unwrap().json_eligible);
+    // A bigint-free sibling plan stays eligible, so the rule is not over-broad.
+    let plain = r#"[{"k":"number","checks":[]}]"#;
+    assert!(compile(plain).unwrap().json_eligible);
 }

@@ -19,6 +19,8 @@ interface EmitState {
   readonly nodes: (PlanNode | null)[];
   readonly ids: Map<SchemaNode, NodeId>;
   readonly hostFns: HostFunction[];
+  /** Set when a bigint node is emitted; `compilePlan` explains why that disqualifies the byte path. */
+  bigint: boolean;
 }
 
 function toJsonValue(value: unknown): JSONType | null {
@@ -60,6 +62,7 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
     case "bigint":
     case "date":
     case "file": {
+      if (schema.kind === "bigint") state.bigint = true;
       const base = { k: schema.kind, checks: emitChecks(schema.checks, state) };
       return schema.coerce ? { ...base, coerce: true } : base;
     }
@@ -190,11 +193,15 @@ function emit(schema: SchemaNode, state: EmitState): NodeId {
 }
 
 export function compilePlan(root: SchemaNode): CompiledPlan {
-  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [] };
+  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false };
   emit(root, state);
   return {
     json: JSON.stringify(state.nodes),
     hostFns: state.hostFns,
-    jsonEligible: state.hostFns.length === 0,
+    // A bigint node disqualifies the byte path outright. Its parsed output is
+    // a JS `BigInt`, which has no JSON encoding, so the Rust walk can neither
+    // return the right value (it would hand back a `number`) nor compare
+    // against bounds the plan carries as decimal strings. The TS path owns it.
+    jsonEligible: state.hostFns.length === 0 && !state.bigint,
   };
 }

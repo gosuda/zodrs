@@ -26,6 +26,11 @@ use crate::plan::{BigIntFormat, Check, NodeId, NumberFormat, ObjectMode, Overwri
 /// JavaScript's maximum safe integer, `2^53 - 1`.
 const MAX_SAFE_INT: f64 = 9_007_199_254_740_991.0;
 
+/// Record entry count above which duplicate detection swaps the linear stack
+/// probe for a hashed key index. Below it the probe is cheaper than hashing;
+/// above it the quadratic term would dominate.
+const RECORD_LINEAR_MAX: usize = 32;
+
 /// The result of a byte-path validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -312,24 +317,39 @@ impl<'p> Validator<'p> {
                     // z.record rejects non-objects (arrays included) as `record`.
                     return self.invalid_type("record");
                 };
-                // Collapse duplicates to last-wins (first position kept) on
-                // the stack; any collapse means the input was not canonical.
-                let mut order: Vec<&str> = Vec::with_capacity(obj.len());
-                let mut last: HashMap<&str, &Value> = HashMap::with_capacity(obj.len());
+                // Collapse duplicates to last-wins, keeping the first
+                // position. Small records stay on the stack behind a linear
+                // probe; past `RECORD_LINEAR_MAX` a key index takes over, so a
+                // large map costs O(n) instead of O(n^2).
+                let mut entries: SmallVec<[(&str, &Value); 16]> = SmallVec::new();
+                let mut index: Option<HashMap<&str, usize>> = None;
                 let mut collapsed = false;
                 for (k, v) in obj {
-                    if last.insert(k, v).is_none() {
-                        order.push(k);
-                    } else {
+                    let seen = match &index {
+                        Some(ix) => ix.get(k).copied(),
+                        None => entries.iter().position(|(ek, _)| *ek == k),
+                    };
+                    if let Some(i) = seen {
+                        entries[i].1 = v;
                         collapsed = true;
+                        continue;
                     }
+                    if let Some(ix) = &mut index {
+                        ix.insert(k, entries.len());
+                    } else if entries.len() == RECORD_LINEAR_MAX {
+                        let mut ix: HashMap<&str, usize> =
+                            HashMap::with_capacity(entries.len() * 2);
+                        ix.extend(entries.iter().enumerate().map(|(i, (ek, _))| (*ek, i)));
+                        ix.insert(k, entries.len());
+                        index = Some(ix);
+                    }
+                    entries.push((k, v));
                 }
                 if collapsed {
                     self.dirty = true;
                 }
                 let string_key = matches!(self.node(key_id), PlanNode::String { .. });
-                for k in order {
-                    let entry = last[k];
+                for (k, entry) in entries {
                     // Canonical records skip `__proto__` keys entirely: never
                     // validated, never retained (the TS output builder's
                     // plain-object assignment would target the prototype).
@@ -732,16 +752,27 @@ impl<'p> Validator<'p> {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "f64->i128 is exact for every integral f64; the bound back-cast only feeds the issue payload, which zod reports at the same f64 precision"
+    )]
     fn bigint_format(&mut self, fmt: BigIntFormat, n: f64) {
-        let (min, max) = match fmt {
-            BigIntFormat::Int64 => (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_807.0),
-            BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
+        // `n` is the f64 the JSON parser produced — exactly what `BigInt(v)`
+        // sees in JS — so compare in integer space the way zod does against
+        // `util.BIGINT_FORMAT_RANGES`. An f64 bound literal cannot: `i64::MAX`
+        // and `2^63` collapse onto one f64, so `n <= max` in f64 would accept
+        // the overflowing `2^63` that zod rejects.
+        let (min, max): (i128, i128) = match fmt {
+            BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
+            BigIntFormat::Uint64 => (0, u64::MAX.into()),
         };
-        if n < min {
-            self.too_small("bigint", min, true, false);
+        let exact = n as i128;
+        if exact < min {
+            self.too_small("bigint", min as f64, true, false);
         }
-        if n > max {
-            self.too_big("bigint", max, true, false);
+        if exact > max {
+            self.too_big("bigint", max as f64, true, false);
         }
     }
 

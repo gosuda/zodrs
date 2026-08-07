@@ -279,7 +279,11 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                 Ok(r) => d.template = Some(r),
                 Err(_) => eligible = false,
             },
+            // A bigint parses to a JS `BigInt`: no JSON encoding, and its
+            // bounds arrive as decimal strings the f64 walk cannot compare.
+            // Mirrors the same rule in `packages/zodrs/src/core/plan.ts`.
             PlanNode::Host { .. }
+            | PlanNode::BigInt { .. }
             | PlanNode::Default { dynamic: true, .. }
             | PlanNode::Prefault { dynamic: true, .. }
             | PlanNode::Catch { dynamic: true, .. } => eligible = false,

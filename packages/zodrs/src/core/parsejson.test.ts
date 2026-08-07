@@ -20,10 +20,24 @@ test("lone-surrogate escape succeeds via status-3 fallback", () => {
   expect(S.parseJson('{"a":"\\ud800"}')).toEqual({ a: "\ud800" });
 });
 
-test("1e400 yields Infinity via status-3 fallback", () => {
+test("1e400 reaches the validator as Infinity via status-3 fallback", () => {
   const N = z.object({ a: z.number() });
-  const result = N.parseJson('{"a":1e400}');
-  expect(result.a).toBe(Number.POSITIVE_INFINITY);
+  // sonic-rs rejects the overflowing literal, so the byte path returns
+  // status 3 and the TS path re-parses: `JSON.parse` yields Infinity.
+  // `z.number()` then rejects it exactly as zod v4 does. `received:
+  // "Infinity"` is the proof the fallback ran — the Rust path never sees
+  // the value, so it could not have produced this issue.
+  const result = N.safeParseJson('{"a":1e400}');
+  expect(result.success).toBe(false);
+  if (result.success) return;
+  expect(result.error.issues).toEqual([
+    expect.objectContaining({
+      code: "invalid_type",
+      expected: "number",
+      received: "Infinity",
+      path: ["a"],
+    }),
+  ]);
 });
 
 test("NaN literal throws SyntaxError", () => {
