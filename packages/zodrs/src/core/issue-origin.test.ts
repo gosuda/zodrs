@@ -1,3 +1,4 @@
+import { TextEncoder } from "node:util";
 import { describe, expect, it } from "vitest";
 import * as z from "../classic/index.js";
 

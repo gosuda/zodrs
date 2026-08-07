@@ -70,6 +70,9 @@
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
     "build:esm": "tsc -p tsconfig.build.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
+    "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --output-dir ../../packages/zodrs/native",
+    "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm",
+    "prepack": "pnpm run build:native && pnpm run build:wasm && pnpm run build",
     "test": "vitest run"
   },
   "napi": {
@@ -96,5 +99,8 @@
   },
   "publishConfig": {
     "name": "zod-rs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.8.2"
   }
 }

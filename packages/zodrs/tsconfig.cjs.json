@@ -12,9 +12,17 @@
     "sourceMap": false,
     "noEmit": false,
     "paths": {
-      "#module-url": ["./src/core/module-url-cjs.ts"]
+      "#module-url": [
+        "./src/core/module-url-cjs.ts"
+      ]
     }
   },
-  "include": ["src"],
-  "exclude": ["src/core/module-url.ts", "src/core/loader.selftest.ts"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/core/module-url.ts",
+    "src/core/loader.selftest.ts",
+    "src/**/*.test.ts"
+  ]
 }

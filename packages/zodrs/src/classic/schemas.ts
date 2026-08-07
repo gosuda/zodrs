@@ -935,11 +935,13 @@ export type ZodFunction = $ZodType<(...args: never[]) => unknown, (...args: neve
 // is true exactly when `x` is a string schema — and each is also callable as the
 // corresponding factory (`z.ZodString() === z.string()`), matching Zod.
 type ZodMatcher = { readonly [Symbol.hasInstance]: (value: unknown) => boolean };
-function kindMatcher(factory: (...args: readonly unknown[]) => $ZodType, ...kinds: readonly SchemaNode["kind"][]): ZodMatcher {
+/** A matcher that also runs as its factory, e.g. `z.ZodString() === z.string()`. */
+type ZodCallableMatcher = ZodMatcher & ((...args: readonly unknown[]) => $ZodType);
+function kindMatcher(factory: (...args: readonly unknown[]) => $ZodType, ...kinds: readonly SchemaNode["kind"][]): ZodCallableMatcher {
   const matcher = Object.defineProperty(function (...args: readonly unknown[]) { return factory(...args); }, Symbol.hasInstance, {
     value: (value: unknown): boolean => value instanceof $ZodType && kinds.includes(value._zod.node.kind),
   });
-  return matcher as unknown as ZodMatcher;
+  return matcher as ZodCallableMatcher;
 }
 
 export const ZodString: ZodMatcher = kindMatcher(() => string(), "string");
