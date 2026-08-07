@@ -20,7 +20,6 @@ export interface LedgerEntry {
   title: string;
   rootCause: string;
   skip:
-    | { rule: "native-threw-internal-invariant" }
     | { rule: "case-kind"; kinds: string[] }
     | { rule: "issues-equal-modulo-extra-native-fields" };
   repro: {
@@ -32,8 +31,6 @@ export interface LedgerEntry {
 }
 
 interface LedgerFile { version: number; entries: LedgerEntry[] }
-
-const INTERNAL_INVARIANT_PREFIX = "Internal invariant: native backend received a non-JSON-eligible plan";
 
 export function loadLedger(): LedgerEntry[] {
   const url = new URL("./KNOWN-MISMATCHES.json", import.meta.url);
@@ -62,9 +59,7 @@ function stripOverReportedFields(value: unknown): unknown {
 /** Returns the ledger entry id explaining this mismatch, or null if it is new. */
 export function classifyMismatch(entries: LedgerEntry[], fuzzCase: FuzzCase, both: BothResults): string | null {
   for (const entry of entries) {
-    if (entry.skip.rule === "native-threw-internal-invariant") {
-      if (both.nativeThrew !== null && both.nativeThrew.includes(INTERNAL_INVARIANT_PREFIX)) return entry.id;
-    } else if (entry.skip.rule === "case-kind") {
+    if (entry.skip.rule === "case-kind") {
       if (entry.skip.kinds.includes(fuzzCase.kind)) return entry.id;
     } else if (both.ref !== null && !both.ref.success && both.native !== null && !both.native.success) {
       const refStripped = stripOverReportedFields(both.ref.error.issues);
