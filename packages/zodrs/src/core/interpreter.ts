@@ -97,7 +97,7 @@ function numeric(checkValue: number | string, bigint: boolean): number | bigint 
   return bigint ? BigInt(checkValue) : Number(checkValue);
 }
 
-function applyOverwrite(op: "trim" | "toLowerCase" | "toUpperCase" | "normalize" | "slugify", value: unknown, form?: string): unknown {
+export function applyOverwrite(op: "trim" | "toLowerCase" | "toUpperCase" | "normalize" | "slugify", value: unknown, form?: string): unknown {
   if (typeof value !== "string") return value;
   switch (op) {
     case "trim": return value.trim();
@@ -148,6 +148,14 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
       const refinement = makeRefinementContext(context, node, path, value);
       const result = check.fn(value, refinement);
       if (isPromise(result)) throw new $ZodAsyncError();
+      if (context.issues) {
+        // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
+        // stamp pathless issues with the current path, matching Zod v4.
+        for (let index = before; index < context.issues.length; index += 1) {
+          const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
+          if (pushed.path === undefined) pushed.path = [...path];
+        }
+      }
       if (check.op === "refine" && !result) {
         const issuePath = runtime.path ? [...path, ...runtime.path] : path;
         addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
@@ -557,6 +565,14 @@ function hostResult(node: SchemaNode & { readonly kind: "host" }, input: unknown
   const refinement = makeRefinementContext(context, node, path, base);
   const result = node.fn(base, refinement);
   if (isPromise(result)) throw new $ZodAsyncError();
+  if (context.issues) {
+    // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
+    // stamp pathless issues with the current path, matching Zod v4.
+    for (let index = before; index < context.issues.length; index += 1) {
+      const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
+      if (pushed.path === undefined) pushed.path = [...path];
+    }
+  }
   if (node.op === "refine") {
     if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
     return applyChecksSync(node, base, context, path);
@@ -883,6 +899,14 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
     const check: HostRuntimeCheck = runtime.check;
     const before = context.issues?.length ?? 0;
     const result = await check.fn(value, makeRefinementContext(context, node, path, value));
+    if (context.issues) {
+      // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
+      // stamp pathless issues with the current path, matching Zod v4.
+      for (let index = before; index < context.issues.length; index += 1) {
+        const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
+        if (pushed.path === undefined) pushed.path = [...path];
+      }
+    }
     if (check.op === "refine" && !result) {
       const issuePath = runtime.path ? [...path, ...runtime.path] : path;
       addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
@@ -906,6 +930,12 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     if (base === FAIL) return FAIL;
     const before = context.issues?.length ?? 0;
     const result = await node.fn(base, makeRefinementContext(context, node, path, base));
+    if (context.issues) {
+      for (let index = before; index < context.issues.length; index += 1) {
+        const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
+        if (pushed.path === undefined) pushed.path = [...path];
+      }
+    }
     if (node.op === "refine") {
       if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
       return base;

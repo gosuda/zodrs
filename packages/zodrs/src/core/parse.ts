@@ -55,15 +55,38 @@ function hasFatalIssue(issues: $ZodRawIssue[] | null): boolean {
 }
 
 
+/**
+ * Reusable validation contexts for the hot path: forward, sync, and no caller
+ * context (the overwhelmingly common parse shape). A host refine that parses
+ * nested data simply draws another slot; anything unusual allocates fresh.
+ */
+const CTX_POOL: ValidationContext[] = [];
+
 function validationContext(context: ParseContext | undefined, async: boolean, direction: "forward" | "backward" = "forward"): ValidationContext {
+  if (context === undefined && !async && direction === "forward") {
+    const pooled = CTX_POOL.pop();
+    if (pooled) return pooled;
+    return { issues: null, async, direction };
+  }
   return { ...context, issues: null, async, direction };
+}
+
+function releaseContext(ctx: ValidationContext): void {
+  if (ctx.async === false && ctx.direction === "forward" && CTX_POOL.length < 8) {
+    ctx.issues = null;
+    ctx.fallback = 0;
+    CTX_POOL.push(ctx);
+  }
 }
 
 export function parse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): output<T> {
   const ctx = validationContext(context, false);
   const result = schema._zod.validate(value, ctx);
   if (isPromise(result)) throw new $ZodAsyncError();
-  if (result === FAIL || hasFatalIssue(ctx.issues)) throw makeError<output<T>>(ctx.issues, context);
+  const issues = ctx.issues;
+  const failed = result === FAIL || hasFatalIssue(issues);
+  releaseContext(ctx);
+  if (failed) throw makeError<output<T>>(issues, context);
   return result as output<T>;
 }
 
@@ -71,8 +94,11 @@ export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, co
   const ctx = validationContext(context, false);
   const result = schema._zod.validate(value, ctx);
   if (isPromise(result)) throw new $ZodAsyncError();
-  return result === FAIL || hasFatalIssue(ctx.issues)
-    ? { success: false, error: makeError<output<T>>(ctx.issues, context) }
+  const issues = ctx.issues;
+  const failed = result === FAIL || hasFatalIssue(issues);
+  releaseContext(ctx);
+  return failed
+    ? { success: false, error: makeError<output<T>>(issues, context) }
     : { success: true, data: result as output<T> };
 }
 
