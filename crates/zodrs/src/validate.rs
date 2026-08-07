@@ -214,11 +214,21 @@ impl<'p> Validator<'p> {
                         .count();
                 if rest.is_none() {
                     if slice.len() < optin_start {
-                        self.too_small("array", optin_start as f64, true, false);
+                        self.push(
+                            Issue::new("too_small", &self.path)
+                                .with("origin", Json::from("array"))
+                                .with("minimum", num_json(optin_start as f64))
+                                .with("inclusive", Json::from(true)),
+                        );
                         return;
                     }
                     if slice.len() > items.len() {
-                        self.too_big("array", items.len() as f64, true, false);
+                        self.push(
+                            Issue::new("too_big", &self.path)
+                                .with("origin", Json::from("array"))
+                                .with("maximum", num_json(items.len() as f64))
+                                .with("inclusive", Json::from(true)),
+                        );
                     }
                 }
                 for (i, item_id) in items.iter().enumerate() {
@@ -409,10 +419,13 @@ impl<'p> Validator<'p> {
             }
             PlanNode::Union { options } => {
                 let options = options.clone();
+                let union_path = self.path.clone();
                 let mut branch_errors: Vec<Json> = Vec::new();
                 for opt in &options {
                     let before = self.issues.len();
+                    self.path = Path::new();
                     self.check_missing(*opt);
+                    self.path.clone_from(&union_path);
                     if self.issues.len() == before {
                         return; // an option accepts undefined
                     }
@@ -420,7 +433,7 @@ impl<'p> Validator<'p> {
                     branch_errors.push(issues_to_value(&branch));
                 }
                 self.push(
-                    Issue::new("invalid_union", &self.path)
+                    Issue::new("invalid_union", &union_path)
                         .with("errors", Json::Array(branch_errors)),
                 );
             }
@@ -490,12 +503,12 @@ impl<'p> Validator<'p> {
                 }
                 Check::Lowercase => {
                     if cur.chars().any(char::is_uppercase) {
-                        self.string_format("lowercase", &[]);
+                        self.string_format("lowercase", &[("pattern", Json::from("/^[^A-Z]*$/"))]);
                     }
                 }
                 Check::Uppercase => {
                     if cur.chars().any(char::is_lowercase) {
-                        self.string_format("uppercase", &[]);
+                        self.string_format("uppercase", &[("pattern", Json::from("/^[^a-z]*$/"))]);
                     }
                 }
                 Check::Regex { src, flags } => {
@@ -505,7 +518,7 @@ impl<'p> Validator<'p> {
                         // Canonical regex issue carries the JS pattern source
                         // and no `origin`; the message interpolates it.
                         self.push(
-                            Issue::new("invalid_format", &self.path)
+                            Issue::new_check("invalid_format", &self.path)
                                 .with("format", Json::from("regex"))
                                 .with("pattern", Json::from(format!("/{src}/{flags}"))),
                         );
@@ -579,7 +592,7 @@ impl<'p> Validator<'p> {
                     let d = v.as_f64().unwrap_or(1.0);
                     if !float_multiple_of(n, d) {
                         self.push(
-                            Issue::new("not_multiple_of", &self.path)
+                            Issue::new_check("not_multiple_of", &self.path)
                                 .with("origin", Json::from("number"))
                                 .with("divisor", num_json(d)),
                         );
@@ -600,7 +613,7 @@ impl<'p> Validator<'p> {
         if is_int {
             if n.fract() != 0.0 || !n.is_finite() {
                 self.push(
-                    Issue::new("invalid_type", &self.path)
+                    Issue::new_check("invalid_type", &self.path)
                         .with("expected", Json::from("int"))
                         .with("format", Json::from(number_format_id(fmt))),
                 );
@@ -609,7 +622,7 @@ impl<'p> Validator<'p> {
             if n.abs() > MAX_SAFE_INT {
                 if n > 0.0 {
                     self.push(
-                        Issue::new("too_big", &self.path)
+                        Issue::new_check("too_big", &self.path)
                             .with("origin", Json::from("int"))
                             .with("maximum", num_json(MAX_SAFE_INT))
                             .with("inclusive", Json::from(true))
@@ -620,7 +633,7 @@ impl<'p> Validator<'p> {
                     );
                 } else {
                     self.push(
-                        Issue::new("too_small", &self.path)
+                        Issue::new_check("too_small", &self.path)
                             .with("origin", Json::from("int"))
                             .with("minimum", num_json(-MAX_SAFE_INT))
                             .with("inclusive", Json::from(true))
@@ -636,7 +649,7 @@ impl<'p> Validator<'p> {
         let (min, max) = number_format_range(fmt);
         if n < min {
             self.push(
-                Issue::new("too_small", &self.path)
+                Issue::new_check("too_small", &self.path)
                     .with("origin", Json::from("number"))
                     .with("minimum", num_json(min))
                     .with("inclusive", Json::from(true)),
@@ -644,7 +657,7 @@ impl<'p> Validator<'p> {
         }
         if n > max {
             self.push(
-                Issue::new("too_big", &self.path)
+                Issue::new_check("too_big", &self.path)
                     .with("origin", Json::from("number"))
                     .with("maximum", num_json(max))
                     .with("inclusive", Json::from(true)),
@@ -783,19 +796,53 @@ impl<'p> Validator<'p> {
     }
 
     fn check_union(&mut self, options: &[NodeId], value: &Value) {
-        let mut branch_errors: Vec<Json> = Vec::new();
+        let union_path = self.path.clone();
+        let mut branch_issues: Vec<Vec<Issue>> = Vec::new();
         for opt in options {
             let before = self.issues.len();
             let dirty_before = self.dirty;
+            // Sub-issues keep paths relative to the option: reset the path
+            // before checking each branch so it doesn't inherit the union's
+            // path prefix. The wrapper invalid_union carries the union path.
+            self.path = Path::new();
             self.check(*opt, value);
+            self.path.clone_from(&union_path);
             if self.issues.len() == before {
                 return; // first successful option wins
             }
             let branch = self.issues.split_off(before);
-            branch_errors.push(issues_to_value(&branch));
+            branch_issues.push(branch);
             self.dirty = dirty_before;
         }
-        self.push(Issue::new("invalid_union", &self.path).with("errors", Json::Array(branch_errors)));
+        // Canonical flattening: when exactly one branch is "nonaborted"
+        // (all its issues have `aborting == false`, mirroring TS
+        // `continue === true` from `checkPayloadIssues()`), surface that
+        // branch's issues directly with the union path prepended.
+        let nonaborted_indices: Vec<usize> = branch_issues
+            .iter()
+            .enumerate()
+            .filter(|(_, issues)| issues.iter().all(|iss| !iss.aborting))
+            .map(|(i, _)| i)
+            .collect();
+        if let [idx] = nonaborted_indices.as_slice() {
+            let idx = *idx;
+            if let Some(issues) = branch_issues.get(idx) {
+                for iss in issues {
+                    let mut new_issue = iss.clone();
+                    let mut full_path = union_path.clone();
+                    full_path.extend(iss.path.iter().cloned());
+                    new_issue.path = full_path;
+                    self.issues.push(new_issue);
+                }
+                return;
+            }
+        }
+        let branch_errors: Vec<Json> =
+            branch_issues.iter().map(|issues| issues_to_value(issues)).collect();
+        self.push(
+            Issue::new("invalid_union", &union_path)
+                .with("errors", Json::Array(branch_errors)),
+        );
     }
 
     fn check_disc_union(&mut self, id: NodeId, disc_key: &str, value: &Value) {
@@ -827,6 +874,7 @@ impl<'p> Validator<'p> {
         self.push(
             Issue::new("invalid_union", &self.path)
                 .with("errors", Json::Array(Vec::new()))
+                .with("note", Json::from("No matching discriminator"))
                 .with("discriminator", Json::from(disc_key))
                 .with("options", Json::Array(options)),
         );
@@ -836,7 +884,7 @@ impl<'p> Validator<'p> {
     // ---- issue helpers -------------------------------------------------
 
     fn too_small(&mut self, origin: &str, minimum: f64, inclusive: bool, exact: bool) {
-        let mut issue = Issue::new("too_small", &self.path)
+        let mut issue = Issue::new_check("too_small", &self.path)
             .with("origin", Json::from(origin))
             .with("minimum", num_json(minimum))
             .with("inclusive", Json::from(inclusive));
@@ -846,7 +894,7 @@ impl<'p> Validator<'p> {
         self.push(issue);
     }
     fn too_big(&mut self, origin: &str, maximum: f64, inclusive: bool, exact: bool) {
-        let mut issue = Issue::new("too_big", &self.path)
+        let mut issue = Issue::new_check("too_big", &self.path)
             .with("origin", Json::from(origin))
             .with("maximum", num_json(maximum))
             .with("inclusive", Json::from(inclusive));
@@ -856,7 +904,7 @@ impl<'p> Validator<'p> {
         self.push(issue);
     }
     fn string_format(&mut self, format: &'static str, extra: &[(&'static str, Json)]) {
-        let mut issue = Issue::new("invalid_format", &self.path)
+        let mut issue = Issue::new_check("invalid_format", &self.path)
             .with("origin", Json::from("string"))
             .with("format", Json::from(format));
         for (k, v) in extra {
@@ -865,11 +913,19 @@ impl<'p> Validator<'p> {
         self.push(issue);
     }
     fn format_issue(&mut self, f: &FormatValidator) {
-        self.push(
-            Issue::new("invalid_format", &self.path)
-                .with("origin", Json::from("string"))
-                .with("format", Json::from(f.id.clone())),
-        );
+        if let Some(pat) = &f.pattern {
+            self.push(
+                Issue::new_check("invalid_format", &self.path)
+                    .with("origin", Json::from("string"))
+                    .with("format", Json::from(f.id.clone()))
+                    .with("pattern", Json::from(pat.clone())),
+            );
+        } else {
+            self.push(
+                Issue::new_check("invalid_format", &self.path)
+                    .with("format", Json::from(f.id.clone())),
+            );
+        }
     }
 }
 
@@ -1501,35 +1557,16 @@ fn js_number_to_string(n: f64) -> String {
     }
 }
 
-/// Zod's `floatSafeRemainder`: integer-scale the operands to dodge FP drift.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    reason = "decimal digit counts are tiny non-negative integers"
-)]
+/// Mirrors the TS `floatSafeRemainder`: a tolerance-based check that
+/// accounts for floating-point rounding in the ratio `value / step`.
 fn float_multiple_of(value: f64, step: f64) -> bool {
     if step == 0.0 {
         return false;
     }
-    let val_dec = decimals(value);
-    let step_dec = decimals(step);
-    let dec_count = val_dec.max(step_dec);
-    let scale = 10f64.powi(dec_count as i32);
-    let v = (value * scale).round();
-    let s = (step * scale).round();
-    (v % s) == 0.0
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "fractional digit counts fit u32 for any real number"
-)]
-fn decimals(n: f64) -> u32 {
-    let s = format!("{n}");
-    match s.split_once('.') {
-        Some((_, frac)) => frac.len() as u32,
-        None => 0,
-    }
+    let ratio = value / step;
+    let rounded_ratio = ratio.round();
+    let tolerance = f64::EPSILON * ratio.abs().max(1.0);
+    (ratio - rounded_ratio).abs() < tolerance
 }
 
 fn apply_overwrite(s: &str, op: OverwriteOp, _form: Option<&str>) -> String {

@@ -620,6 +620,7 @@ fn k7_discriminator_issue_shape() {
         &json!({
             "code":"invalid_union",
             "errors":[],
+            "note":"No matching discriminator",
             "discriminator":"kind",
             "options":["dog","cat"],
             "path":["kind"]
@@ -989,4 +990,111 @@ fn coerce_string_uses_js_number_formatting() {
     assert_eq!(output(&validate(&s, br"1.5e-7")), json!("1.5e-7"));
     assert_eq!(output(&validate(&s, br"0.000001")), json!("0.000001"));
     assert_eq!(output(&validate(&s, br"0.30000000000000004")), json!("0.30000000000000004"));
+}
+// ------------------------------------------------------------------------
+// Regression: union flattening — exactly one option type-matches.
+// union[string.min(3), number] on "ab" → string type-matched (too_small),
+// number type-mismatched (invalid_type). Canonical: surface too_small directly.
+// ------------------------------------------------------------------------
+
+#[test]
+fn union_flatten_single_type_match() {
+    let p = plan(&json!([
+        {"k":"union","options":[1,2]},
+        {"k":"string","checks":[{"c":"min_length","v":3}]},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&p, br#""ab""#);
+    // Branch 1 (string min 3): too_small from checkPayloadIssues → continue:true → nonaborted.
+    // Branch 2 (number): invalid_type from issue() → continue:undefined → NOT nonaborted.
+    // nonaborted.length == 1 → flatten branch 1's too_small directly.
+    assert_eq!(v.status, 2, "expected invalid: {v:?}");
+    let iss = issues(&v.payload);
+    assert_eq!(iss.len(), 1, "expected 1 flattened issue, got {iss:?}");
+    assert_eq!(iss[0]["code"], "too_small", "got: {iss:?}");
+    assert_eq!(iss[0]["origin"], "string");
+    assert_eq!(iss[0]["minimum"], 3);
+    assert_eq!(iss[0]["inclusive"], true);
+    assert_eq!(iss[0]["path"], json!([]));
+}
+
+// ------------------------------------------------------------------------
+// Regression: union sub-issue paths are RELATIVE to the option.
+// union[object{name:string}, object{name:number}] on {"name":true}
+// → both branches fail with relative path ["name"], wrapper carries [].
+// ------------------------------------------------------------------------
+
+#[test]
+fn union_sub_issue_relative_paths() {
+    let p = plan(&json!([
+        {"k":"union","options":[1,3]},
+        {"k":"object","keys":["name"],"values":[2],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]},
+        {"k":"object","keys":["name"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&p, br#"{"name":true}"#);
+    assert_eq!(v.status, 2, "expected invalid: {v:?}");
+    let iss = issues(&v.payload);
+    // Both branches type-mismatch (object vs boolean input) → no flattening,
+    // invalid_union wrapper with relative sub-issue paths.
+    assert_eq!(iss.len(), 1, "expected 1 issue, got {iss:?}");
+    assert_eq!(iss[0]["code"], "invalid_union");
+    assert_eq!(iss[0]["path"], json!([]));
+    // Sub-issues should have relative paths ["name"], not ["name"] prefixed with union path.
+    let errors = iss[0]["errors"].as_array().unwrap();
+    for branch in errors {
+        for sub in branch.as_array().unwrap() {
+            assert_eq!(sub["path"], json!(["name"]), "sub-issue path should be relative: {sub:?}");
+        }
+    }
+}
+
+// ------------------------------------------------------------------------
+// Regression: invalid_format issue includes `pattern` field and correct
+// key order (origin, format, pattern, path).
+// ------------------------------------------------------------------------
+
+#[test]
+fn format_issue_includes_pattern_and_key_order() {
+    let p = plan(&json!([
+        {"k":"string","checks":[{"c":"format","v":"uuid"}]}
+    ]));
+    let v = validate(&p, br#""not-a-uuid""#);
+    assert_eq!(v.status, 2, "expected invalid: {v:?}");
+    let iss = issues(&v.payload);
+    assert_eq!(iss.len(), 1);
+    let obj = iss[0].as_object().unwrap();
+    // Key order: code, origin, format, pattern, path
+    let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
+    assert_eq!(keys, vec!["code", "origin", "format", "pattern", "path"], "key order: {keys:?}");
+    assert_eq!(obj["code"], "invalid_format");
+    assert_eq!(obj["origin"], "string");
+    assert_eq!(obj["format"], "uuid");
+    assert!(obj["pattern"].is_string(), "pattern should be present");
+}
+
+// ------------------------------------------------------------------------
+// Regression: discunion no-match issue includes `note` field with correct
+// key order (code, errors, note, discriminator, options, path).
+// ------------------------------------------------------------------------
+
+#[test]
+fn discunion_note_field_and_key_order() {
+    let p = plan(&json!([
+        {"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},
+        {"k":"object","keys":["kind"],"values":[3],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["kind"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"literal","values":["dog"]},
+        {"k":"literal","values":["cat"]}
+    ]));
+    let v = validate(&p, br#"{"kind":"fish"}"#);
+    assert_eq!(v.status, 2, "expected invalid: {v:?}");
+    let iss = issues(&v.payload);
+    assert_eq!(iss.len(), 1);
+    let obj = iss[0].as_object().unwrap();
+    // Key order: code, errors, note, discriminator, options, path
+    let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
+    assert_eq!(keys, vec!["code", "errors", "note", "discriminator", "options", "path"], "key order: {keys:?}");
+    assert_eq!(obj["note"], "No matching discriminator");
 }

@@ -22,7 +22,9 @@ pub enum PathSeg {
 }
 
 impl PathSeg {
-    fn to_json(&self) -> Json {
+    /// Renders this path segment as its JSON form (string key or number index).
+    #[must_use]
+    pub fn to_json(&self) -> Json {
         match self {
             PathSeg::Key(k) => Json::String(k.clone()),
             PathSeg::Index(i) => Json::Number((*i).into()),
@@ -33,41 +35,66 @@ impl PathSeg {
 /// The path stack accumulated during a validation walk.
 pub type Path = SmallVec<[PathSeg; 8]>;
 
-/// A single raw issue: a `code`, a `path`, and the code-specific payload
-/// fields, all order-independent under JSON object equality.
+/// A single raw issue: a `path` and an ordered list of payload fields
+/// (including `code`) whose insertion order mirrors the TS interpreter's
+/// issue-construction sites exactly — the differential fuzz compares
+/// serialized object key order.
 #[derive(Debug, Clone)]
 pub struct Issue {
-    /// Zod issue code, e.g. `too_small` or `invalid_type`.
-    pub code: &'static str,
     /// Location of the issue within the input value.
     pub path: Path,
-    /// Extra payload fields, e.g. `origin`, `minimum`, `format`.
+    /// All payload fields including `code`, in canonical insertion order.
     pub fields: Vec<(&'static str, Json)>,
+    /// Whether this issue aborts further validation (TS `continue: undefined`
+    /// from `issue()`).  Check issues from `checkPayloadIssues()` set this
+    /// to `false` (TS `continue: true`).  Not serialized — used only by
+    /// union flattening to decide which branches are "nonaborted".
+    pub aborting: bool,
 }
 
 impl Issue {
-    /// Creates an issue with the given code at the current path.
+    /// Creates an aborting issue (TS `issue()`: `continue` is undefined).
     #[must_use]
     pub fn new(code: &'static str, path: &Path) -> Issue {
         Issue {
-            code,
             path: path.clone(),
-            fields: Vec::new(),
+            fields: vec![("code", Json::String(code.to_string()))],
+            aborting: true,
         }
     }
 
-    /// Adds one payload field and returns the issue for chaining.
+    /// Creates a non-aborting check issue (TS `checkPayloadIssues()`:
+    /// `continue: true`).
+    #[must_use]
+    pub fn new_check(code: &'static str, path: &Path) -> Issue {
+        Issue {
+            path: path.clone(),
+            fields: vec![("code", Json::String(code.to_string()))],
+            aborting: false,
+        }
+    }
+
+    /// Adds one payload field after the last field and returns the issue.
     #[must_use]
     pub fn with(mut self, key: &'static str, value: Json) -> Issue {
         self.fields.push((key, value));
         self
     }
 
-    /// Renders this issue as a JSON object.
+    /// Inserts a field at position 0 (before `code`) and returns the issue.
+    /// For codes whose canonical key order has `origin` or `expected` before
+    /// `code` (e.g. `too_small`, `invalid_format`, `invalid_type`).
+    #[must_use]
+    pub fn insert_before_code(mut self, key: &'static str, value: Json) -> Issue {
+        self.fields.insert(0, (key, value));
+        self
+    }
+
+    /// Renders this issue as a JSON object with fields in insertion order,
+    /// then `path` last.
     #[must_use]
     pub fn to_json(&self) -> Json {
         let mut m = Map::new();
-        m.insert("code".to_string(), Json::String(self.code.to_string()));
         for (k, v) in &self.fields {
             m.insert((*k).to_string(), v.clone());
         }
@@ -77,22 +104,16 @@ impl Issue {
     }
 }
 
-/// Serializes a batch of issues as one JSON array string.
-///
-/// # Panics
-///
-/// Panics only if `serde_json` fails to serialize a `Value` array, which cannot
-/// happen for well-formed issues.
+/// Serializes a slice of issues as a JSON array string.
 #[must_use]
-#[allow(clippy::expect_used, reason = "serializing a Value array is infallible")]
 pub fn issues_to_json(issues: &[Issue]) -> String {
-    let arr = Json::Array(issues.iter().map(Issue::to_json).collect());
-    serde_json::to_string(&arr).expect("issue array is always serializable")
+    let arr: Vec<Json> = issues.iter().map(Issue::to_json).collect();
+    serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into())
 }
 
-/// Serializes a batch of issues as a raw `serde_json::Value` (for nesting
-/// inside `invalid_union` / `invalid_key` / `invalid_element` payloads).
+/// Serializes a slice of issues as a `serde_json::Value` array.
 #[must_use]
 pub fn issues_to_value(issues: &[Issue]) -> Json {
     Json::Array(issues.iter().map(Issue::to_json).collect())
 }
+

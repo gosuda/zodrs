@@ -19,8 +19,13 @@ use serde_json::Value as Json;
 /// `format` field of an `invalid_format` issue.
 #[derive(Debug)]
 pub struct FormatValidator {
-    /// Canonical format id used in the `format` field of an issue.
+    /// Canonical format id used in the `format` field of an issue (after
+    /// mapping `uuidv4`/`uuidv6`/`uuidv7` → `uuid`).
     pub id: String,
+    /// The JS regex source string for the `pattern` field of an
+    /// `invalid_format` issue, or `None` for formats that canonically omit
+    /// both `origin` and `pattern` (only `jwt`).
+    pub pattern: Option<String>,
     kind: Kind,
 }
 
@@ -70,13 +75,42 @@ fn anchored(body: &str) -> String {
     format!(r"\A(?:{body})\z")
 }
 
+/// Build the JS `RegExp.toString()` form (`/^<body>$/<flags>`) for the
+/// `pattern` field of an `invalid_format` issue. Forward slashes in the body
+/// are escaped as `\/` to match `RegExp.toString()`.
+fn js_pat(body: &str, flags: &str) -> String {
+    let escaped = body.replace('/', r"\/");
+    if flags.is_empty() {
+        format!("/^{escaped}$/")
+    } else {
+        format!("/^{escaped}$/{flags}")
+    }
+}
+
 fn rx(id: &str, body: &str) -> Result<FormatValidator, String> {
+    rx_with_pattern(id, body, Some(js_pat(body, "")))
+}
+
+/// Like `rx` but with an explicit JS pattern string (for bodies that differ
+/// from the Rust regex, e.g. capturing groups in the JS source), or `None`
+/// for formats that canonically omit both `origin` and `pattern`.
+fn rx_with_pattern(id: &str, body: &str, pattern: Option<String>) -> Result<FormatValidator, String> {
     Regex::new(&anchored(body))
         .map(|r| FormatValidator {
-            id: id.to_string(),
+            id: format_name(id),
             kind: Kind::Rx(r),
+            pattern,
         })
         .map_err(|e| format!("format {id}: {e}"))
+}
+
+/// Maps a format id to the canonical `format` field value in issues:
+/// `uuidv4`/`uuidv6`/`uuidv7` → `uuid`, everything else → itself.
+fn format_name(id: &str) -> String {
+    match id {
+        "uuidv4" | "uuid4" | "uuidv6" | "uuid6" | "uuidv7" | "uuid7" => "uuid".to_string(),
+        other => other.to_string(),
+    }
 }
 
 // Bodies (no anchors) ported from regexes.ts.
@@ -102,7 +136,6 @@ const BASE64: &str =
     r"(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?";
 const BASE64URL: &str = r"[A-Za-z0-9_-]*";
 const E164: &str = r"\+[1-9]\d{6,14}";
-const HEX: &str = r"[0-9a-fA-F]*";
 const LOWERCASE: &str = r"[^A-Z]*";
 const UPPERCASE: &str = r"[^a-z]*";
 const EMOJI: &str = r"(\p{Extended_Pictographic}|\p{Emoji_Component})+";
@@ -130,6 +163,22 @@ fn params_bool(params: Option<&Json>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// JS pattern sources for formats whose `RegExp.toString()` differs from the
+/// Rust regex body (capturing groups, `u` flag, or lookaround in the JS source).
+const JS_GUID: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$";
+const JS_UUID: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$";
+const JS_UUIDV4: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_UUIDV6: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_UUIDV7: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_EMAIL: &str = r"^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$";
+const JS_UNICODE_EMAIL: &str = r#"^[^\s@"]{1,64}@[^\s@]{1,255}$"#;
+const JS_EMOJI: &str = r"^(\p{Extended_Pictographic}|\p{Emoji_Component})+$";
+const JS_DURATION: &str = r"^P(?:(\d+W)|(?!.*W)(?=\d|T\d)(\d+Y)?(\d+M)?(\d+D)?(T(?=\d)(\d+H)?(\d+M)?(\d+([.,]\d+)?S)?)?)$";
+const JS_EXT_DURATION: &str = r"^[-+]?P(?!$)(?:(?:[-+]?\d+Y)|(?:[-+]?\d+[.,]\d+Y$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:(?:[-+]?\d+W)|(?:[-+]?\d+[.,]\d+W$))?(?:(?:[-+]?\d+D)|(?:[-+]?\d+[.,]\d+D$))?(?:T(?=[\d+-])(?:(?:[-+]?\d+H)|(?:[-+]?\d+[.,]\d+H$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:[-+]?\d+(?:[.,]\d+)?S)?)??$";
+const JS_MAC: &str = r"^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$";
+const JS_HOSTNAME: &str = r"^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$";
+const JS_DATE: &str = r"^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))$";
+
 /// Compiles a named string format.
 ///
 /// # Errors
@@ -138,34 +187,40 @@ fn params_bool(params: Option<&Json>, key: &str) -> bool {
 /// compile; either outcome poisons JSON eligibility.
 pub fn compile(id: &str, params: Option<&Json>) -> Result<FormatValidator, String> {
     match id {
-        // hand-written scanners
+        // hand-written scanners — pattern from the JS PATTERNS table
         "email" => Ok(FormatValidator {
             id: id.to_string(),
             kind: Kind::Email,
+            pattern: Some(format!("/{JS_EMAIL}/")),
         }),
         "duration" => Ok(FormatValidator {
             id: id.to_string(),
             kind: Kind::Duration,
+            pattern: Some(format!("/{JS_DURATION}/")),
         }),
         "extendedDuration" | "extended_duration" => Ok(FormatValidator {
             id: id.to_string(),
             kind: Kind::ExtDuration,
+            pattern: Some(format!("/{JS_EXT_DURATION}/")),
         }),
         "hostname" => Ok(FormatValidator {
             id: id.to_string(),
             kind: Kind::Hostname,
+            pattern: Some(format!("/{JS_HOSTNAME}/")),
         }),
 
         // email pattern variants (regex-compilable)
         "html5Email" | "html5_email" => rx(id, HTML5_EMAIL),
         "rfc5322Email" | "rfc5322_email" => rx(id, RFC5322_EMAIL),
-        "unicodeEmail" | "unicode_email" | "idnEmail" | "idn_email" => rx(id, UNICODE_EMAIL),
+        "unicodeEmail" | "unicode_email" | "idnEmail" | "idn_email" => {
+            rx_with_pattern(id, UNICODE_EMAIL, Some(format!("/{JS_UNICODE_EMAIL}/u")))
+        }
 
-        "guid" => rx(id, GUID),
-        "uuid" => rx(id, UUID_ANY),
-        "uuidv4" | "uuid4" => rx(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"),
-        "uuidv6" | "uuid6" => rx(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"),
-        "uuidv7" | "uuid7" => rx(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"),
+        "guid" => rx_with_pattern(id, GUID, Some(format!("/{JS_GUID}/"))),
+        "uuid" => rx_with_pattern(id, UUID_ANY, Some(format!("/{JS_UUID}/"))),
+        "uuidv4" | "uuid4" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV4}/"))),
+        "uuidv6" | "uuid6" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV6}/"))),
+        "uuidv7" | "uuid7" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV7}/"))),
         "cuid" => rx(id, CUID),
         "cuid2" => rx(id, CUID2),
         "ulid" => rx(id, ULID),
@@ -173,23 +228,24 @@ pub fn compile(id: &str, params: Option<&Json>) -> Result<FormatValidator, Strin
         "ksuid" => rx(id, KSUID),
         "nanoid" => rx(id, NANOID),
         "ipv4" => rx(id, IPV4),
-        "ipv6" => rx(id, IPV6),
-        "mac" => rx(id, MAC),
+        "ipv6" => rx_with_pattern(id, IPV6, None),
+        "mac" => rx_with_pattern(id, MAC, Some(format!("/{JS_MAC}/"))),
         "cidrv4" => rx(id, CIDRV4),
-        "cidrv6" => rx(id, CIDRV6),
-        "base64" => rx(id, BASE64),
-        "base64url" => rx(id, BASE64URL),
-        "e164" => rx(id, E164),
-        "hex" => rx(id, HEX),
+        "cidrv6" => rx_with_pattern(id, CIDRV6, None),
+        "base64" => rx_with_pattern(id, BASE64, None),
+        "base64url" => rx_with_pattern(id, BASE64URL, None),
+        "hex" => rx(id, r"[0-9a-fA-F]*"),
         "lowercase" => rx(id, LOWERCASE),
         "uppercase" => rx(id, UPPERCASE),
-        "emoji" => rx(id, EMOJI),
-        "jwt" => rx(id, JWT),
+        "emoji" => rx_with_pattern(id, EMOJI, Some(format!("/{JS_EMOJI}/u"))),
+        "e164" => rx(id, E164),
+        "jwt" => rx_with_pattern(id, JWT, None),
 
         "date" => Regex::new(&anchored(DATE_SOURCE))
             .map(|r| FormatValidator {
                 id: id.to_string(),
                 kind: Kind::IsoDate(r),
+                pattern: Some(format!("/{JS_DATE}/")),
             })
             .map_err(|e| format!("format date: {e}")),
 
@@ -208,10 +264,12 @@ pub fn compile(id: &str, params: Option<&Json>) -> Result<FormatValidator, Strin
                 opts.push(r"([+-](?:[01]\d|2[0-3]):[0-5]\d)".to_string());
             }
             let body = format!("{DATE_SOURCE}T(?:{}(?:{}))", time, opts.join("|"));
+            let pat = format!("^{body}$");
             Regex::new(&anchored(&body))
                 .map(|r| FormatValidator {
                     id: id.to_string(),
                     kind: Kind::IsoDateTime(r),
+                    pattern: Some(format!("/{pat}/")),
                 })
                 .map_err(|e| format!("format datetime: {e}"))
         }
