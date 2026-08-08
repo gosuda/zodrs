@@ -82,3 +82,19 @@ test("status-2 result issues identical to the JS path", () => {
   if (viaBytes.success || viaValue.success) return;
   expect(viaBytes.error.issues).toEqual(viaValue.error.issues);
 });
+
+test("prototype pollution after plan cache falls back to TS path", () => {
+  const S = z.object({ pollutedKey: z.string() });
+  // Cache the plan before polluting
+  void S._zod.plan;
+  (Object.prototype as Record<string, unknown>).pollutedKey = "evil";
+  try {
+    // With polluted prototype, {} reads through as { pollutedKey: "evil" } on the TS path.
+    // The byte path would see a missing required key; the live check must force a fallback.
+    const result = S.safeParseJson("{}");
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual({ pollutedKey: "evil" });
+  } finally {
+    delete (Object.prototype as Record<string, unknown>).pollutedKey;
+  }
+});
