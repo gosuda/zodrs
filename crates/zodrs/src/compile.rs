@@ -177,12 +177,16 @@ impl ObjectDispatch {
     pub fn find_bytes(&self, kb: &[u8]) -> Option<usize> {
         if kb.len() <= 8 {
             let w = pack_key(kb);
-            let i = self.words.binary_search_by(|kw| {
-                kw.len.cmp(&kb.len()).then_with(|| kw.word.cmp(&w))
-            }).ok()?;
+            let i = self
+                .words
+                .binary_search_by(|kw| kw.len.cmp(&kb.len()).then_with(|| kw.word.cmp(&w)))
+                .ok()?;
             Some(self.words[i].schema_i)
         } else {
-            let i = self.long.binary_search_by(|(k, _)| k.as_bytes().cmp(kb)).ok()?;
+            let i = self
+                .long
+                .binary_search_by(|(k, _)| k.as_bytes().cmp(kb))
+                .ok()?;
             Some(self.long[i].1)
         }
     }
@@ -331,15 +335,14 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                         },
                         |r| Some(CompiledCheck::Regex(r)),
                     ),
-                    Check::Format { v, params } => {
-                        formats::compile(v, params.as_ref()).map_or_else(
+                    Check::Format { v, params } => formats::compile(v, params.as_ref())
+                        .map_or_else(
                             |_| {
                                 eligible = false;
                                 None
                             },
                             |f| Some(CompiledCheck::Format(f)),
-                        )
-                    }
+                        ),
                     Check::Host { .. } => {
                         eligible = false;
                         None

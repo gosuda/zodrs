@@ -9,15 +9,36 @@ fn probe_sonic_behaviors() {
     let r = sonic_rs::from_slice::<sonic_rs::Value>(b"1e400");
     println!("1e400 parse: {:?}", r.is_ok());
     if let Ok(v) = &r {
-        println!("  is_number={} as_f64={:?} to_string={:?}", v.is_number(), v.as_f64(), sonic_rs::to_string(v));
+        println!(
+            "  is_number={} as_f64={:?} to_string={:?}",
+            v.is_number(),
+            v.as_f64(),
+            sonic_rs::to_string(v)
+        );
     }
     // -0
     let v = sonic_rs::from_slice::<sonic_rs::Value>(b"-0").unwrap();
-    println!("-0: as_f64={:?} to_string={:?}", v.as_f64(), sonic_rs::to_string(&v));
+    println!(
+        "-0: as_f64={:?} to_string={:?}",
+        v.as_f64(),
+        sonic_rs::to_string(&v)
+    );
     // integers / floats round trip
-    for raw in ["36", "36.0", "1e21", "9007199254740993", "0.30000000000000004", "1E2", "5e-1"] {
+    for raw in [
+        "36",
+        "36.0",
+        "1e21",
+        "9007199254740993",
+        "0.30000000000000004",
+        "1E2",
+        "5e-1",
+    ] {
         let v = sonic_rs::from_slice::<sonic_rs::Value>(raw.as_bytes()).unwrap();
-        println!("{raw}: to_string={:?} as_f64={:?}", sonic_rs::to_string(&v), v.as_f64());
+        println!(
+            "{raw}: to_string={:?} as_f64={:?}",
+            sonic_rs::to_string(&v),
+            v.as_f64()
+        );
     }
     // duplicate keys: iteration order and values
     let v = sonic_rs::from_slice::<sonic_rs::Value>(br#"{"b":1,"a":2,"b":3}"#).unwrap();

@@ -205,8 +205,8 @@ function makeDef(node: SchemaNode): SchemaDef {
 
 type AnyInternals = SchemaInternals<unknown, unknown>;
 
-function shadowData(target: object, key: string, value: unknown): void {
-  Object.defineProperty(target, key, { value, configurable: true, writable: true });
+function shadowData(target: object, key: string, value: unknown, enumerable = false): void {
+  Object.defineProperty(target, key, { value, configurable: true, writable: true, enumerable });
 }
 
 /**
@@ -219,7 +219,7 @@ const INTERNALS_ACCESSORS: PropertyDescriptorMap = {
   def: {
     get(this: AnyInternals): SchemaDef {
       const facade = makeDef(this.node);
-      shadowData(this, "def", facade);
+      shadowData(this, "def", facade, true);
       return facade;
     },
     configurable: true, enumerable: true,
@@ -330,8 +330,8 @@ function shadowParseMethod(inst: object, key: string, fn: unknown): void {
 const SCHEMA_DEF_ACCESSOR: PropertyDescriptor = {
   get(this: $ZodType): SchemaDef {
     const facade = this._zod.def;
-    shadowData(this, "def", facade);
-    shadowData(this, "_def", facade);
+    shadowData(this, "def", facade, true);
+    shadowData(this, "_def", facade, true);
     return facade;
   },
   configurable: true, enumerable: true,
@@ -882,6 +882,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
       configurable: true,
       enumerable: false,
       get(this: $ZodType) {
+        if (this === prototype) return fn;
         const bound = fn.bind(this);
         Object.defineProperty(this, key, { value: bound, configurable: true, writable: true });
         return bound;

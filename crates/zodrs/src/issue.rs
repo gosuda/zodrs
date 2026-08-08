@@ -142,4 +142,3 @@ pub fn issues_to_json(issues: &[Issue]) -> String {
 pub fn issues_to_value(issues: &[Issue]) -> Json {
     Json::Array(issues.iter().map(Issue::to_json).collect())
 }
-

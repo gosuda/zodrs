@@ -22,7 +22,7 @@ export interface CompiledPlan {
  * is a real shape key once the schema declares one. Derived from the runtime
  * rather than hand-listed, so it cannot drift.
  */
-const PROTO_KEYS: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
+// PROTO_KEYS is now checked live against Object.prototype at emit time (see below).
 
 interface EmitState {
   readonly nodes: (PlanNode | null)[];
@@ -107,7 +107,7 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
         // through the prototype when absent from the input, so the TS walk
         // sees `Object.prototype.constructor` where the byte scanner sees
         // only a missing key. `__proto__` is already handled everywhere.
-        if (PROTO_KEYS.has(key)) state.protoKey = true;
+        if (Object.hasOwn(Object.prototype as object, key)) state.protoKey = true;
         const child = schema.shape[key];
         if (!child) continue;
         values.push(emit(child, state));

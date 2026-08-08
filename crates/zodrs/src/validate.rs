@@ -108,7 +108,8 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
     }
 }
 
-struct Validator<'p> {    plan: &'p CompiledPlan,
+struct Validator<'p> {
+    plan: &'p CompiledPlan,
     issues: Vec<Issue>,
     /// Path stack of borrowed segments: schema keys are borrowed from the
     /// plan, indices are `Copy`; pushing costs no allocation.
@@ -976,11 +977,12 @@ impl<'p> Validator<'p> {
                 return;
             }
         }
-        let branch_errors: Vec<Json> =
-            branch_issues.iter().map(|issues| issues_to_value(issues)).collect();
+        let branch_errors: Vec<Json> = branch_issues
+            .iter()
+            .map(|issues| issues_to_value(issues))
+            .collect();
         self.push(
-            Issue::new("invalid_union", &union_path)
-                .with("errors", Json::Array(branch_errors)),
+            Issue::new("invalid_union", &union_path).with("errors", Json::Array(branch_errors)),
         );
     }
 
@@ -1064,8 +1066,7 @@ impl<'p> Validator<'p> {
                     .with("format", Json::from(f.id.clone()))
                     .with("pattern", Json::from(pat.clone()))
             } else {
-                Issue::new_check("invalid_format", p)
-                    .with("format", Json::from(f.id.clone()))
+                Issue::new_check("invalid_format", p).with("format", Json::from(f.id.clone()))
             }
         });
     }
@@ -1626,7 +1627,9 @@ fn js_number_str(s: &str) -> Option<f64> {
         || unsigned.eq_ignore_ascii_case("infinity")
         || unsigned.eq_ignore_ascii_case("nan")
         || t.strip_prefix('-').is_some_and(|r| {
-            r.eq_ignore_ascii_case("inf") || r.eq_ignore_ascii_case("infinity") || r.eq_ignore_ascii_case("nan")
+            r.eq_ignore_ascii_case("inf")
+                || r.eq_ignore_ascii_case("infinity")
+                || r.eq_ignore_ascii_case("nan")
         })
     {
         return None;
@@ -1673,7 +1676,11 @@ fn js_number_to_string(n: f64) -> String {
         return "NaN".into();
     }
     if n.is_infinite() {
-        return if n > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if n > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     let negative = n < 0.0;
     let sci = format!("{:e}", n.abs()); // "2.5e4", "3e-1"
@@ -1704,13 +1711,15 @@ fn js_number_to_string(n: f64) -> String {
         } else {
             String::new()
         };
-        format!("{}{}e{}{}", &digits[..1], frac, if point > 0 { "+" } else { "" }, point - 1)
+        format!(
+            "{}{}e{}{}",
+            &digits[..1],
+            frac,
+            if point > 0 { "+" } else { "" },
+            point - 1
+        )
     };
-    if negative {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if negative { format!("-{body}") } else { body }
 }
 
 /// Mirrors the TS `floatSafeRemainder`: a tolerance-based check that

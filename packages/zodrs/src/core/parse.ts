@@ -60,45 +60,55 @@ function hasFatalIssue(issues: $ZodRawIssue[] | null): boolean {
  * context (the overwhelmingly common parse shape). A host refine that parses
  * nested data simply draws another slot; anything unusual allocates fresh.
  */
+const CTX_POOL_MAX = 8;
 const CTX_POOL: ValidationContext[] = [];
 
 function validationContext(context: ParseContext | undefined, async: boolean, direction: "forward" | "backward" = "forward"): ValidationContext {
   if (context === undefined && !async && direction === "forward") {
     const pooled = CTX_POOL.pop();
     if (pooled) return pooled;
-    return { issues: null, async, direction };
+    return { issues: null, async, direction, poolable: true };
   }
   return { ...context, issues: null, async, direction };
 }
 
 function releaseContext(ctx: ValidationContext): void {
-  if (ctx.async === false && ctx.direction === "forward" && CTX_POOL.length < 8) {
-    ctx.issues = null;
-    ctx.fallback = 0;
-    CTX_POOL.push(ctx);
-  }
+  if (ctx.poolable !== true || ctx.exposed === true || CTX_POOL.length >= CTX_POOL_MAX) return;
+  ctx.issues = null;
+  ctx.fallback = 0;
+  // Clear the exposure flag before pooling so a reused slot starts clean.
+  ctx.exposed = undefined;
+  CTX_POOL.push(ctx);
 }
 
 export function parse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): output<T> {
   const ctx = validationContext(context, false);
-  const result = schema._zod.validate(value, ctx);
-  if (isPromise(result)) throw new $ZodAsyncError();
-  const issues = ctx.issues;
-  const failed = result === FAIL || hasFatalIssue(issues);
-  releaseContext(ctx);
-  if (failed) throw makeError<output<T>>(issues, context);
+  let issues: $ZodRawIssue[] | null;
+  let result: unknown;
+  try {
+    result = schema._zod.validate(value, ctx);
+    if (isPromise(result)) throw new $ZodAsyncError();
+    issues = ctx.issues;
+  } finally {
+    releaseContext(ctx);
+  }
+  if (result === FAIL || hasFatalIssue(issues!)) throw makeError<output<T>>(issues!, context);
   return result as output<T>;
 }
 
 export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): SafeParseResult<output<T>> {
   const ctx = validationContext(context, false);
-  const result = schema._zod.validate(value, ctx);
-  if (isPromise(result)) throw new $ZodAsyncError();
-  const issues = ctx.issues;
-  const failed = result === FAIL || hasFatalIssue(issues);
-  releaseContext(ctx);
-  return failed
-    ? { success: false, error: makeError<output<T>>(issues, context) }
+  let issues: $ZodRawIssue[] | null;
+  let result: unknown;
+  try {
+    result = schema._zod.validate(value, ctx);
+    if (isPromise(result)) throw new $ZodAsyncError();
+    issues = ctx.issues;
+  } finally {
+    releaseContext(ctx);
+  }
+  return result === FAIL || hasFatalIssue(issues!)
+    ? { success: false, error: makeError<output<T>>(issues!, context) }
     : { success: true, data: result as output<T> };
 }
 

@@ -125,4 +125,3 @@ fn fuzz_seed24301_case2357() {
     assert!(!out.contains("$weird"), "unknown key retained: {out}");
     assert!(out.contains(r#""tag":450"#), "known key dropped: {out}");
 }
-

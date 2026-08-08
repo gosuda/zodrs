@@ -13,8 +13,7 @@ use std::sync::{LazyLock, RwLock};
 use zodrs::CompiledPlan;
 
 /// Process-wide registry of compiled plans, keyed by slab index.
-static PLANS: LazyLock<RwLock<Slab<CompiledPlan>>> =
-    LazyLock::new(|| RwLock::new(Slab::new()));
+static PLANS: LazyLock<RwLock<Slab<CompiledPlan>>> = LazyLock::new(|| RwLock::new(Slab::new()));
 
 /// The result of a byte-path validation, mirroring the JS-facing contract.
 ///
@@ -42,7 +41,10 @@ impl From<zodrs::Verdict> for Verdict {
 }
 
 fn lock_error(op: &str) -> Error {
-    Error::new(Status::GenericFailure, format!("plan registry lock poisoned on {op}"))
+    Error::new(
+        Status::GenericFailure,
+        format!("plan registry lock poisoned on {op}"),
+    )
 }
 
 /// Compiles a serialized plan and registers it in the slab.
@@ -57,7 +59,8 @@ fn lock_error(op: &str) -> Error {
     reason = "napi boundary: JS passes the plan JSON by value across the FFI"
 )]
 pub fn compile(plan_json: String) -> Result<u32> {
-    let plan = zodrs::compile(&plan_json).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+    let plan =
+        zodrs::compile(&plan_json).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
     let mut plans = PLANS.write().map_err(|_| lock_error("compile"))?;
     let key = plans.insert(plan);
     Ok(u32::try_from(key).unwrap_or(u32::MAX))

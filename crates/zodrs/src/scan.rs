@@ -28,6 +28,7 @@ const MAX_DEPTH: u32 = 128;
 
 /// Outcome of the single-pass scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Scan {
     /// Valid JSON, valid against the plan, already canonical: status 0.
     Clean,
@@ -490,7 +491,13 @@ impl<'a> Scanner<'a> {
                 self.value(a) && self.value(b)
             }
             PlanNode::TemplateLiteral { .. } => {
+                if self.peek() != Some(b'"') {
+                    return false; // genuine invalid_type
+                }
                 let Some(s) = self.string_token() else {
+                    // Escaped content: the pattern may match the decoded
+                    // text; the scan cannot decode it.
+                    self.dirty_hint = true;
                     return false;
                 };
                 match &self.dispatch(id).template {
@@ -629,9 +636,7 @@ impl<'a> Scanner<'a> {
                     let bound = v.as_f64().unwrap_or(f64::INFINITY);
                     if *inclusive { n <= bound } else { n < bound }
                 }
-                Check::MultipleOf { v } => {
-                    float_multiple_of(n, v.as_f64().unwrap_or(1.0))
-                }
+                Check::MultipleOf { v } => float_multiple_of(n, v.as_f64().unwrap_or(1.0)),
                 Check::NumberFormat { v } => number_format_scan(*v, n),
                 Check::BigIntFormat { v } => {
                     let (min, max) = match v {
@@ -651,53 +656,66 @@ impl<'a> Scanner<'a> {
         true
     }
 
+    /// Leaf-kind fast dispatch shared by `value` and `field`. Returns
+    /// `None` when `id` is not a leaf kind and the caller must recurse.
+    #[inline]
+    fn leaf(&mut self, id: NodeId) -> Option<bool> {
+        match self.node(id) {
+            PlanNode::String { checks, coerce } => {
+                if *coerce {
+                    self.dirty_hint = true;
+                    return Some(false);
+                }
+                if checks.is_empty() {
+                    return Some(self.skip_string());
+                }
+                let Some(s) = self.string_token() else {
+                    self.dirty_hint = true;
+                    return Some(false);
+                };
+                Some(self.string_checks(id, s))
+            }
+            PlanNode::Number { coerce, .. } => {
+                if *coerce {
+                    self.dirty_hint = true;
+                    return Some(false);
+                }
+                let Some(n) = self.number_token() else {
+                    return Some(false);
+                };
+                Some(self.number_checks(id, n))
+            }
+            PlanNode::Boolean { coerce } => {
+                if *coerce {
+                    self.dirty_hint = true;
+                    return Some(false);
+                }
+                Some(self.eat(b"true") || self.eat(b"false"))
+            }
+            PlanNode::Null => Some(self.eat(b"null")),
+            PlanNode::Literal { values } | PlanNode::Enum { values } => Some(self.literal(values)),
+            _ => None,
+        }
+    }
+
     /// Field-value dispatch for object properties: leaf kinds validate
     /// inline without a recursive `value()` call; containers recurse.
     fn field(&mut self, id: NodeId) -> bool {
         if self.dirty_hint {
             return true;
         }
-        match self.node(id) {
-            PlanNode::String { checks, coerce } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                if checks.is_empty() {
-                    return self.skip_string();
-                }
-                let Some(s) = self.string_token() else {
-                    self.dirty_hint = true;
-                    return false;
-                };
-                self.string_checks(id, s)
-            }
-            PlanNode::Number { coerce, .. } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                let Some(n) = self.number_token() else {
-                    return false;
-                };
-                self.number_checks(id, n)
-            }
-            PlanNode::Boolean { coerce } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                self.eat(b"true") || self.eat(b"false")
-            }
-            PlanNode::Null => self.eat(b"null"),
-            PlanNode::Literal { values } | PlanNode::Enum { values } => self.literal(values),
-            _ => self.value(id),
+        if let Some(result) = self.leaf(id) {
+            return result;
         }
+        self.value(id)
     }
 
     /// Object validation: keys must arrive in schema order with no
     /// duplicates, no drops, and no rewrites, or the scan defers.
-    #[allow(clippy::too_many_lines, reason = "one loop over input entries; splitting the key dispatch harms readability")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one loop over input entries; splitting the key dispatch harms readability"
+    )]
     fn object(&mut self, id: NodeId) -> bool {
         let PlanNode::Object {
             keys,
@@ -724,6 +742,7 @@ impl<'a> Scanner<'a> {
         self.ws();
         let mut seen: u128 = 0;
         let mut last_schema_i: Option<usize> = None;
+        let mut seen_catchall = false;
         let mut ok = true;
         if self.peek() == Some(b'}') {
             self.i += 1;
@@ -755,6 +774,11 @@ impl<'a> Scanner<'a> {
                         self.depth -= 1;
                         return true;
                     }
+                    if seen_catchall {
+                        self.dirty_hint = true;
+                        self.depth -= 1;
+                        return true;
+                    }
                     last_schema_i = Some(schema_i);
                     seen |= 1 << schema_i;
                     if !self.field(values[schema_i]) {
@@ -767,6 +791,7 @@ impl<'a> Scanner<'a> {
                     self.depth -= 1;
                     return true;
                 } else if let Some(catchall_id) = catchall {
+                    seen_catchall = true;
                     if !self.value(catchall_id) {
                         ok = false;
                         break;
@@ -1160,8 +1185,10 @@ impl<'a> Scanner<'a> {
 /// Numeric format bounds, mirroring the DOM walk's `number_format`.
 fn number_format_scan(fmt: crate::plan::NumberFormat, n: f64) -> bool {
     use crate::plan::NumberFormat;
-    if matches!(fmt, NumberFormat::Int32 | NumberFormat::Uint32 | NumberFormat::Safeint)
-        && (n.fract() != 0.0 || !n.is_finite() || n.abs() > MAX_SAFE_INT)
+    if matches!(
+        fmt,
+        NumberFormat::Int32 | NumberFormat::Uint32 | NumberFormat::Safeint
+    ) && (n.fract() != 0.0 || !n.is_finite() || n.abs() > MAX_SAFE_INT)
     {
         return false;
     }

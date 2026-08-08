@@ -25,6 +25,10 @@ export interface ValidationContext extends ParseContext {
   direction?: "forward" | "backward";
   /** Incremented when a `catch` fires; lets `optional` swallow fallback values. */
   fallback?: number;
+  /** True only for contexts that were never derived from a caller context; pooled only when true. */
+  poolable?: boolean;
+  /** Set when the context has been exposed to host/refinement code; pooled only when not exposed. */
+  exposed?: boolean | undefined;
 }
 
 export type Validator = (input: unknown, context: ValidationContext) => unknown | FailType;
@@ -65,6 +69,7 @@ export function isPromise(value: unknown): value is PromiseLike<unknown> {
 }
 
 function makeRefinementContext(context: ValidationContext, node: SchemaNode, path: PropertyKey[], value: unknown) {
+  context.exposed = true;
   return {
     value,
     get issues(): $ZodRawIssue[] {
@@ -119,6 +124,30 @@ function abortedSince(context: ValidationContext, startIndex: number): boolean {
   return false;
 }
 
+/**
+ * Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill; stamp
+ * pathless issues added since `before` with the current path, matching Zod v4.
+ */
+function backfillPaths(context: ValidationContext, before: number, path: PropertyKey[]): void {
+  const issues = context.issues;
+  if (!issues) return;
+  for (let index = before; index < issues.length; index += 1) {
+    const pushed: { path?: PropertyKey[] } = issues[index] as $ZodRawIssue;
+    if (pushed.path === undefined) pushed.path = [...path];
+  }
+}
+
+const literalSets = new WeakMap<SchemaNode, ReadonlySet<unknown>>();
+
+function literalSet(node: SchemaNode & { readonly kind: "literal" }): ReadonlySet<unknown> {
+  let accepted = literalSets.get(node);
+  if (!accepted) {
+    accepted = new Set<unknown>(node.values);
+    literalSets.set(node, accepted);
+  }
+  return accepted;
+}
+
 function checkPayloadIssues(
   context: ValidationContext,
   node: SchemaNode,
@@ -148,14 +177,7 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
       const refinement = makeRefinementContext(context, node, path, value);
       const result = check.fn(value, refinement);
       if (isPromise(result)) throw new $ZodAsyncError();
-      if (context.issues) {
-        // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
-        // stamp pathless issues with the current path, matching Zod v4.
-        for (let index = before; index < context.issues.length; index += 1) {
-          const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
-          if (pushed.path === undefined) pushed.path = [...path];
-        }
-      }
+      backfillPaths(context, before, path);
       if (check.op === "refine" && !result) {
         const issuePath = runtime.path ? [...path, ...runtime.path] : path;
         addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
@@ -565,14 +587,7 @@ function hostResult(node: SchemaNode & { readonly kind: "host" }, input: unknown
   const refinement = makeRefinementContext(context, node, path, base);
   const result = node.fn(base, refinement);
   if (isPromise(result)) throw new $ZodAsyncError();
-  if (context.issues) {
-    // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
-    // stamp pathless issues with the current path, matching Zod v4.
-    for (let index = before; index < context.issues.length; index += 1) {
-      const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
-      if (pushed.path === undefined) pushed.path = [...path];
-    }
-  }
+  backfillPaths(context, before, path);
   if (node.op === "refine") {
     if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
     return applyChecksSync(node, base, context, path);
@@ -681,7 +696,7 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
     case "nan": if (typeof input !== "number" || !Number.isNaN(input)) { issue(context, node, path, { expected: "nan", code: "invalid_type" }, input); return FAIL; } output = input; break;
     case "date": if (!(input instanceof Date) || Number.isNaN(input.getTime())) { issue(context, node, path, { expected: "date", code: "invalid_type", ...(input instanceof Date ? { received: "Invalid Date" } : {}) }, input); return FAIL; } output = new Date(input.getTime()); break;
     case "file": if (!isObject(input) || !("name" in input) || !("size" in input) || !("type" in input)) { issue(context, node, path, { expected: "file", code: "invalid_type" }, input); return FAIL; } output = input; break;
-    case "literal": if (!new Set<unknown>(node.values).has(input)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
+    case "literal": if (!literalSet(node).has(input)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
     case "enum": if (!node.values.includes(input as string | number)) { issue(context, node, path, { code: "invalid_value", values: [...node.values] }, input); return FAIL; } output = input; break;
     case "object": return objectResult(node, input, context, path);
     case "array": {
@@ -890,6 +905,8 @@ function makeCallError(context: ValidationContext): Error {
 async function applyChecksAsync(node: SchemaNode, initial: unknown, context: ValidationContext, path: PropertyKey[]): Promise<unknown | FailType> {
   let value = initial;
   const synchronous: RuntimeCheck[] = [];
+  let failed = false;
+  const initialLen = context.issues?.length ?? 0;
   for (const runtime of node.checks) {
     if (runtime.check.c !== "host_runtime") { synchronous.push(runtime); continue; }
     if (runtime.when) {
@@ -899,27 +916,24 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
     const check: HostRuntimeCheck = runtime.check;
     const before = context.issues?.length ?? 0;
     const result = await check.fn(value, makeRefinementContext(context, node, path, value));
-    if (context.issues) {
-      // Direct `ctx.issues.push(...)` bypasses addIssue's path back-fill;
-      // stamp pathless issues with the current path, matching Zod v4.
-      for (let index = before; index < context.issues.length; index += 1) {
-        const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
-        if (pushed.path === undefined) pushed.path = [...path];
-      }
-    }
+    backfillPaths(context, before, path);
     if (check.op === "refine" && !result) {
       const issuePath = runtime.path ? [...path, ...runtime.path] : path;
       addIssue(context, { code: "custom", input: value, inst: { error: runtime.error }, path: issuePath, continue: runtime.abort !== true, ...(runtime.params ? { params: runtime.params } : {}) } as $ZodRawIssue);
+      failed = true;
     }
     else if (check.op === "custom_format" && !result) {
       addIssue(context, { code: "invalid_format", format: check.format ?? "unknown", input: value, inst: { error: runtime.error }, path, continue: runtime.abort !== true } as $ZodRawIssue);
+      failed = true;
     }
     else if (check.op === "overwrite" || check.op === "transform" || check.op === "preprocess") value = result;
+    if ((context.issues?.length ?? 0) > before) failed = true;
     if ((context.issues?.length ?? 0) > before && abortedSince(context, before)) break;
   }
-  if (synchronous.length === 0) return context.issues ? FAIL : value;
+  if (synchronous.length === 0) return failed || (context.issues?.length ?? 0) > initialLen ? FAIL : value;
   const syncNode = { ...node, checks: synchronous } as SchemaNode;
-  return applyChecksSync(syncNode, value, context, path);
+  const syncResult = applyChecksSync(syncNode, value, context, path);
+  return failed || syncResult === FAIL ? FAIL : syncResult;
 }
 
 async function runAsync(node: SchemaNode, input: unknown, context: ValidationContext, path: PropertyKey[]): Promise<unknown | FailType> {
@@ -930,12 +944,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     if (base === FAIL) return FAIL;
     const before = context.issues?.length ?? 0;
     const result = await node.fn(base, makeRefinementContext(context, node, path, base));
-    if (context.issues) {
-      for (let index = before; index < context.issues.length; index += 1) {
-        const pushed: { path?: PropertyKey[] } = context.issues[index] as $ZodRawIssue;
-        if (pushed.path === undefined) pushed.path = [...path];
-      }
-    }
+    backfillPaths(context, before, path);
     if (node.op === "refine") {
       if (!result) { issue(context, node, path, { code: "custom" }, base); return FAIL; }
       return base;

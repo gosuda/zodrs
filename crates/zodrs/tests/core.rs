@@ -14,7 +14,7 @@
 //! re-serializes with `serde_json` only to express multi-digit numbers.
 
 use rstest::rstest;
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use zodrs::{compile, validate};
 
 fn plan(plan_json: &Json) -> zodrs::CompiledPlan {
@@ -23,8 +23,7 @@ fn plan(plan_json: &Json) -> zodrs::CompiledPlan {
 }
 
 fn issues(payload: &Option<String>) -> Vec<Json> {
-    serde_json::from_str(payload.as_deref().expect("issue payload"))
-        .expect("issues parse")
+    serde_json::from_str(payload.as_deref().expect("issue payload")).expect("issues parse")
 }
 
 fn assert_issue(verdict: &zodrs::Verdict, expected: &Json) {
@@ -222,7 +221,10 @@ fn format_checks(#[case] format: &str, #[case] input: Json, #[case] ok: bool) {
     let bytes = serde_json::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     if ok {
-        assert_eq!(verdict.status, 0, "expected valid for {format} {input}: {verdict:?}");
+        assert_eq!(
+            verdict.status, 0,
+            "expected valid for {format} {input}: {verdict:?}"
+        );
     } else {
         assert_eq!(verdict.status, 2, "expected invalid for {format} {input}");
         let iss = issues(&verdict.payload);
@@ -991,7 +993,10 @@ fn coerce_string_uses_js_number_formatting() {
     assert_eq!(output(&validate(&s, br"1e21")), json!("1e+21"));
     assert_eq!(output(&validate(&s, br"1.5e-7")), json!("1.5e-7"));
     assert_eq!(output(&validate(&s, br"0.000001")), json!("0.000001"));
-    assert_eq!(output(&validate(&s, br"0.30000000000000004")), json!("0.30000000000000004"));
+    assert_eq!(
+        output(&validate(&s, br"0.30000000000000004")),
+        json!("0.30000000000000004")
+    );
 }
 // ------------------------------------------------------------------------
 // Regression: union flattening — exactly one option type-matches.
@@ -1047,7 +1052,11 @@ fn union_sub_issue_relative_paths() {
     let errors = iss[0]["errors"].as_array().unwrap();
     for branch in errors {
         for sub in branch.as_array().unwrap() {
-            assert_eq!(sub["path"], json!(["name"]), "sub-issue path should be relative: {sub:?}");
+            assert_eq!(
+                sub["path"],
+                json!(["name"]),
+                "sub-issue path should be relative: {sub:?}"
+            );
         }
     }
 }
@@ -1069,7 +1078,11 @@ fn format_issue_includes_pattern_and_key_order() {
     let obj = iss[0].as_object().unwrap();
     // Key order: code, origin, format, pattern, path
     let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
-    assert_eq!(keys, vec!["code", "origin", "format", "pattern", "path"], "key order: {keys:?}");
+    assert_eq!(
+        keys,
+        vec!["code", "origin", "format", "pattern", "path"],
+        "key order: {keys:?}"
+    );
     assert_eq!(obj["code"], "invalid_format");
     assert_eq!(obj["origin"], "string");
     assert_eq!(obj["format"], "uuid");
@@ -1097,6 +1110,10 @@ fn discunion_note_field_and_key_order() {
     let obj = iss[0].as_object().unwrap();
     // Key order: code, errors, note, discriminator, options, path
     let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
-    assert_eq!(keys, vec!["code", "errors", "note", "discriminator", "options", "path"], "key order: {keys:?}");
+    assert_eq!(
+        keys,
+        vec!["code", "errors", "note", "discriminator", "options", "path"],
+        "key order: {keys:?}"
+    );
     assert_eq!(obj["note"], "No matching discriminator");
 }

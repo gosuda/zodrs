@@ -94,7 +94,11 @@ fn rx(id: &str, body: &str) -> Result<FormatValidator, String> {
 /// Like `rx` but with an explicit JS pattern string (for bodies that differ
 /// from the Rust regex, e.g. capturing groups in the JS source), or `None`
 /// for formats that canonically omit both `origin` and `pattern`.
-fn rx_with_pattern(id: &str, body: &str, pattern: Option<String>) -> Result<FormatValidator, String> {
+fn rx_with_pattern(
+    id: &str,
+    body: &str,
+    pattern: Option<String>,
+) -> Result<FormatValidator, String> {
     Regex::new(&anchored(body))
         .map(|r| FormatValidator {
             id: format_name(id),
@@ -114,8 +118,7 @@ fn format_name(id: &str) -> String {
 }
 
 // Bodies (no anchors) ported from regexes.ts.
-const GUID: &str =
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+const GUID: &str = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 const UUID_ANY: &str = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff";
 const CUID: &str = r"[cC][0-9a-z]{6,}";
 const CUID2: &str = r"[0-9a-z]+";
@@ -128,12 +131,10 @@ const RFC5322_EMAIL: &str = r#"(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+
 const UNICODE_EMAIL: &str = r#"[^\s@"]{1,64}@[^\s@]{1,255}"#;
 const IPV4: &str = r"(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])";
 const IPV6: &str = r"([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)";
-const MAC: &str =
-    r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}";
+const MAC: &str = r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}";
 const CIDRV4: &str = r"((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])/([0-9]|[1-2][0-9]|3[0-2])";
 const CIDRV6: &str = r"(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))/(12[0-8]|1[01][0-9]|[1-9]?[0-9])";
-const BASE64: &str =
-    r"(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?";
+const BASE64: &str = r"(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?";
 const BASE64URL: &str = r"[A-Za-z0-9_-]*";
 const E164: &str = r"\+[1-9]\d{6,14}";
 const LOWERCASE: &str = r"[^A-Z]*";
@@ -165,11 +166,15 @@ fn params_bool(params: Option<&Json>, key: &str) -> bool {
 
 /// JS pattern sources for formats whose `RegExp.toString()` differs from the
 /// Rust regex body (capturing groups, `u` flag, or lookaround in the JS source).
-const JS_GUID: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$";
+const JS_GUID: &str =
+    r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$";
 const JS_UUID: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$";
-const JS_UUIDV4: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
-const JS_UUIDV6: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
-const JS_UUIDV7: &str = r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_UUIDV4: &str =
+    r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_UUIDV6: &str =
+    r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
+const JS_UUIDV7: &str =
+    r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$";
 const JS_EMAIL: &str = r"^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$";
 const JS_UNICODE_EMAIL: &str = r#"^[^\s@"]{1,64}@[^\s@]{1,255}$"#;
 const JS_EMOJI: &str = r"^(\p{Extended_Pictographic}|\p{Emoji_Component})+$";
@@ -218,9 +223,21 @@ pub fn compile(id: &str, params: Option<&Json>) -> Result<FormatValidator, Strin
 
         "guid" => rx_with_pattern(id, GUID, Some(format!("/{JS_GUID}/"))),
         "uuid" => rx_with_pattern(id, UUID_ANY, Some(format!("/{JS_UUID}/"))),
-        "uuidv4" | "uuid4" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV4}/"))),
-        "uuidv6" | "uuid6" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV6}/"))),
-        "uuidv7" | "uuid7" => rx_with_pattern(id, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}", Some(format!("/{JS_UUIDV7}/"))),
+        "uuidv4" | "uuid4" => rx_with_pattern(
+            id,
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            Some(format!("/{JS_UUIDV4}/")),
+        ),
+        "uuidv6" | "uuid6" => rx_with_pattern(
+            id,
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            Some(format!("/{JS_UUIDV6}/")),
+        ),
+        "uuidv7" | "uuid7" => rx_with_pattern(
+            id,
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+            Some(format!("/{JS_UUIDV7}/")),
+        ),
         "cuid" => rx(id, CUID),
         "cuid2" => rx(id, CUID2),
         "ulid" => rx(id, ULID),
@@ -324,9 +341,9 @@ fn email_local_ok(local: &str) -> bool {
         return false;
     }
     // Every char in the broad local class.
-    bytes.iter().all(|&c| {
-        c.is_ascii_alphanumeric() || matches!(c, b'_' | b'\'' | b'+' | b'-' | b'.')
-    })
+    bytes
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'\'' | b'+' | b'-' | b'.'))
 }
 
 fn email_domain_ok(domain: &str) -> bool {
@@ -346,7 +363,9 @@ fn email_domain_ok(domain: &str) -> bool {
         let b = label.as_bytes();
         !b.is_empty()
             && b[0].is_ascii_alphanumeric()
-            && b[1..].iter().all(|&c| c.is_ascii_alphanumeric() || c == b'-')
+            && b[1..]
+                .iter()
+                .all(|&c| c.is_ascii_alphanumeric() || c == b'-')
     })
 }
 
@@ -461,9 +480,7 @@ fn take_seconds_unit(b: &[u8], i: &mut usize) -> bool {
 /// `P`, then signed/optionally-fractional Y/M/W/D and a signed `T` section. A
 /// fractional component must be the final component.
 fn duration_8601_2(s: &str) -> bool {
-    let rest = s
-        .strip_prefix(['-', '+'])
-        .unwrap_or(s);
+    let rest = s.strip_prefix(['-', '+']).unwrap_or(s);
     let Some(rest) = rest.strip_prefix('P') else {
         return false;
     };

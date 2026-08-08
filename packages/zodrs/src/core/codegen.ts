@@ -1105,6 +1105,8 @@ function compileArray(node: SchemaNode & { readonly kind: "array" }, compile: (c
       return output;
     };
     fn.pushesKeyed = true;
+    // Fused elements are check-free primitive leaves: they never touch the stack.
+    fn.pushes = false;
     return fn;
   }
   const fn: CNode = (input, context, path, key) => {
@@ -1453,7 +1455,13 @@ export function createCodegenValidator(root: SchemaNode): Validator {
     // Backward (encode) parses stay on the shared runtime: they are cold, and
     // their canary/reversal semantics are subtle enough to keep single-sourced.
     if (context.direction === "backward") return runtime.run(root, input, context, []);
-    return compiled(input, context, freshPath ? [] : EMPTY_PATH);
+    if (freshPath) return compiled(input, context, []);
+    const output = compiled(input, context, EMPTY_PATH);
+    if (EMPTY_PATH.length !== 0) {
+      EMPTY_PATH.length = 0;
+      throw new Error("zodrs codegen: a node mutated the shared path stack; `pushes` propagation is wrong");
+    }
+    return output;
   };
 }
 

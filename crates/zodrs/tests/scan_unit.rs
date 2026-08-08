@@ -115,6 +115,53 @@ fn clean_long_object_key() {
 }
 
 #[test]
+fn clean_eight_byte_key() {
+    // 8 bytes is the upper boundary of the packed-word path (kb.len() <= 8).
+    let plan = r#"[
+        {"k":"object","keys":["abcdefgh"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"abcdefgh":1}"#), Scan::Clean);
+}
+
+#[test]
+fn clean_nine_byte_key() {
+    // 9 bytes crosses into the `long` vec path (kb.len() > 8).
+    let plan = r#"[
+        {"k":"object","keys":["abcdefghi"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"abcdefghi":1}"#), Scan::Clean);
+}
+
+#[test]
+fn clean_eight_byte_keys_differ_in_last_byte() {
+    // Two 8-byte keys that differ only in the final byte; strict mode so a
+    // pack_key collision would defer instead of silently passing through.
+    let plan = r#"[
+        {"k":"object","keys":["abcdefgh","abcdefgi"],"values":[1,2],"optional":[false,false],"mode":"strict","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"abcdefgh":1,"abcdefgi":2}"#), Scan::Clean);
+}
+
+#[test]
+fn defer_mixed_short_and_long_keys_out_of_order() {
+    // One key on the `words` path (8 bytes) and one on the `long` path (11
+    // bytes), arriving out of order — the DOM walk must rewrite.
+    let plan = r#"[
+        {"k":"object","keys":["abcdefgh","verylongkey"],"values":[1,2],"optional":[false,false],"mode":"passthrough","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"verylongkey":2,"abcdefgh":1}"#),
+        Scan::Defer
+    );
+}
+
+#[test]
 fn defer_duplicate_object_key() {
     let plan = r#"[
         {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
@@ -141,11 +188,18 @@ fn clean_depth_128() {
     let depth = 128;
     let mut nodes: Vec<String> = Vec::with_capacity(depth + 1);
     for i in 0..depth {
-        nodes.push(format!("{{\"k\":\"array\",\"element\":{},\"checks\":[]}}", i + 1));
+        nodes.push(format!(
+            "{{\"k\":\"array\",\"element\":{},\"checks\":[]}}",
+            i + 1
+        ));
     }
     nodes.push("{\"k\":\"number\",\"checks\":[]}".to_string());
     let plan = format!("[{}]", nodes.join(","));
-    let input = format!("{}1{}", iter::repeat_n('[', depth).collect::<String>(), iter::repeat_n(']', depth).collect::<String>());
+    let input = format!(
+        "{}1{}",
+        iter::repeat_n('[', depth).collect::<String>(),
+        iter::repeat_n(']', depth).collect::<String>()
+    );
     assert_eq!(scan(&plan, input.as_bytes()), Scan::Clean);
 }
 
@@ -154,11 +208,18 @@ fn defer_depth_129() {
     let depth = 129;
     let mut nodes: Vec<String> = Vec::with_capacity(depth + 1);
     for i in 0..depth {
-        nodes.push(format!("{{\"k\":\"array\",\"element\":{},\"checks\":[]}}", i + 1));
+        nodes.push(format!(
+            "{{\"k\":\"array\",\"element\":{},\"checks\":[]}}",
+            i + 1
+        ));
     }
     nodes.push("{\"k\":\"number\",\"checks\":[]}".to_string());
     let plan = format!("[{}]", nodes.join(","));
-    let input = format!("{}1{}", iter::repeat_n('[', depth).collect::<String>(), iter::repeat_n(']', depth).collect::<String>());
+    let input = format!(
+        "{}1{}",
+        iter::repeat_n('[', depth).collect::<String>(),
+        iter::repeat_n(']', depth).collect::<String>()
+    );
     assert_eq!(scan(&plan, input.as_bytes()), Scan::Defer);
 }
 
