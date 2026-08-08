@@ -5,6 +5,7 @@ import type { AsyncValidator, ValidationContext, Validator } from "./interpreter
 import { $ZodAsyncError, isPromise } from "./interpreter.js";
 import { validateJson as validateNativeJson } from "./native.js";
 import type { CompiledPlan } from "./plan.js";
+import { isProtoPolluted } from "./plan.js";
 import { FAIL } from "./util.js";
 
 export interface RuntimeSchema<Output = unknown, Input = unknown> {
@@ -226,7 +227,7 @@ function backFillInput(
 export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array | ArrayBuffer | string, context?: ParseContext): output<T> {
   const source = bytesAndText(value);
   const plan = schema._zod.plan;
-  if (!plan.jsonEligible) return parse(schema, JSON.parse(source.text), context);
+  if (!plan.jsonEligible || isProtoPolluted(plan)) return parse(schema, JSON.parse(source.text), context);
   const native = validateNativeJson(plan.json, schema._zod.nativeHandle, source.bytes);
   if (!native.available || !native.verdict) return parse(schema, JSON.parse(source.text), context);
   schema._zod.nativeHandle = native.handle;

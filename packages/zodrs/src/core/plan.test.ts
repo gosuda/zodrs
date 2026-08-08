@@ -25,6 +25,7 @@ describe("compilePlan", () => {
       ]),
       hostFns: [],
       jsonEligible: true,
+      objectShapeKeys: ["a", "b"],
     });
   });
 

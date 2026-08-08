@@ -13,6 +13,8 @@ export interface CompiledPlan {
   readonly json: string;
   readonly hostFns: HostFunction[];
   readonly jsonEligible: boolean;
+  /** All object shape keys emitted into the plan, for live prototype-pollution checks. */
+  readonly objectShapeKeys: readonly string[];
 }
 
 /**
@@ -32,6 +34,7 @@ interface EmitState {
   bigint: boolean;
   /** Set when a shape key names an `Object.prototype` member; see `PROTO_KEYS`. */
   protoKey: boolean;
+  readonly objectShapeKeys: Set<string>;
 }
 
 function toJsonValue(value: unknown): JSONType | null {
@@ -103,6 +106,7 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
       const values: NodeId[] = [];
       const optional: boolean[] = [];
       for (const key of keys) {
+        state.objectShapeKeys.add(key);
         // A shape key that names an `Object.prototype` member resolves
         // through the prototype when absent from the input, so the TS walk
         // sees `Object.prototype.constructor` where the byte scanner sees
@@ -209,7 +213,7 @@ function emit(schema: SchemaNode, state: EmitState): NodeId {
 }
 
 export function compilePlan(root: SchemaNode): CompiledPlan {
-  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false, protoKey: false };
+  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false, protoKey: false, objectShapeKeys: new Set<string>() };
   emit(root, state);
   return {
     json: JSON.stringify(state.nodes),
@@ -221,5 +225,14 @@ export function compilePlan(root: SchemaNode): CompiledPlan {
     // through the prototype when absent, which the scanner cannot see. The TS
     // path owns both.
     jsonEligible: state.hostFns.length === 0 && !state.bigint && !state.protoKey,
+    objectShapeKeys: [...state.objectShapeKeys],
   };
+}
+
+/** Live check for prototype pollution after `_zod.plan` was cached — checks only the keys that were actually emitted. */
+export function isProtoPolluted(plan: CompiledPlan): boolean {
+  for (const key of plan.objectShapeKeys) {
+    if (Object.hasOwn(Object.prototype as object, key)) return true;
+  }
+  return false;
 }
