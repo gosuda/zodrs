@@ -38,3 +38,4 @@ omp-sessions/
 # === EMPIRICAL ===
 # none beyond template coverage
 packages/bench/results/
+packages/zodrs/dist-cjs/

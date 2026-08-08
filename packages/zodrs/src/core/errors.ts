@@ -69,12 +69,14 @@ export interface $ZodIssueInvalidStringFormat extends $ZodIssueBase {
   readonly code: "invalid_format";
   readonly format: $ZodStringFormats | (string & {});
   readonly pattern?: string;
+  readonly origin?: string;
   readonly input?: string;
 }
 
 export interface $ZodIssueNotMultipleOf<Input extends number | bigint = number | bigint> extends $ZodIssueBase {
   readonly code: "not_multiple_of";
   readonly divisor: number;
+  readonly origin?: string;
   readonly input?: Input;
 }
 

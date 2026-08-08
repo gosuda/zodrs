@@ -371,10 +371,10 @@ safeParseJson(input: Uint8Array | ArrayBuffer | string): SafeParseResult<Output>
 
 | Condition | Observable behavior |
 |---|---|
-| Schema JSON-eligible (no host closures; all regexes compile in Rust) | Bytes validated in Rust. Result **deep-equal** to `JSON.parse` + `.parse`: same output value, same key order, and on failure **deep-equal issue arrays** (codes, payload fields, paths, `input` back-filled by path, messages through the §3 chain). |
+| Schema JSON-eligible | Bytes validated in Rust. Result **deep-equal** to `JSON.parse` + `.parse`: same output value, same key order, and on failure **deep-equal issue arrays** (codes, payload fields, paths, `input` back-filled by path, messages through the §3 chain). Eligibility requires: no host closures; every regex compiles in Rust; **no `bigint` node** (its output is a JS `BigInt`, which has no JSON encoding, and its bounds reach the plan as decimal strings); **no shape key naming an `Object.prototype` member** (`constructor`, `toString`, …, which JS resolves through the prototype when the input omits the key, where the scanner sees only an absent key). |
 | Not eligible, or no native/WASM backend | Transparent fallback: `JSON.parse(input)` then the TS validator. Identical observable result. |
 | `string` input | Encoded to UTF-8 once, then as bytes. |
-| Output | `status 0`: `JSON.parse(original bytes)`. `status 1` (dirty: key stripping, defaults, overwrites, coercion, key reorder): `JSON.parse(canonical payload)`. Invalid: issues JSON + back-filled inputs. `status 3` at runtime = planner bug → internal invariant error (never silently slow-paths). |
+| Output | `status 0`: `JSON.parse(original bytes)`. `status 1` (dirty: key stripping, defaults, overwrites, coercion, key reorder): `JSON.parse(canonical payload)`. Invalid: issues JSON + back-filled inputs. `status 3`: the Rust parser rejected input JS accepts differently (BOM, lone-surrogate escapes, `1e400` → `Infinity`, `NaN`/`Infinity` literals, truncated JSON) — falls back to `JSON.parse` + the TS validator, and a `JSON.parse` `SyntaxError` propagates unchanged. |
 
 There is no `parseJsonAsync`; async schemas always take the TS path.
 

@@ -102,7 +102,7 @@ test("safeParseJson(bytes) deep-equals safeParse(JSON.parse(bytes)) across rando
     if (cmp.match) {
       stats.matched++;
     } else {
-      const known = classifyMismatch(ledger, fc, both);
+      const known = classifyMismatch(ledger, fc);
       if (known !== null) {
         knownSkips.set(known, (knownSkips.get(known) ?? 0) + 1);
       } else {

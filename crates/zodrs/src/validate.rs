@@ -11,18 +11,25 @@
 //! returns `status: 3`, telling the caller to fall back to the JS path (which
 //! reproduces any `JSON.parse` `SyntaxError` exactly).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde_json::Value as Json;
+use smallvec::{SmallVec, smallvec};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Object, Value};
 
-use crate::compile::{CompiledCheck, CompiledPlan, LiteralValue, NodeDispatch};
+use crate::compile::{CompiledCheck, CompiledPlan, NodeDispatch};
 use crate::formats::FormatValidator;
-use crate::issue::{issues_to_json, issues_to_value, Issue, Path, PathSeg};
+use crate::issue::{Issue, Path, PathRef, PathSegRef, issues_to_json, issues_to_value};
 use crate::plan::{BigIntFormat, Check, NodeId, NumberFormat, ObjectMode, OverwriteOp, PlanNode};
 
 /// JavaScript's maximum safe integer, `2^53 - 1`.
 const MAX_SAFE_INT: f64 = 9_007_199_254_740_991.0;
+
+/// Record entry count above which duplicate detection swaps the linear stack
+/// probe for a hashed key index. Below it the probe is cheaper than hashing;
+/// above it the quadratic term would dominate.
+const RECORD_LINEAR_MAX: usize = 32;
 
 /// The result of a byte-path validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +57,15 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
     if !plan.json_eligible {
         return Verdict::fallback();
     }
+    // Hot path: single-pass byte validation. Only a provably clean-canonical
+    // input short-circuits; everything else falls through to the DOM walk,
+    // which owns rewrites, issues, and fallback semantics.
+    if crate::scan::scan(plan, input) == crate::scan::Scan::Clean {
+        return Verdict {
+            status: 0,
+            payload: None,
+        };
+    }
     let value: Value = match sonic_rs::from_slice(input) {
         Ok(v) => v,
         Err(_) => return Verdict::fallback(),
@@ -58,9 +74,11 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
     let mut v = Validator {
         plan,
         issues: Vec::new(),
-        path: Path::new(),
+        path: PathRef::new(),
         dirty: false,
         nonfinite: false,
+        fail_count: 0,
+        quiet: false,
     };
     v.check(plan.root(), &value);
 
@@ -93,12 +111,20 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
 struct Validator<'p> {
     plan: &'p CompiledPlan,
     issues: Vec<Issue>,
-    path: Path,
+    /// Path stack of borrowed segments: schema keys are borrowed from the
+    /// plan, indices are `Copy`; pushing costs no allocation.
+    path: PathRef<'p>,
     dirty: bool,
     /// Set when a coercion produced a non-finite number: JSON cannot
     /// represent `Infinity` in the rewritten output, so the verdict must
     /// defer to the JS path (`status: 3`).
     nonfinite: bool,
+    /// Monotonic count of every issue the walk would have emitted, including
+    /// suppressed ones. Union branch probing detects failure from the delta
+    /// without materializing the branch's issue list.
+    fail_count: usize,
+    /// When set, issue construction is suppressed (union dry-run probing).
+    quiet: bool,
 }
 
 impl<'p> Validator<'p> {
@@ -110,13 +136,26 @@ impl<'p> Validator<'p> {
     }
 
     fn push(&mut self, issue: Issue) {
-        self.issues.push(issue);
+        self.fail_count += 1;
+        if !self.quiet {
+            self.issues.push(issue);
+        }
     }
+
+    /// Emit the issue built by `build`, counting it even when suppressed.
+    /// In `quiet` mode the closure never runs, so probing allocates nothing.
+    fn emit(&mut self, build: impl FnOnce(&PathRef<'p>) -> Issue) {
+        self.fail_count += 1;
+        if !self.quiet {
+            self.issues.push(build(&self.path));
+        }
+    }
+
     fn invalid_type(&mut self, expected: &str) {
-        self.push(Issue::new("invalid_type", &self.path).with("expected", Json::from(expected)));
+        self.emit(|p| Issue::new("invalid_type", p).with("expected", Json::from(expected)));
     }
     fn invalid_value(&mut self, values: Vec<Json>) {
-        self.push(Issue::new("invalid_value", &self.path).with("values", Json::Array(values)));
+        self.emit(|p| Issue::new("invalid_value", p).with("values", Json::Array(values)));
     }
 
     /// Validate `value` against node `id`, appending issues on failure.
@@ -189,7 +228,6 @@ impl<'p> Validator<'p> {
                 self.array_checks(id, arr.len(), "array");
             }
             PlanNode::Tuple { items, rest } => {
-                let items = items.clone();
                 let rest = *rest;
                 let Some(arr) = value.as_array() else {
                     return self.invalid_type("tuple");
@@ -214,21 +252,21 @@ impl<'p> Validator<'p> {
                         .count();
                 if rest.is_none() {
                     if slice.len() < optin_start {
-                        self.push(
-                            Issue::new("too_small", &self.path)
+                        self.emit(|p| {
+                            Issue::new("too_small", p)
                                 .with("origin", Json::from("array"))
                                 .with("minimum", num_json(optin_start as f64))
-                                .with("inclusive", Json::from(true)),
-                        );
+                                .with("inclusive", Json::from(true))
+                        });
                         return;
                     }
                     if slice.len() > items.len() {
-                        self.push(
-                            Issue::new("too_big", &self.path)
+                        self.emit(|p| {
+                            Issue::new("too_big", p)
                                 .with("origin", Json::from("array"))
                                 .with("maximum", num_json(items.len() as f64))
-                                .with("inclusive", Json::from(true)),
-                        );
+                                .with("inclusive", Json::from(true))
+                        });
                     }
                 }
                 for (i, item_id) in items.iter().enumerate() {
@@ -264,12 +302,10 @@ impl<'p> Validator<'p> {
                 }
             }
             PlanNode::Union { options } => {
-                let options = options.clone();
-                self.check_union(&options, value);
+                self.check_union(options, value);
             }
             PlanNode::DiscUnion { key, .. } => {
-                let key = key.clone();
-                self.check_disc_union(id, &key, value);
+                self.check_disc_union(id, key, value);
             }
             PlanNode::Intersection { left, right } => {
                 let (left, right) = (*left, *right);
@@ -282,7 +318,39 @@ impl<'p> Validator<'p> {
                     // z.record rejects non-objects (arrays included) as `record`.
                     return self.invalid_type("record");
                 };
-                for (k, entry) in collapse_object(obj) {
+                // Collapse duplicates to last-wins, keeping the first
+                // position. Small records stay on the stack behind a linear
+                // probe; past `RECORD_LINEAR_MAX` a key index takes over, so a
+                // large map costs O(n) instead of O(n^2).
+                let mut entries: SmallVec<[(&str, &Value); 16]> = SmallVec::new();
+                let mut index: Option<HashMap<&str, usize>> = None;
+                let mut collapsed = false;
+                for (k, v) in obj {
+                    let seen = match &index {
+                        Some(ix) => ix.get(k).copied(),
+                        None => entries.iter().position(|(ek, _)| *ek == k),
+                    };
+                    if let Some(i) = seen {
+                        entries[i].1 = v;
+                        collapsed = true;
+                        continue;
+                    }
+                    if let Some(ix) = &mut index {
+                        ix.insert(k, entries.len());
+                    } else if entries.len() == RECORD_LINEAR_MAX {
+                        let mut ix: HashMap<&str, usize> =
+                            HashMap::with_capacity(entries.len() * 2);
+                        ix.extend(entries.iter().enumerate().map(|(i, (ek, _))| (*ek, i)));
+                        ix.insert(k, entries.len());
+                        index = Some(ix);
+                    }
+                    entries.push((k, v));
+                }
+                if collapsed {
+                    self.dirty = true;
+                }
+                let string_key = matches!(self.node(key_id), PlanNode::String { .. });
+                for (k, entry) in entries {
                     // Canonical records skip `__proto__` keys entirely: never
                     // validated, never retained (the TS output builder's
                     // plain-object assignment would target the prototype).
@@ -291,21 +359,29 @@ impl<'p> Validator<'p> {
                         self.dirty = true;
                         continue;
                     }
-                    // Record key validation (invalid_key on failure).
-                    let key_val: Value = sonic_rs::from_str(&json_string(k)).unwrap_or_default();
-                    let before = self.issues.len();
+                    // Record key validation (invalid_key on failure). A string
+                    // key schema validates the key text directly; any other
+                    // key schema round-trips through a parsed JSON string.
+                    let before_i = self.issues.len();
+                    let before_f = self.fail_count;
                     let saved = std::mem::take(&mut self.path);
-                    self.check(key_id, &key_val);
-                    let key_issues = self.issues.split_off(before);
+                    if string_key {
+                        self.string_checks(key_id, Cow::Borrowed(k));
+                    } else {
+                        let key_val: Value =
+                            sonic_rs::from_str(&json_string(k)).unwrap_or_default();
+                        self.check(key_id, &key_val);
+                    }
                     self.path = saved;
-                    if !key_issues.is_empty() {
+                    if self.fail_count != before_f && !self.quiet {
+                        let key_issues = self.issues.split_off(before_i);
                         self.push(
                             Issue::new("invalid_key", &self.path)
                                 .with("origin", Json::from("record"))
                                 .with("issues", issues_to_value(&key_issues)),
                         );
                     }
-                    self.path.push(PathSeg::Key(k.to_string()));
+                    self.path.push(PathSegRef::Key(Cow::Owned(k.to_string())));
                     self.check(val_id, entry);
                     self.path.pop();
                 }
@@ -329,18 +405,20 @@ impl<'p> Validator<'p> {
             }
             PlanNode::Catch { inner, .. } => {
                 let inner = *inner;
-                let before = self.issues.len();
+                let before_i = self.issues.len();
+                let before_f = self.fail_count;
                 self.check(inner, value);
-                if self.issues.len() != before {
-                    self.issues.truncate(before);
+                if self.fail_count != before_f {
+                    self.issues.truncate(before_i);
+                    self.fail_count = before_f;
                     self.dirty = true; // catch value replaces the input
                 }
             }
             PlanNode::Pipe { a, b } => {
                 let (a, b) = (*a, *b);
-                let before = self.issues.len();
+                let before = self.fail_count;
                 self.check(a, value);
-                if self.issues.len() == before {
+                if self.fail_count == before {
                     self.check(b, value);
                 }
             }
@@ -351,11 +429,11 @@ impl<'p> Validator<'p> {
                 if let Some(re) = &self.dispatch(id).template
                     && !re.is_match(s)
                 {
-                    self.push(
-                        Issue::new("invalid_format", &self.path)
+                    self.emit(|p| {
+                        Issue::new("invalid_format", p)
                             .with("origin", Json::from("string"))
-                            .with("format", Json::from("template_literal")),
-                    );
+                            .with("format", Json::from("template_literal"))
+                    });
                 }
             }
             PlanNode::Host { .. } => {} // unreachable: host poisons eligibility
@@ -418,24 +496,25 @@ impl<'p> Validator<'p> {
                 self.check_missing(right);
             }
             PlanNode::Union { options } => {
-                let options = options.clone();
                 let union_path = self.path.clone();
                 let mut branch_errors: Vec<Json> = Vec::new();
-                for opt in &options {
-                    let before = self.issues.len();
-                    self.path = Path::new();
+                for opt in options {
+                    let before_f = self.fail_count;
+                    let before_i = self.issues.len();
+                    self.path = PathRef::new();
                     self.check_missing(*opt);
                     self.path.clone_from(&union_path);
-                    if self.issues.len() == before {
+                    if self.fail_count == before_f {
                         return; // an option accepts undefined
                     }
-                    let branch = self.issues.split_off(before);
-                    branch_errors.push(issues_to_value(&branch));
+                    if !self.quiet {
+                        let branch = self.issues.split_off(before_i);
+                        branch_errors.push(issues_to_value(&branch));
+                    }
                 }
-                self.push(
-                    Issue::new("invalid_union", &union_path)
-                        .with("errors", Json::Array(branch_errors)),
-                );
+                self.emit(|p| {
+                    Issue::new("invalid_union", p).with("errors", Json::Array(branch_errors))
+                });
             }
         }
     }
@@ -447,20 +526,30 @@ impl<'p> Validator<'p> {
         reason = "length bounds are small, non-negative integers"
     )]
     fn check_string(&mut self, id: NodeId, value: &Value, coerce: bool) {
-        let mut cur: String;
-        if let Some(s) = value.as_str() {
-            cur = s.to_string();
+        let cur: Cow<'_, str> = if let Some(s) = value.as_str() {
+            Cow::Borrowed(s)
         } else if coerce && (value.is_number() || value.is_boolean()) {
-            cur = coerce_to_string(value);
             self.dirty = true;
+            Cow::Owned(coerce_to_string(value))
         } else {
             return self.invalid_type("string");
-        }
+        };
+        self.string_checks(id, cur);
+    }
 
+    /// Runs a string node's checks against `cur`, allocating only when an
+    /// `overwrite` check actually rewrites the text.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "one arm per string check reads clearer than a split; length bounds are small, non-negative integers"
+    )]
+    fn string_checks(&mut self, id: NodeId, mut cur: Cow<'_, str>) {
         let PlanNode::String { checks, .. } = self.node(id) else {
             return;
         };
-        let checks = checks.clone();
         let compiled = &self.dispatch(id).checks;
         for (ci, check) in checks.iter().enumerate() {
             match check {
@@ -484,12 +573,12 @@ impl<'p> Validator<'p> {
                 }
                 Check::StartsWith { v } => {
                     if !cur.starts_with(v) {
-                        self.string_format("starts_with", &[("prefix", Json::from(v.clone()))]);
+                        self.string_format("starts_with", "prefix", v);
                     }
                 }
                 Check::EndsWith { v } => {
                     if !cur.ends_with(v) {
-                        self.string_format("ends_with", &[("suffix", Json::from(v.clone()))]);
+                        self.string_format("ends_with", "suffix", v);
                     }
                 }
                 Check::Includes { v, position } => {
@@ -498,30 +587,32 @@ impl<'p> Validator<'p> {
                         None => cur.contains(v),
                     };
                     if !found {
-                        self.string_format("includes", &[("includes", Json::from(v.clone()))]);
+                        self.string_format("includes", "includes", v);
                     }
                 }
                 Check::Lowercase => {
                     if cur.chars().any(char::is_uppercase) {
-                        self.string_format("lowercase", &[("pattern", Json::from("/^[^A-Z]*$/"))]);
+                        self.string_format("lowercase", "pattern", "/^[^A-Z]*$/");
                     }
                 }
                 Check::Uppercase => {
                     if cur.chars().any(char::is_lowercase) {
-                        self.string_format("uppercase", &[("pattern", Json::from("/^[^a-z]*$/"))]);
+                        self.string_format("uppercase", "pattern", "/^[^a-z]*$/");
                     }
                 }
                 Check::Regex { src, flags } => {
                     if let Some(Some(CompiledCheck::Regex(re))) = compiled.get(ci)
                         && !re.is_match(&cur)
                     {
-                        // Canonical regex issue carries the JS pattern source
-                        // and no `origin`; the message interpolates it.
-                        self.push(
-                            Issue::new_check("invalid_format", &self.path)
+                        // Canonical regex issue carries `origin: "string"`
+                        // alongside the JS pattern source, which the message
+                        // interpolates (zod v4 `$ZodIssueInvalidStringFormat`).
+                        self.emit(|p| {
+                            Issue::new_check("invalid_format", p)
+                                .with("origin", Json::from("string"))
                                 .with("format", Json::from("regex"))
-                                .with("pattern", Json::from(format!("/{src}/{flags}"))),
-                        );
+                                .with("pattern", Json::from(format!("/{src}/{flags}")))
+                        });
                     }
                 }
                 Check::Format { .. } => {
@@ -533,10 +624,10 @@ impl<'p> Validator<'p> {
                 }
                 Check::Overwrite { op, form } => {
                     let next = apply_overwrite(&cur, *op, form.as_deref());
-                    if next != cur {
+                    if next.as_str() != cur.as_ref() {
                         self.dirty = true;
+                        cur = Cow::Owned(next);
                     }
-                    cur = next;
                 }
                 _ => {}
             }
@@ -571,8 +662,7 @@ impl<'p> Validator<'p> {
         let PlanNode::Number { checks, .. } = self.node(id) else {
             return;
         };
-        let checks = checks.clone();
-        for check in &checks {
+        for check in checks {
             match check {
                 Check::Gt { v, inclusive, .. } => {
                     let bound = v.as_f64().unwrap_or(f64::NEG_INFINITY);
@@ -591,11 +681,11 @@ impl<'p> Validator<'p> {
                 Check::MultipleOf { v } => {
                     let d = v.as_f64().unwrap_or(1.0);
                     if !float_multiple_of(n, d) {
-                        self.push(
-                            Issue::new_check("not_multiple_of", &self.path)
+                        self.emit(|p| {
+                            Issue::new_check("not_multiple_of", p)
                                 .with("origin", Json::from("number"))
-                                .with("divisor", num_json(d)),
-                        );
+                                .with("divisor", num_json(d))
+                        });
                     }
                 }
                 Check::NumberFormat { v } => self.number_format(*v, n),
@@ -612,69 +702,80 @@ impl<'p> Validator<'p> {
         );
         if is_int {
             if n.fract() != 0.0 || !n.is_finite() {
-                self.push(
-                    Issue::new_check("invalid_type", &self.path)
+                self.emit(|p| {
+                    Issue::new_check("invalid_type", p)
                         .with("expected", Json::from("int"))
-                        .with("format", Json::from(number_format_id(fmt))),
-                );
+                        .with("format", Json::from(number_format_id(fmt)))
+                });
                 return;
             }
             if n.abs() > MAX_SAFE_INT {
                 if n > 0.0 {
-                    self.push(
-                        Issue::new_check("too_big", &self.path)
+                    self.emit(|p| {
+                        Issue::new_check("too_big", p)
                             .with("origin", Json::from("int"))
                             .with("maximum", num_json(MAX_SAFE_INT))
                             .with("inclusive", Json::from(true))
                             .with(
                                 "note",
                                 Json::from("Integers must be within the safe integer range."),
-                            ),
-                    );
+                            )
+                    });
                 } else {
-                    self.push(
-                        Issue::new_check("too_small", &self.path)
+                    self.emit(|p| {
+                        Issue::new_check("too_small", p)
                             .with("origin", Json::from("int"))
                             .with("minimum", num_json(-MAX_SAFE_INT))
                             .with("inclusive", Json::from(true))
                             .with(
                                 "note",
                                 Json::from("Integers must be within the safe integer range."),
-                            ),
-                    );
+                            )
+                    });
                 }
                 return;
             }
         }
         let (min, max) = number_format_range(fmt);
         if n < min {
-            self.push(
-                Issue::new_check("too_small", &self.path)
+            self.emit(|p| {
+                Issue::new_check("too_small", p)
                     .with("origin", Json::from("number"))
                     .with("minimum", num_json(min))
-                    .with("inclusive", Json::from(true)),
-            );
+                    .with("inclusive", Json::from(true))
+            });
         }
         if n > max {
-            self.push(
-                Issue::new_check("too_big", &self.path)
+            self.emit(|p| {
+                Issue::new_check("too_big", p)
                     .with("origin", Json::from("number"))
                     .with("maximum", num_json(max))
-                    .with("inclusive", Json::from(true)),
-            );
+                    .with("inclusive", Json::from(true))
+            });
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "f64->i128 is exact for every integral f64; the bound back-cast only feeds the issue payload, which zod reports at the same f64 precision"
+    )]
     fn bigint_format(&mut self, fmt: BigIntFormat, n: f64) {
-        let (min, max) = match fmt {
-            BigIntFormat::Int64 => (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_807.0),
-            BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
+        // `n` is the f64 the JSON parser produced — exactly what `BigInt(v)`
+        // sees in JS — so compare in integer space the way zod does against
+        // `util.BIGINT_FORMAT_RANGES`. An f64 bound literal cannot: `i64::MAX`
+        // and `2^63` collapse onto one f64, so `n <= max` in f64 would accept
+        // the overflowing `2^63` that zod rejects.
+        let (min, max): (i128, i128) = match fmt {
+            BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
+            BigIntFormat::Uint64 => (0, u64::MAX.into()),
         };
-        if n < min {
-            self.too_small("bigint", min, true, false);
+        let exact = n as i128;
+        if exact < min {
+            self.too_small("bigint", min as f64, true, false);
         }
-        if n > max {
-            self.too_big("bigint", max, true, false);
+        if exact > max {
+            self.too_big("bigint", max as f64, true, false);
         }
     }
 
@@ -686,9 +787,8 @@ impl<'p> Validator<'p> {
         let PlanNode::Array { checks, .. } = self.node(id) else {
             return;
         };
-        let checks = checks.clone();
         let len_f = len as f64;
-        for check in &checks {
+        for check in checks {
             match check {
                 Check::MinLength { v } | Check::MinSize { v } => {
                     if len_f < *v {
@@ -712,6 +812,10 @@ impl<'p> Validator<'p> {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "object field counts fit in u32 by arena construction"
+    )]
     fn check_object(&mut self, id: NodeId, value: &Value) {
         let PlanNode::Object {
             keys,
@@ -723,96 +827,131 @@ impl<'p> Validator<'p> {
         else {
             return;
         };
-        let keys = keys.clone();
-        let values = values.clone();
         let mode = *mode;
         let catchall = *catchall;
+        let obj_dispatch = &self.dispatch(id).object;
 
         let Some(obj) = value.as_object() else {
             return self.invalid_type("object");
         };
 
-        // ECMA-262 JSON.parse collapses duplicate keys to last-wins, keeping the
-        // first position. Any collapse means the input bytes are not canonical.
-        let entries = collapse_object(obj);
-        if entries.len() != obj.len() {
+        // One pass over the input entries, on the stack: match each key
+        // against the sorted schema index (memchr first-byte screen, then
+        // binary search), collapsing duplicates to ECMA-262 last-wins with
+        // the first position kept. Any collapse means the input bytes are
+        // not canonical.
+        let mut pos: SmallVec<[u32; 16]> = smallvec![u32::MAX; keys.len()];
+        let mut known: SmallVec<[(u32, &Value); 16]> = SmallVec::new();
+        let mut unknowns: SmallVec<[(&str, &Value); 8]> = SmallVec::new();
+        let mut collapsed = false;
+        for (k, v) in obj {
+            if let Some(schema_i) = obj_dispatch.as_ref().and_then(|o| o.find(k)) {
+                let slot = &mut pos[schema_i];
+                if *slot == u32::MAX {
+                    *slot = known.len() as u32;
+                    known.push((schema_i as u32, v));
+                } else {
+                    known[*slot as usize].1 = v;
+                    collapsed = true;
+                }
+            } else if k == "__proto__" {
+                // Canonical skips __proto__ in unknown-key handling entirely:
+                // never flagged, never retained. Dropping it rewrites the input.
+                self.dirty = true;
+            } else if let Some(slot) = unknowns.iter_mut().find(|(ek, _)| *ek == k) {
+                slot.1 = v;
+                collapsed = true;
+            } else {
+                unknowns.push((k, v));
+            }
+        }
+        if collapsed {
             self.dirty = true;
         }
 
-        let lookup: HashMap<&str, &Value> = entries.iter().copied().collect();
+        // Retained known keys not in ascending schema order => reorder => dirty.
+        if known.windows(2).any(|w| w[0].0 > w[1].0) {
+            self.dirty = true;
+        }
 
         // Canonical issue order: every shape key in schema order — present
         // values are validated, absent ones apply a default or emit the
         // missing-input issue.
         for (schema_i, key) in keys.iter().enumerate() {
-            if let Some(child) = lookup.get(key.as_str()) {
-                self.path.push(PathSeg::Key(key.clone()));
+            let slot = pos[schema_i];
+            if slot != u32::MAX {
+                let child = known[slot as usize].1;
+                self.path.push(PathSegRef::Key(Cow::Borrowed(key.as_str())));
                 self.check(values[schema_i], child);
                 self.path.pop();
-            } else if default_value(self.plan, values[schema_i]).is_some() {
+            } else if has_default(self.plan, values[schema_i]) {
                 self.dirty = true;
             } else {
-                self.path.push(PathSeg::Key(key.clone()));
+                self.path.push(PathSegRef::Key(Cow::Borrowed(key.as_str())));
                 self.check_missing(values[schema_i]);
                 self.path.pop();
             }
         }
 
-        // Then unknown keys in input order.
-        let mut unknown_keys: Vec<String> = Vec::new();
-        let mut known_order: Vec<usize> = Vec::new();
-        for (in_key, in_val) in &entries {
-            if let Some(schema_i) = self.dispatch(id).object.as_ref().and_then(|o| o.find(in_key)) {
-                known_order.push(schema_i);
-            } else if *in_key == "__proto__" {
-                // Canonical skips __proto__ in unknown-key handling entirely:
-                // never flagged, never retained. Dropping it rewrites the input.
-                self.dirty = true;
-            } else if let Some(catchall_id) = catchall {
-                self.path.push(PathSeg::Key((*in_key).to_string()));
-                self.check(catchall_id, in_val);
+        // Then unknown keys in input order: a catchall validates them, strict
+        // mode rejects them, and strip/passthrough rewrites the output (strip
+        // drops the key; passthrough appends it after the schema keys).
+        if let Some(catchall_id) = catchall {
+            for (k, v) in &unknowns {
+                self.path.push(PathSegRef::Key(Cow::Owned(k.to_string())));
+                self.check(catchall_id, v);
                 self.path.pop();
-            } else {
-                match mode {
-                    ObjectMode::Strip | ObjectMode::Passthrough => self.dirty = true,
-                    ObjectMode::Strict => unknown_keys.push((*in_key).to_string()),
+            }
+        } else if !unknowns.is_empty() {
+            match mode {
+                ObjectMode::Strip | ObjectMode::Passthrough => self.dirty = true,
+                ObjectMode::Strict => {
+                    self.emit(|p| {
+                        Issue::new("unrecognized_keys", p).with(
+                            "keys",
+                            Json::Array(unknowns.iter().map(|(k, _)| Json::from(*k)).collect()),
+                        )
+                    });
                 }
             }
-        }
-
-        // Retained known keys not in ascending schema order => reorder => dirty.
-        if known_order.windows(2).any(|w| w[0] > w[1]) {
-            self.dirty = true;
-        }
-
-        if mode == ObjectMode::Strict && !unknown_keys.is_empty() {
-            self.push(
-                Issue::new("unrecognized_keys", &self.path).with(
-                    "keys",
-                    Json::Array(unknown_keys.into_iter().map(Json::from).collect()),
-                ),
-            );
         }
     }
 
     fn check_union(&mut self, options: &[NodeId], value: &Value) {
+        let saved_quiet = self.quiet;
         let union_path = self.path.clone();
+        let union_dirty = self.dirty;
+        let entry_fails = self.fail_count;
+        // Dry-run pass: the first passing option wins. Failures are detected
+        // from the fail counter with issue construction suppressed, so an
+        // option that does not match costs no allocation.
+        for opt in options {
+            self.quiet = true;
+            self.check(*opt, value);
+            self.quiet = saved_quiet;
+            if self.fail_count == entry_fails {
+                return; // first successful option wins
+            }
+            // A failed option may still have probed (and abandoned) branches
+            // of its own nested unions; erase those suppressed probes so the
+            // next option is measured from a clean baseline.
+            self.fail_count = entry_fails;
+            self.dirty = union_dirty;
+        }
+        // Every option failed: re-run with issue collection to build the
+        // canonical branch errors. Sub-issues keep paths relative to the
+        // option: reset the path before checking each branch so it doesn't
+        // inherit the union's path prefix. The wrapper invalid_union carries
+        // the union path.
         let mut branch_issues: Vec<Vec<Issue>> = Vec::new();
         for opt in options {
             let before = self.issues.len();
-            let dirty_before = self.dirty;
-            // Sub-issues keep paths relative to the option: reset the path
-            // before checking each branch so it doesn't inherit the union's
-            // path prefix. The wrapper invalid_union carries the union path.
-            self.path = Path::new();
+            self.path = PathRef::new();
             self.check(*opt, value);
             self.path.clone_from(&union_path);
-            if self.issues.len() == before {
-                return; // first successful option wins
-            }
             let branch = self.issues.split_off(before);
             branch_issues.push(branch);
-            self.dirty = dirty_before;
+            self.dirty = union_dirty;
         }
         // Canonical flattening: when exactly one branch is "nonaborted"
         // (all its issues have `aborting == false`, mirroring TS
@@ -829,36 +968,40 @@ impl<'p> Validator<'p> {
             if let Some(issues) = branch_issues.get(idx) {
                 for iss in issues {
                     let mut new_issue = iss.clone();
-                    let mut full_path = union_path.clone();
+                    let mut full_path: Path =
+                        union_path.iter().map(PathSegRef::to_owned_seg).collect();
                     full_path.extend(iss.path.iter().cloned());
                     new_issue.path = full_path;
-                    self.issues.push(new_issue);
+                    self.push(new_issue);
                 }
                 return;
             }
         }
-        let branch_errors: Vec<Json> =
-            branch_issues.iter().map(|issues| issues_to_value(issues)).collect();
+        let branch_errors: Vec<Json> = branch_issues
+            .iter()
+            .map(|issues| issues_to_value(issues))
+            .collect();
         self.push(
-            Issue::new("invalid_union", &union_path)
-                .with("errors", Json::Array(branch_errors)),
+            Issue::new("invalid_union", &union_path).with("errors", Json::Array(branch_errors)),
         );
     }
 
-    fn check_disc_union(&mut self, id: NodeId, disc_key: &str, value: &Value) {
+    fn check_disc_union(&mut self, id: NodeId, disc_key: &'p str, value: &Value) {
         let Some(obj) = value.as_object() else {
             return self.invalid_type("object");
         };
-        // Last-wins lookup of the discriminant value.
-        let disc = collapse_object(obj)
-            .into_iter()
-            .find(|(k, _)| *k == disc_key)
-            .map(|(_, v)| v);
-        let target = disc.and_then(LiteralValue::from_value).and_then(|k| {
+        // Last-wins value of the discriminant key, scanned without collapse.
+        let mut disc: Option<&Value> = None;
+        for (k, v) in obj {
+            if k == disc_key {
+                disc = Some(v);
+            }
+        }
+        let target = disc.and_then(|v| {
             self.dispatch(id)
                 .disc_union
                 .as_ref()
-                .and_then(|m| m.get(&k).copied())
+                .and_then(|d| d.find_value(v))
         });
         if let Some(node) = target {
             return self.check(node, value);
@@ -870,62 +1013,62 @@ impl<'p> Validator<'p> {
             PlanNode::DiscUnion { map, .. } => map.iter().map(|(v, _)| v.clone()).collect(),
             _ => Vec::new(),
         };
-        self.path.push(PathSeg::Key(disc_key.to_string()));
-        self.push(
-            Issue::new("invalid_union", &self.path)
+        self.path.push(PathSegRef::Key(Cow::Borrowed(disc_key)));
+        self.emit(|p| {
+            Issue::new("invalid_union", p)
                 .with("errors", Json::Array(Vec::new()))
                 .with("note", Json::from("No matching discriminator"))
                 .with("discriminator", Json::from(disc_key))
-                .with("options", Json::Array(options)),
-        );
+                .with("options", Json::Array(options))
+        });
         self.path.pop();
     }
 
     // ---- issue helpers -------------------------------------------------
 
     fn too_small(&mut self, origin: &str, minimum: f64, inclusive: bool, exact: bool) {
-        let mut issue = Issue::new_check("too_small", &self.path)
-            .with("origin", Json::from(origin))
-            .with("minimum", num_json(minimum))
-            .with("inclusive", Json::from(inclusive));
-        if exact {
-            issue = issue.with("exact", Json::from(true));
-        }
-        self.push(issue);
+        self.emit(|p| {
+            let mut issue = Issue::new_check("too_small", p)
+                .with("origin", Json::from(origin))
+                .with("minimum", num_json(minimum))
+                .with("inclusive", Json::from(inclusive));
+            if exact {
+                issue = issue.with("exact", Json::from(true));
+            }
+            issue
+        });
     }
     fn too_big(&mut self, origin: &str, maximum: f64, inclusive: bool, exact: bool) {
-        let mut issue = Issue::new_check("too_big", &self.path)
-            .with("origin", Json::from(origin))
-            .with("maximum", num_json(maximum))
-            .with("inclusive", Json::from(inclusive));
-        if exact {
-            issue = issue.with("exact", Json::from(true));
-        }
-        self.push(issue);
+        self.emit(|p| {
+            let mut issue = Issue::new_check("too_big", p)
+                .with("origin", Json::from(origin))
+                .with("maximum", num_json(maximum))
+                .with("inclusive", Json::from(inclusive));
+            if exact {
+                issue = issue.with("exact", Json::from(true));
+            }
+            issue
+        });
     }
-    fn string_format(&mut self, format: &'static str, extra: &[(&'static str, Json)]) {
-        let mut issue = Issue::new_check("invalid_format", &self.path)
-            .with("origin", Json::from("string"))
-            .with("format", Json::from(format));
-        for (k, v) in extra {
-            issue = issue.with(k, v.clone());
-        }
-        self.push(issue);
+    fn string_format(&mut self, format: &'static str, key: &'static str, value: &str) {
+        self.emit(|p| {
+            Issue::new_check("invalid_format", p)
+                .with("origin", Json::from("string"))
+                .with("format", Json::from(format))
+                .with(key, Json::from(value))
+        });
     }
     fn format_issue(&mut self, f: &FormatValidator) {
-        if let Some(pat) = &f.pattern {
-            self.push(
-                Issue::new_check("invalid_format", &self.path)
+        self.emit(|p| {
+            if let Some(pat) = &f.pattern {
+                Issue::new_check("invalid_format", p)
                     .with("origin", Json::from("string"))
                     .with("format", Json::from(f.id.clone()))
-                    .with("pattern", Json::from(pat.clone())),
-            );
-        } else {
-            self.push(
-                Issue::new_check("invalid_format", &self.path)
-                    .with("format", Json::from(f.id.clone())),
-            );
-        }
+                    .with("pattern", Json::from(pat.clone()))
+            } else {
+                Issue::new_check("invalid_format", p).with("format", Json::from(f.id.clone()))
+            }
+        });
     }
 }
 
@@ -1145,17 +1288,19 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             let target = value
                 .as_object()
                 .and_then(|o| {
-                    collapse_object(o)
-                        .into_iter()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, v)| v)
+                    let mut disc: Option<&Value> = None;
+                    for (k, v) in o {
+                        if k == key {
+                            disc = Some(v);
+                        }
+                    }
+                    disc
                 })
-                .and_then(LiteralValue::from_value)
-                .and_then(|k| {
+                .and_then(|v| {
                     plan.dispatch[id as usize]
                         .disc_union
                         .as_ref()
-                        .and_then(|m| m.get(&k).copied())
+                        .and_then(|d| d.find_value(v))
                 });
             match target {
                 Some(node) => write_output(plan, node, value, out),
@@ -1170,9 +1315,11 @@ fn option_matches(plan: &CompiledPlan, id: NodeId, value: &Value) -> bool {
     let mut v = Validator {
         plan,
         issues: Vec::new(),
-        path: Path::new(),
+        path: PathRef::new(),
         dirty: false,
         nonfinite: false,
+        fail_count: 0,
+        quiet: false,
     };
     v.check(id, value);
     v.issues.is_empty()
@@ -1280,6 +1427,16 @@ fn default_value(plan: &CompiledPlan, id: NodeId) -> Option<Json> {
     }
 }
 
+/// Whether a node supplies a default for an absent input — the non-allocating
+/// form of `default_value(..).is_some()` used on the hot object walk.
+pub(crate) fn has_default(plan: &CompiledPlan, id: NodeId) -> bool {
+    match &plan.nodes()[id as usize] {
+        PlanNode::Default { .. } | PlanNode::Prefault { .. } | PlanNode::Catch { .. } => true,
+        PlanNode::Readonly { inner } | PlanNode::Lazy { inner } => has_default(plan, *inner),
+        _ => false,
+    }
+}
+
 fn write_pair(key: &str, out: &mut String, first: &mut bool) {
     if !*first {
         out.push(',');
@@ -1382,8 +1539,8 @@ fn collapse_object(obj: &Object) -> Vec<(&str, &Value)> {
 }
 
 /// Converts a container index to a path segment, saturating at `u32::MAX`.
-fn idx(i: usize) -> PathSeg {
-    PathSeg::Index(u32::try_from(i).unwrap_or(u32::MAX))
+fn idx(i: usize) -> PathSegRef<'static> {
+    PathSegRef::Index(u32::try_from(i).unwrap_or(u32::MAX))
 }
 
 fn number_of(value: &Value) -> Option<f64> {
@@ -1407,7 +1564,7 @@ fn json_eq(value: &Value, lit: &Json) -> bool {
     }
 }
 
-fn utf16_len(s: &str) -> usize {
+pub(crate) fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
@@ -1470,7 +1627,9 @@ fn js_number_str(s: &str) -> Option<f64> {
         || unsigned.eq_ignore_ascii_case("infinity")
         || unsigned.eq_ignore_ascii_case("nan")
         || t.strip_prefix('-').is_some_and(|r| {
-            r.eq_ignore_ascii_case("inf") || r.eq_ignore_ascii_case("infinity") || r.eq_ignore_ascii_case("nan")
+            r.eq_ignore_ascii_case("inf")
+                || r.eq_ignore_ascii_case("infinity")
+                || r.eq_ignore_ascii_case("nan")
         })
     {
         return None;
@@ -1517,7 +1676,11 @@ fn js_number_to_string(n: f64) -> String {
         return "NaN".into();
     }
     if n.is_infinite() {
-        return if n > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if n > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     let negative = n < 0.0;
     let sci = format!("{:e}", n.abs()); // "2.5e4", "3e-1"
@@ -1548,18 +1711,20 @@ fn js_number_to_string(n: f64) -> String {
         } else {
             String::new()
         };
-        format!("{}{}e{}{}", &digits[..1], frac, if point > 0 { "+" } else { "" }, point - 1)
+        format!(
+            "{}{}e{}{}",
+            &digits[..1],
+            frac,
+            if point > 0 { "+" } else { "" },
+            point - 1
+        )
     };
-    if negative {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if negative { format!("-{body}") } else { body }
 }
 
 /// Mirrors the TS `floatSafeRemainder`: a tolerance-based check that
 /// accounts for floating-point rounding in the ratio `value / step`.
-fn float_multiple_of(value: f64, step: f64) -> bool {
+pub(crate) fn float_multiple_of(value: f64, step: f64) -> bool {
     if step == 0.0 {
         return false;
     }
@@ -1569,7 +1734,7 @@ fn float_multiple_of(value: f64, step: f64) -> bool {
     (ratio - rounded_ratio).abs() < tolerance
 }
 
-fn apply_overwrite(s: &str, op: OverwriteOp, _form: Option<&str>) -> String {
+pub(crate) fn apply_overwrite(s: &str, op: OverwriteOp, _form: Option<&str>) -> String {
     match op {
         OverwriteOp::Trim => s.trim().to_string(),
         OverwriteOp::ToLowerCase => s.to_lowercase(),
@@ -1605,7 +1770,7 @@ fn number_format_id(fmt: NumberFormat) -> &'static str {
     }
 }
 
-fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
+pub(crate) fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
     match fmt {
         NumberFormat::Int32 => (-2_147_483_648.0, 2_147_483_647.0),
         NumberFormat::Uint32 => (0.0, 4_294_967_295.0),

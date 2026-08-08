@@ -39,7 +39,7 @@ impl CompiledPlan {
 #[derive(Debug, Default)]
 pub(crate) struct NodeDispatch {
     pub object: Option<ObjectDispatch>,
-    pub disc_union: Option<HashMap<LiteralValue, NodeId>>,
+    pub disc_union: Option<DiscUnionDispatch>,
     pub checks: Vec<Option<CompiledCheck>>,
     pub template: Option<Regex>,
     /// Whether the schema accepts `undefined` as input (zod `_zod.optin`).
@@ -48,28 +48,147 @@ pub(crate) struct NodeDispatch {
     pub optout_optional: bool,
 }
 
-/// Sorted `(schema key, original schema index)` pairs. The hot lookup starts
-/// with a `memchr` first-byte screen before the exact comparison.
+/// Discriminated-union dispatch, split by literal kind so the hot lookup
+/// matches a borrowed `&str`/`f64` without building an owned key.
+#[derive(Debug, Default)]
+pub(crate) struct DiscUnionDispatch {
+    strings: HashMap<String, NodeId>,
+    numbers: HashMap<u64, NodeId>,
+    bools: [Option<NodeId>; 2],
+    null: Option<NodeId>,
+}
+
+impl DiscUnionDispatch {
+    /// Insert a compile-time literal from the plan's discriminant map.
+    fn insert(&mut self, lit: LiteralValue, id: NodeId) {
+        match lit {
+            LiteralValue::String(s) => {
+                self.strings.insert(s, id);
+            }
+            LiteralValue::Number(n) => {
+                self.numbers.insert(n, id);
+            }
+            LiteralValue::Bool(b) => self.bools[usize::from(b)] = Some(id),
+            LiteralValue::Null => self.null = Some(id),
+        }
+    }
+
+    /// Look up the option for a parsed discriminant value.
+    pub fn find_value(&self, v: &sonic_rs::Value) -> Option<NodeId> {
+        use sonic_rs::JsonValueTrait;
+        if let Some(s) = v.as_str() {
+            return self.strings.get(s).copied();
+        }
+        if let Some(b) = v.as_bool() {
+            return self.bools[usize::from(b)];
+        }
+        if v.is_null() {
+            return self.null;
+        }
+        if v.is_number() {
+            return v
+                .as_f64()
+                .and_then(|n| self.numbers.get(&number_key(n)).copied());
+        }
+        None
+    }
+
+    /// String discriminant lookup for the byte scanner.
+    pub fn find_str(&self, s: &str) -> Option<NodeId> {
+        self.strings.get(s).copied()
+    }
+
+    /// Boolean discriminant lookup for the byte scanner.
+    pub fn find_bool(&self, b: bool) -> Option<NodeId> {
+        self.bools[usize::from(b)]
+    }
+
+    /// Null discriminant lookup for the byte scanner.
+    pub fn find_null(&self) -> Option<NodeId> {
+        self.null
+    }
+
+    /// Number discriminant lookup for the byte scanner.
+    pub fn find_number(&self, n: f64) -> Option<NodeId> {
+        self.numbers.get(&number_key(n)).copied()
+    }
+}
+
+/// Per-node object key index. Keys of up to 8 bytes are packed into a
+/// little-endian `u64` word so matching is two integer compares per
+/// candidate — no per-probe hashing or `memcmp` call. Longer keys are rare
+/// and match by length-then-bytes.
 #[derive(Debug)]
 pub(crate) struct ObjectDispatch {
-    pub sorted_keys: Vec<(String, usize)>,
-    /// First byte of every schema key, used as a memchr pre-screen.
-    pub first_bytes: Vec<u8>,
+    /// Packed keys up to 8 bytes long.
+    words: Vec<KeyWord>,
+    /// Keys longer than 8 bytes.
+    long: Vec<(String, usize)>,
+}
+
+/// A schema key packed into a machine word.
+#[derive(Debug)]
+struct KeyWord {
+    word: u64,
+    len: usize,
+    schema_i: usize,
+}
+
+/// Packs a key of at most 8 bytes into a little-endian word.
+fn pack_key(kb: &[u8]) -> u64 {
+    let mut w: u64 = 0;
+    for (i, &c) in kb.iter().enumerate() {
+        w |= u64::from(c) << (8 * i);
+    }
+    w
+}
+
+/// `Object.prototype`'s own property names, minus `__proto__` which every
+/// layer already special-cases. Mirrors `PROTO_KEYS` in
+/// `packages/zodrs/src/core/plan.ts`, which derives the list from the JS
+/// runtime; Rust has no such runtime, so the names are spelled out. A shape
+/// key naming one of these resolves through the prototype in JS when the
+/// input omits it, so the byte path cannot reproduce the TS walk.
+fn is_proto_key(key: &str) -> bool {
+    matches!(
+        key,
+        "__proto__"
+            | "constructor"
+            | "__defineGetter__"
+            | "__defineSetter__"
+            | "hasOwnProperty"
+            | "__lookupGetter__"
+            | "__lookupSetter__"
+            | "isPrototypeOf"
+            | "propertyIsEnumerable"
+            | "toString"
+            | "valueOf"
+            | "toLocaleString"
+    )
 }
 
 impl ObjectDispatch {
     pub fn find(&self, key: &str) -> Option<usize> {
-        // memchr first-byte pre-screen, skipped for the empty key (which has
-        // no first byte); then an exact binary search.
-        if let Some(&first) = key.as_bytes().first()
-            && memchr::memchr(first, &self.first_bytes).is_none()
-        {
-            return None;
+        self.find_bytes(key.as_bytes())
+    }
+
+    /// Byte-level lookup: schema keys are valid UTF-8, so byte equality and
+    /// string equality coincide.
+    pub fn find_bytes(&self, kb: &[u8]) -> Option<usize> {
+        if kb.len() <= 8 {
+            let w = pack_key(kb);
+            let i = self
+                .words
+                .binary_search_by(|kw| kw.len.cmp(&kb.len()).then_with(|| kw.word.cmp(&w)))
+                .ok()?;
+            Some(self.words[i].schema_i)
+        } else {
+            let i = self
+                .long
+                .binary_search_by(|(k, _)| k.as_bytes().cmp(kb))
+                .ok()?;
+            Some(self.long[i].1)
         }
-        self.sorted_keys
-            .binary_search_by(|(candidate, _)| candidate.as_str().cmp(key))
-            .ok()
-            .map(|i| self.sorted_keys[i].1)
     }
 }
 
@@ -88,38 +207,20 @@ pub(crate) enum LiteralValue {
     Null,
 }
 
+/// `SameValueZero` number key: negative zero folds to positive zero.
+fn number_key(n: f64) -> u64 {
+    if n == 0.0 { 0 } else { n.to_bits() }
+}
+
 impl LiteralValue {
     pub fn from_json(v: &Json) -> Option<LiteralValue> {
         match v {
             Json::String(s) => Some(LiteralValue::String(s.clone())),
-            Json::Number(n) => n.as_f64().map(|n| {
-                // JS Map uses SameValueZero; normalize negative zero.
-                LiteralValue::Number(if n == 0.0 { 0 } else { n.to_bits() })
-            }),
+            Json::Number(n) => n.as_f64().map(|n| LiteralValue::Number(number_key(n))),
             Json::Bool(b) => Some(LiteralValue::Bool(*b)),
             Json::Null => Some(LiteralValue::Null),
             _ => None,
         }
-    }
-
-    /// Build from a parsed `sonic_rs` value at runtime.
-    pub fn from_value(v: &sonic_rs::Value) -> Option<LiteralValue> {
-        use sonic_rs::JsonValueTrait;
-        if let Some(s) = v.as_str() {
-            return Some(LiteralValue::String(s.to_string()));
-        }
-        if let Some(b) = v.as_bool() {
-            return Some(LiteralValue::Bool(b));
-        }
-        if v.is_null() {
-            return Some(LiteralValue::Null);
-        }
-        if v.is_number() {
-            return v
-                .as_f64()
-                .map(|n| LiteralValue::Number(if n == 0.0 { 0 } else { n.to_bits() }));
-        }
-        None
     }
 }
 
@@ -174,25 +275,35 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
 
         match node {
             PlanNode::Object { keys, .. } => {
-                let mut sorted_keys: Vec<(String, usize)> =
-                    keys.iter().cloned().enumerate().map(|(i, k)| (k, i)).collect();
-                sorted_keys.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                let first_bytes = sorted_keys
-                    .iter()
-                    .map(|(key, _)| key.as_bytes().first().copied().unwrap_or(0))
-                    .collect();
-                d.object = Some(ObjectDispatch {
-                    sorted_keys,
-                    first_bytes,
-                });
+                let mut words = Vec::with_capacity(keys.len());
+                let mut long = Vec::new();
+                for (schema_i, key) in keys.iter().enumerate() {
+                    // Mirrors `PROTO_KEYS` in packages/zodrs/src/core/plan.ts:
+                    // JS resolves such a key through `Object.prototype` when
+                    // the input omits it, which the byte walk cannot see.
+                    if is_proto_key(key) {
+                        eligible = false;
+                    }
+                    let kb = key.as_bytes();
+                    if kb.len() <= 8 {
+                        words.push(KeyWord {
+                            word: pack_key(kb),
+                            len: kb.len(),
+                            schema_i,
+                        });
+                    } else {
+                        long.push((key.clone(), schema_i));
+                    }
+                }
+                words.sort_by(|a, b| a.len.cmp(&b.len).then(a.word.cmp(&b.word)));
+                long.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+                d.object = Some(ObjectDispatch { words, long });
             }
             PlanNode::DiscUnion { map, .. } => {
-                let mut compiled = HashMap::with_capacity(map.len());
+                let mut compiled = DiscUnionDispatch::default();
                 for (literal, id) in map {
                     match LiteralValue::from_json(literal) {
-                        Some(k) => {
-                            compiled.insert(k, *id);
-                        }
+                        Some(k) => compiled.insert(k, *id),
                         None => eligible = false,
                     }
                 }
@@ -202,7 +313,11 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                 Ok(r) => d.template = Some(r),
                 Err(_) => eligible = false,
             },
+            // A bigint parses to a JS `BigInt`: no JSON encoding, and its
+            // bounds arrive as decimal strings the f64 walk cannot compare.
+            // Mirrors the same rule in `packages/zodrs/src/core/plan.ts`.
             PlanNode::Host { .. }
+            | PlanNode::BigInt { .. }
             | PlanNode::Default { dynamic: true, .. }
             | PlanNode::Prefault { dynamic: true, .. }
             | PlanNode::Catch { dynamic: true, .. } => eligible = false,
@@ -220,15 +335,14 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
                         },
                         |r| Some(CompiledCheck::Regex(r)),
                     ),
-                    Check::Format { v, params } => {
-                        formats::compile(v, params.as_ref()).map_or_else(
+                    Check::Format { v, params } => formats::compile(v, params.as_ref())
+                        .map_or_else(
                             |_| {
                                 eligible = false;
                                 None
                             },
                             |f| Some(CompiledCheck::Format(f)),
-                        )
-                    }
+                        ),
                     Check::Host { .. } => {
                         eligible = false;
                         None

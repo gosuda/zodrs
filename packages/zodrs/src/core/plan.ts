@@ -13,12 +13,28 @@ export interface CompiledPlan {
   readonly json: string;
   readonly hostFns: HostFunction[];
   readonly jsonEligible: boolean;
+  /** All object shape keys emitted into the plan, for live prototype-pollution checks. */
+  readonly objectShapeKeys: readonly string[];
 }
+
+/**
+ * `Object.prototype` members. A shape key naming one of these reads through the
+ * prototype when the input omits the key, so the TS walk sees the inherited
+ * member where the byte scanner sees nothing. `__proto__` belongs here too: it
+ * is a real shape key once the schema declares one. Derived from the runtime
+ * rather than hand-listed, so it cannot drift.
+ */
+// PROTO_KEYS is now checked live against Object.prototype at emit time (see below).
 
 interface EmitState {
   readonly nodes: (PlanNode | null)[];
   readonly ids: Map<SchemaNode, NodeId>;
   readonly hostFns: HostFunction[];
+  /** Set when a bigint node is emitted; `compilePlan` explains why that disqualifies the byte path. */
+  bigint: boolean;
+  /** Set when a shape key names an `Object.prototype` member; see `PROTO_KEYS`. */
+  protoKey: boolean;
+  readonly objectShapeKeys: Set<string>;
 }
 
 function toJsonValue(value: unknown): JSONType | null {
@@ -60,6 +76,7 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
     case "bigint":
     case "date":
     case "file": {
+      if (schema.kind === "bigint") state.bigint = true;
       const base = { k: schema.kind, checks: emitChecks(schema.checks, state) };
       return schema.coerce ? { ...base, coerce: true } : base;
     }
@@ -89,6 +106,12 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
       const values: NodeId[] = [];
       const optional: boolean[] = [];
       for (const key of keys) {
+        state.objectShapeKeys.add(key);
+        // A shape key that names an `Object.prototype` member resolves
+        // through the prototype when absent from the input, so the TS walk
+        // sees `Object.prototype.constructor` where the byte scanner sees
+        // only a missing key. `__proto__` is already handled everywhere.
+        if (Object.hasOwn(Object.prototype as object, key)) state.protoKey = true;
         const child = schema.shape[key];
         if (!child) continue;
         values.push(emit(child, state));
@@ -190,11 +213,26 @@ function emit(schema: SchemaNode, state: EmitState): NodeId {
 }
 
 export function compilePlan(root: SchemaNode): CompiledPlan {
-  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [] };
+  const state: EmitState = { nodes: [], ids: new Map(), hostFns: [], bigint: false, protoKey: false, objectShapeKeys: new Set<string>() };
   emit(root, state);
   return {
     json: JSON.stringify(state.nodes),
     hostFns: state.hostFns,
-    jsonEligible: state.hostFns.length === 0,
+    // Two shapes disqualify the byte path outright. A bigint node parses to a
+    // JS `BigInt`, which has no JSON encoding, so the Rust walk can neither
+    // return the right value nor compare against bounds the plan carries as
+    // decimal strings. A shape key naming an `Object.prototype` member reads
+    // through the prototype when absent, which the scanner cannot see. The TS
+    // path owns both.
+    jsonEligible: state.hostFns.length === 0 && !state.bigint && !state.protoKey,
+    objectShapeKeys: [...state.objectShapeKeys],
   };
+}
+
+/** Live check for prototype pollution after `_zod.plan` was cached — checks only the keys that were actually emitted. */
+export function isProtoPolluted(plan: CompiledPlan): boolean {
+  for (const key of plan.objectShapeKeys) {
+    if (Object.hasOwn(Object.prototype as object, key)) return true;
+  }
+  return false;
 }

@@ -134,6 +134,12 @@ function checksOf(values: readonly ($ZodCheck | RuntimeCheck | ((payload: { valu
 }
 
 const schemaByNode = new WeakMap<SchemaNode, $ZodType>();
+
+declare const process: { readonly env: Record<string, string | undefined> } | undefined;
+
+/** Conformance tier switch: `ZODRS_BACKEND=interpreter` forces the tree-walking
+ *  interpreter for every schema, mirroring how `ZODRS_LOADER` switches loaders. */
+const FORCE_INTERPRETER = typeof process !== "undefined" && process.env?.["ZODRS_BACKEND"] === "interpreter";
 function fromNode<T extends $ZodType = $ZodType>(schemaNode: SchemaNode, parent?: $ZodType): T {
   // The runtime instance is structurally `$ZodType<unknown, unknown>`; the caller's
   // contextual return type refines the phantom Output/Input at zero runtime cost.
@@ -197,10 +203,144 @@ function makeDef(node: SchemaNode): SchemaDef {
   return facade;
 }
 
+type AnyInternals = SchemaInternals<unknown, unknown>;
+
+function shadowData(target: object, key: string, value: unknown, enumerable = false): void {
+  Object.defineProperty(target, key, { value, configurable: true, writable: true, enumerable });
+}
+
+/**
+ * Shared lazy accessors for `_zod` internals: one descriptor set serves every
+ * schema instance, so construction allocates zero getter closures. Each
+ * accessor self-shadows with a plain data property on first read, so hot
+ * paths (`_zod.validate` on every parse) pay the accessor exactly once.
+ */
+const INTERNALS_ACCESSORS: PropertyDescriptorMap = {
+  def: {
+    get(this: AnyInternals): SchemaDef {
+      const facade = makeDef(this.node);
+      shadowData(this, "def", facade, true);
+      return facade;
+    },
+    configurable: true, enumerable: true,
+  },
+  validate: {
+    get(this: AnyInternals) {
+      const compiled = CODEGEN_AVAILABLE && !FORCE_INTERPRETER && !config().jitless
+        ? createCodegenValidator(this.node)
+        : createInterpreter(this.node);
+      shadowData(this, "validate", compiled);
+      return compiled;
+    },
+    configurable: true,
+  },
+  validateAsync: {
+    get(this: AnyInternals) {
+      const compiled = createAsyncInterpreter(this.node);
+      shadowData(this, "validateAsync", compiled);
+      return compiled;
+    },
+    configurable: true,
+  },
+  plan: {
+    get(this: AnyInternals) {
+      const compiled = compilePlan(this.node);
+      shadowData(this, "plan", compiled);
+      return compiled;
+    },
+    configurable: true,
+  },
+  values: {
+    get(this: AnyInternals) {
+      const computed = valuesOf(this.node);
+      shadowData(this, "values", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+  propValues: {
+    get(this: AnyInternals) {
+      const computed = propValuesOf(this.node);
+      shadowData(this, "propValues", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+  optin: {
+    get(this: AnyInternals) {
+      const computed = optinOf(this.node);
+      shadowData(this, "optin", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+  optout: {
+    get(this: AnyInternals) {
+      const computed = optoutOf(this.node);
+      shadowData(this, "optout", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+  pattern: {
+    get(this: AnyInternals) {
+      const computed = patternOf(this.node);
+      shadowData(this, "pattern", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+  innerType: {
+    get(this: AnyInternals) {
+      const current = this.node;
+      const computed = current.kind === "lazy"
+        ? childSchema(current.getter())
+        : "inner" in current && current.inner
+          ? childSchema(current.inner)
+          : undefined;
+      shadowData(this, "innerType", computed);
+      return computed;
+    },
+    configurable: true,
+  },
+};
+
+/* Method-syntax function types reproduce the original prototype methods'
+ * bivariant parameter checking (property-of-function types are contravariant
+ * under strictFunctionTypes, which would break `$ZodType<string>` ⊆
+ * `$ZodType<unknown>` for the encode family whose `data` is the Output type). */
+type EncodeMethod<O, I> = { m(data: O, params?: ParseContext): I }["m"];
+type DecodeMethod<O, I> = { m(data: I, params?: ParseContext): O }["m"];
+type SafeDecodeMethod<O, I> = { m(data: I, params?: ParseContext): SafeParseResult<O> }["m"];
+type DecodeAsyncMethod<O, I> = { m(data: I, params?: ParseContext): Promise<O> }["m"];
+type SafeDecodeAsyncMethod<O, I> = { m(data: I, params?: ParseContext): Promise<SafeParseResult<O>> }["m"];
+type SafeEncodeMethod<O, I> = { m(data: O, params?: ParseContext): SafeParseResult<I> }["m"];
+type EncodeAsyncMethod<O, I> = { m(data: O, params?: ParseContext): Promise<I> }["m"];
+type SafeEncodeAsyncMethod<O, I> = { m(data: O, params?: ParseContext): Promise<SafeParseResult<I>> }["m"];
+
+/** Bind a parse-family entry point as an enumerable own data property on
+ *  first access: detached usage (`const { parse } = schema`) then holds a
+ *  closure bound to this instance, and construction stays closure-free. */
+function shadowParseMethod(inst: object, key: string, fn: unknown): void {
+  Object.defineProperty(inst, key, { value: fn, configurable: true, writable: true, enumerable: true });
+}
+
+/** Shared `def`/`_def` accessor on schema instances: builds the facade lazily
+ *  through `_zod.def` and self-shadows both properties. */
+const SCHEMA_DEF_ACCESSOR: PropertyDescriptor = {
+  get(this: $ZodType): SchemaDef {
+    const facade = this._zod.def;
+    shadowData(this, "def", facade, true);
+    shadowData(this, "_def", facade, true);
+    return facade;
+  },
+  configurable: true, enumerable: true,
+};
+
 export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema<Output, Input> {
   readonly _zod: SchemaInternals<Output, Input>;
-  readonly def: SchemaDef;
-  readonly _def: SchemaDef;
+  declare readonly def: SchemaDef;
+  declare readonly _def: SchemaDef;
   readonly type: SchemaNode["kind"];
   readonly "~standard": StandardSchemaWithJSONProps<Input, Output>;
 
@@ -208,34 +348,19 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     // Compilation is deferred to first use so self-referential schemas
     // (`const N = z.object({ next: z.lazy(() => N) })`) don't recurse into their
     // own lazy getters during construction (which would throw a TDZ error).
-    let cachedPlan: SchemaInternals<Output, Input>["plan"] | undefined;
-    let cachedValidate: SchemaInternals<Output, Input>["validate"] | undefined;
-    let cachedValidateAsync: SchemaInternals<Output, Input>["validateAsync"] | undefined;
-    const defFacade = makeDef(schemaNode);
-    this._zod = {
+    // Every derived property (def facade, compiled validators, plan) is a
+    // shared lazy accessor that self-shadows on first read, so construction
+    // allocates no getter closures per instance.
+    const internals = {
       output: undefined as Output,
       input: undefined as Input,
       node: schemaNode,
       parent,
-      def: defFacade,
-      get validate() { return (cachedValidate ??= CODEGEN_AVAILABLE && !config().jitless ? createCodegenValidator(schemaNode) : createInterpreter(schemaNode)); },
-      get validateAsync() { return (cachedValidateAsync ??= createAsyncInterpreter(schemaNode)); },
-      get plan() { return (cachedPlan ??= compilePlan(schemaNode)); },
-      get values() { return valuesOf(schemaNode); },
-      get propValues() { return propValuesOf(schemaNode); },
-      get optin() { return optinOf(schemaNode); },
-      get optout() { return optoutOf(schemaNode); },
-      get pattern() { return patternOf(schemaNode); },
-      get innerType() {
-        const current = schemaNode;
-        if (current.kind === "lazy") return childSchema(current.getter());
-        if ("inner" in current && current.inner) return childSchema(current.inner);
-        return undefined;
-      },
       nativeHandle: null,
-    };
-    this.def = defFacade;
-    this._def = defFacade;
+    } as SchemaInternals<Output, Input>;
+    Object.defineProperties(internals, INTERNALS_ACCESSORS);
+    this._zod = internals;
+    Object.defineProperties(this, { def: SCHEMA_DEF_ACCESSOR, _def: SCHEMA_DEF_ACCESSOR });
     this.type = schemaNode.kind;
     this["~standard"] = createStandardProps<Input, Output>({
       safeParse: (value) => this.safeParse(value),
@@ -249,30 +374,87 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
       },
     });
     schemaByNode.set(schemaNode, this);
-    const prototype = $ZodType.prototype;
-    for (const key of Object.getOwnPropertyNames(prototype)) {
-      if (key === "constructor") continue;
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
-      if (!descriptor || typeof descriptor.value !== "function") continue;
-      Object.defineProperty(this, key, { value: descriptor.value.bind(this), configurable: true, writable: true });
-    }
+    // Parse-family entry points are prototype accessors that bind an own
+    // closure on first access (see below): detached usage
+    // (`const { parse } = schema`) works identically, while construction
+    // allocates zero closures for schemas that never parse.
   }
 
-  parse(data: unknown, params?: ParseContext): Output { return parsing.parse(this, data, params); }
-  safeParse(data: unknown, params?: ParseContext): SafeParseResult<Output> { return parsing.safeParse(this, data, params); }
-  parseAsync(data: unknown, params?: ParseContext): Promise<Output> { return parsing.parseAsync(this, data, params); }
-  safeParseAsync(data: unknown, params?: ParseContext): Promise<SafeParseResult<Output>> { return parsing.safeParseAsync(this, data, params); }
-  spa(data: unknown, params?: ParseContext): Promise<SafeParseResult<Output>> { return parsing.safeParseAsync(this, data, params); }
-  parseJson(data: Uint8Array | ArrayBuffer | string, params?: ParseContext): Output { return parsing.parseJson(this, data, params); }
-  safeParseJson(data: Uint8Array | ArrayBuffer | string, params?: ParseContext): SafeParseResult<Output> { return parsing.safeParseJson(this, data, params); }
-  encode(data: Output, params?: ParseContext): Input { return parsing.encode(this, data, params); }
-  decode(data: Input, params?: ParseContext): Output { return parsing.decode(this, data, params); }
-  encodeAsync(data: Output, params?: ParseContext): Promise<Input> { return parsing.encodeAsync(this, data, params); }
-  decodeAsync(data: Input, params?: ParseContext): Promise<Output> { return parsing.decodeAsync(this, data, params); }
-  safeEncode(data: Output, params?: ParseContext): SafeParseResult<Input> { return parsing.safeEncode(this, data, params); }
-  safeDecode(data: Input, params?: ParseContext): SafeParseResult<Output> { return parsing.safeDecode(this, data, params); }
-  safeEncodeAsync(data: Output, params?: ParseContext): Promise<SafeParseResult<Input>> { return parsing.safeEncodeAsync(this, data, params); }
-  safeDecodeAsync(data: Input, params?: ParseContext): Promise<SafeParseResult<Output>> { return parsing.safeDecodeAsync(this, data, params); }
+  get parse(): (data: unknown, params?: ParseContext) => Output {
+    const fn = (data: unknown, params?: ParseContext) => parsing.parse(this, data, params);
+    shadowParseMethod(this, "parse", fn);
+    return fn;
+  }
+  get safeParse(): (data: unknown, params?: ParseContext) => SafeParseResult<Output> {
+    const fn = (data: unknown, params?: ParseContext) => parsing.safeParse(this, data, params);
+    shadowParseMethod(this, "safeParse", fn);
+    return fn;
+  }
+  get parseAsync(): (data: unknown, params?: ParseContext) => Promise<Output> {
+    const fn = (data: unknown, params?: ParseContext) => parsing.parseAsync(this, data, params);
+    shadowParseMethod(this, "parseAsync", fn);
+    return fn;
+  }
+  get safeParseAsync(): (data: unknown, params?: ParseContext) => Promise<SafeParseResult<Output>> {
+    const fn = (data: unknown, params?: ParseContext) => parsing.safeParseAsync(this, data, params);
+    shadowParseMethod(this, "safeParseAsync", fn);
+    return fn;
+  }
+  get spa(): (data: unknown, params?: ParseContext) => Promise<SafeParseResult<Output>> {
+    const fn = this.safeParseAsync;
+    shadowParseMethod(this, "spa", fn);
+    return fn;
+  }
+  get parseJson(): (data: Uint8Array | ArrayBuffer | string, params?: ParseContext) => Output {
+    const fn = (data: Uint8Array | ArrayBuffer | string, params?: ParseContext) => parsing.parseJson(this, data, params);
+    shadowParseMethod(this, "parseJson", fn);
+    return fn;
+  }
+  get safeParseJson(): (data: Uint8Array | ArrayBuffer | string, params?: ParseContext) => SafeParseResult<Output> {
+    const fn = (data: Uint8Array | ArrayBuffer | string, params?: ParseContext) => parsing.safeParseJson(this, data, params);
+    shadowParseMethod(this, "safeParseJson", fn);
+    return fn;
+  }
+  get encode(): EncodeMethod<Output, Input> {
+    const fn = (data: Output, params?: ParseContext) => parsing.encode(this, data, params);
+    shadowParseMethod(this, "encode", fn);
+    return fn;
+  }
+  get decode(): DecodeMethod<Output, Input> {
+    const fn = (data: Input, params?: ParseContext) => parsing.decode(this, data, params);
+    shadowParseMethod(this, "decode", fn);
+    return fn;
+  }
+  get encodeAsync(): EncodeAsyncMethod<Output, Input> {
+    const fn = (data: Output, params?: ParseContext) => parsing.encodeAsync(this, data, params);
+    shadowParseMethod(this, "encodeAsync", fn);
+    return fn;
+  }
+  get decodeAsync(): DecodeAsyncMethod<Output, Input> {
+    const fn = (data: Input, params?: ParseContext) => parsing.decodeAsync(this, data, params);
+    shadowParseMethod(this, "decodeAsync", fn);
+    return fn;
+  }
+  get safeEncode(): SafeEncodeMethod<Output, Input> {
+    const fn = (data: Output, params?: ParseContext) => parsing.safeEncode(this, data, params);
+    shadowParseMethod(this, "safeEncode", fn);
+    return fn;
+  }
+  get safeDecode(): SafeDecodeMethod<Output, Input> {
+    const fn = (data: Input, params?: ParseContext) => parsing.safeDecode(this, data, params);
+    shadowParseMethod(this, "safeDecode", fn);
+    return fn;
+  }
+  get safeEncodeAsync(): SafeEncodeAsyncMethod<Output, Input> {
+    const fn = (data: Output, params?: ParseContext) => parsing.safeEncodeAsync(this, data, params);
+    shadowParseMethod(this, "safeEncodeAsync", fn);
+    return fn;
+  }
+  get safeDecodeAsync(): SafeDecodeAsyncMethod<Output, Input> {
+    const fn = (data: Input, params?: ParseContext) => parsing.safeDecodeAsync(this, data, params);
+    shadowParseMethod(this, "safeDecodeAsync", fn);
+    return fn;
+  }
 
   check(...values: readonly ($ZodCheck<Output> | RuntimeCheck | SomeType | ((payload: { value: Output; issues: $ZodIssue[] }) => MaybeAsync<void>))[]): this {
     const runtimes = checksOf(values as readonly AnyCheckInput[]);
@@ -599,7 +781,9 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     const shape: Record<string, SchemaNode> = {};
     for (const key of Object.keys(baseShape)) {
       if (mask && !mask[key as keyof Output & string]) { defineLazyNode(shape, key, () => requireNode(baseShape, key)); continue; }
-      defineLazyNode(shape, key, () => { const inner = requireNode(baseShape, key); return inner.kind === "optional" ? inner.inner : inner; });
+      // Zod v4 semantics: every selected key is wrapped in ZodNonOptional,
+      // which rejects undefined without unwrapping the inner schema.
+      defineLazyNode(shape, key, () => node({ kind: "nonoptional", inner: requireNode(baseShape, key) }));
     }
     return fromNode(cloneNode(this._zod.node, { shape }), this);
   }
@@ -674,6 +858,42 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   toJSONSchema(params?: ToJSONSchemaParams): JSONSchema { return coreToJSONSchema(this, params); }
 }
 
+/**
+ * Detachability without per-instance binding cost (the pattern colinhacks/zod
+ * uses after #5870): every prototype method outside the eagerly-bound parse
+ * family is replaced, once at module load, by a lazy-bind getter. First access
+ * per instance allocates the bound thunk and caches it as an own data
+ * property, so construction is closure-free for unused methods while
+ * `const m = schema.optional; m()` keeps working.
+ */
+{
+  const EAGER = new Set([
+    "parse", "safeParse", "parseAsync", "safeParseAsync", "spa",
+    "parseJson", "safeParseJson", "encode", "decode", "encodeAsync", "decodeAsync",
+    "safeEncode", "safeDecode", "safeEncodeAsync", "safeDecodeAsync",
+  ]);
+  const prototype = $ZodType.prototype;
+  for (const key of Object.getOwnPropertyNames(prototype)) {
+    if (key === "constructor" || EAGER.has(key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+    if (!descriptor || typeof descriptor.value !== "function") continue;
+    const fn = descriptor.value as (this: $ZodType, ...args: never[]) => unknown;
+    Object.defineProperty(prototype, key, {
+      configurable: true,
+      enumerable: false,
+      get(this: $ZodType) {
+        if (this === prototype) return fn;
+        const bound = fn.bind(this);
+        Object.defineProperty(this, key, { value: bound, configurable: true, writable: true });
+        return bound;
+      },
+      set(this: $ZodType, value: unknown) {
+        Object.defineProperty(this, key, { value, configurable: true, writable: true, enumerable: true });
+      },
+    });
+  }
+}
+
 export const ZodType: typeof $ZodType = $ZodType;
 export type ZodType<Output = unknown, Input = Output> = $ZodType<Output, Input>;
 export type ZodString = $ZodType<string, string>;
@@ -716,11 +936,13 @@ export type ZodFunction = $ZodType<(...args: never[]) => unknown, (...args: neve
 // is true exactly when `x` is a string schema — and each is also callable as the
 // corresponding factory (`z.ZodString() === z.string()`), matching Zod.
 type ZodMatcher = { readonly [Symbol.hasInstance]: (value: unknown) => boolean };
-function kindMatcher(factory: (...args: readonly unknown[]) => $ZodType, ...kinds: readonly SchemaNode["kind"][]): ZodMatcher {
+/** A matcher that also runs as its factory, e.g. `z.ZodString() === z.string()`. */
+type ZodCallableMatcher = ZodMatcher & ((...args: readonly unknown[]) => $ZodType);
+function kindMatcher(factory: (...args: readonly unknown[]) => $ZodType, ...kinds: readonly SchemaNode["kind"][]): ZodCallableMatcher {
   const matcher = Object.defineProperty(function (...args: readonly unknown[]) { return factory(...args); }, Symbol.hasInstance, {
     value: (value: unknown): boolean => value instanceof $ZodType && kinds.includes(value._zod.node.kind),
   });
-  return matcher as unknown as ZodMatcher;
+  return matcher as ZodCallableMatcher;
 }
 
 export const ZodString: ZodMatcher = kindMatcher(() => string(), "string");
@@ -850,17 +1072,36 @@ function requireNode(shape: Readonly<Record<string, SchemaNode>>, key: string): 
 
 /** Build a lazy shape (map of node getters) from a shape of schemas. */
 function lazyShapeFromSchemas(source: Readonly<Record<string, SomeType>>): Record<string, SchemaNode> {
-  const nodes: Record<string, SchemaNode> = {};
-  for (const key of Object.keys(source)) defineLazyNode(nodes, key, () => resolveShapeNode(source, key));
+  const keys = Object.keys(source);
+  // Getter-style entries (`get self() { ... }`) must resolve lazily to avoid a
+  // TDZ on recursive shapes; plain schema values resolve eagerly, skipping the
+  // per-key defineProperty + closure cost entirely.
+  let hasGetter = false;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    if (descriptor && typeof descriptor.get === "function") { hasGetter = true; break; }
+  }
+  // Null prototype: plain assignment of a `__proto__` key would otherwise hit
+  // the inherited setter and drop the field, leaving it unvalidated.
+  const nodes: Record<string, SchemaNode> = Object.create(null) as Record<string, SchemaNode>;
+  if (hasGetter) {
+    for (const key of keys) defineLazyNode(nodes, key, () => resolveShapeNode(source, key));
+  } else {
+    for (const key of keys) nodes[key] = resolveShapeNode(source, key);
+  }
   return nodes;
 }
 
-export function object<const S extends Shape = Record<never, SomeType>>(shape?: S, params?: ErrorParam): ZodObject<S> {
+function objectNode<S extends Shape>(shape: S | undefined, mode: ObjectMode, params?: ErrorParam): ZodObject<S> {
   const nodes = lazyShapeFromSchemas((shape ?? {}) as Record<string, SomeType>);
-  return fromNode(node({ kind: "object", shape: nodes, mode: "strip", catchall: null }, { error: errorMap(params) }));
+  return fromNode(node({ kind: "object", shape: nodes, mode, catchall: null }, { error: errorMap(params) }));
 }
-export function strictObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return object(shape, params).strict(); }
-export function looseObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return object(shape, params).passthrough(); }
+
+export function object<const S extends Shape = Record<never, SomeType>>(shape?: S, params?: ErrorParam): ZodObject<S> {
+  return objectNode(shape, "strip", params);
+}
+export function strictObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return objectNode(shape, "strict", params); }
+export function looseObject<const S extends Shape>(shape: S, params?: ErrorParam): ZodObject<S> { return objectNode(shape, "passthrough", params); }
 export function keyof<S extends SomeType>(schema: S): $ZodType<string, string> {
   const current = schema._zod.node;
   if (current.kind !== "object") throw new TypeError("keyof() is only valid on object schemas");

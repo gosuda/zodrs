@@ -14,7 +14,7 @@
 //! re-serializes with `serde_json` only to express multi-digit numbers.
 
 use rstest::rstest;
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use zodrs::{compile, validate};
 
 fn plan(plan_json: &Json) -> zodrs::CompiledPlan {
@@ -23,8 +23,7 @@ fn plan(plan_json: &Json) -> zodrs::CompiledPlan {
 }
 
 fn issues(payload: &Option<String>) -> Vec<Json> {
-    serde_json::from_str(payload.as_deref().expect("issue payload"))
-        .expect("issues parse")
+    serde_json::from_str(payload.as_deref().expect("issue payload")).expect("issues parse")
 }
 
 fn assert_issue(verdict: &zodrs::Verdict, expected: &Json) {
@@ -222,7 +221,10 @@ fn format_checks(#[case] format: &str, #[case] input: Json, #[case] ok: bool) {
     let bytes = serde_json::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     if ok {
-        assert_eq!(verdict.status, 0, "expected valid for {format} {input}: {verdict:?}");
+        assert_eq!(
+            verdict.status, 0,
+            "expected valid for {format} {input}: {verdict:?}"
+        );
     } else {
         assert_eq!(verdict.status, 2, "expected invalid for {format} {input}");
         let iss = issues(&verdict.payload);
@@ -363,15 +365,19 @@ fn object_passthrough_retains_unknown() {
     assert_eq!(out["extra"], json!(1));
 }
 
-// `__proto__` is an ordinary data key.
+// A `__proto__` shape key leaves the plan byte-path ineligible: JS resolves the
+// key through `Object.prototype` when the input omits it, which the scanner
+// cannot see, so the TS walk owns the schema. Mirrors `PROTO_KEYS` in
+// packages/zodrs/src/core/plan.ts.
 #[test]
 fn proto_key_is_ordinary_data() {
     let compiled = plan(&json!([
         {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
         {"k":"number","checks":[]}
     ]));
+    assert!(!compiled.json_eligible);
     let v = validate(&compiled, br#"{"__proto__":1}"#);
-    assert_eq!(v.status, 0, "{v:?}");
+    assert_eq!(v.status, 3, "defers to the TS path: {v:?}");
 }
 
 // ------------------------------------------------------------------------
@@ -577,7 +583,8 @@ fn k4_catch_fires_on_failure() {
     assert_eq!(ok.status, 0, "clean success: {ok:?}");
 }
 
-// K5: regex issue carries the JS `pattern` source and omits `origin`.
+// K5: regex issue carries the JS `pattern` source and `origin: "string"`,
+// matching zod v4's `$ZodIssueInvalidStringFormat` (verified against 4.4.3).
 #[test]
 fn k5_regex_issue_has_pattern() {
     let compiled = plan(&json!([
@@ -586,7 +593,7 @@ fn k5_regex_issue_has_pattern() {
     let v = validate(&compiled, br#""ABC""#);
     assert_issue(
         &v,
-        &json!({"code":"invalid_format","format":"regex","pattern":"/^[a-z]+$/","path":[]}),
+        &json!({"code":"invalid_format","origin":"string","format":"regex","pattern":"/^[a-z]+$/","path":[]}),
     );
 }
 
@@ -752,19 +759,16 @@ fn object_unknown_proto_dropped_in_all_modes() {
 }
 
 #[test]
-fn object_shape_key_named_proto_is_validated_and_retained() {
+fn object_shape_key_named_proto_defers_to_the_ts_path() {
     let obj = plan(&json!([
         {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
         {"k":"string","checks":[]}
     ]));
-    // Present: validated and emitted like any shape key.
-    let v = validate(&obj, br#"{"__proto__":"x"}"#);
-    assert_eq!(v.status, 0, "clean parse: {v:?}");
-    // Wrong type: invalid_type at the key path.
-    assert_issue(
-        &validate(&obj, br#"{"__proto__":1}"#),
-        &json!({"code":"invalid_type","expected":"string","path":["__proto__"]}),
-    );
+    // The scanner cannot tell an absent `__proto__` from the inherited one the
+    // TS walk reads, so the whole plan stays off the byte path either way.
+    assert!(!obj.json_eligible);
+    assert_eq!(validate(&obj, br#"{"__proto__":"x"}"#).status, 3);
+    assert_eq!(validate(&obj, br#"{"__proto__":1}"#).status, 3);
 }
 
 // ------------------------------------------------------------------------
@@ -989,7 +993,10 @@ fn coerce_string_uses_js_number_formatting() {
     assert_eq!(output(&validate(&s, br"1e21")), json!("1e+21"));
     assert_eq!(output(&validate(&s, br"1.5e-7")), json!("1.5e-7"));
     assert_eq!(output(&validate(&s, br"0.000001")), json!("0.000001"));
-    assert_eq!(output(&validate(&s, br"0.30000000000000004")), json!("0.30000000000000004"));
+    assert_eq!(
+        output(&validate(&s, br"0.30000000000000004")),
+        json!("0.30000000000000004")
+    );
 }
 // ------------------------------------------------------------------------
 // Regression: union flattening — exactly one option type-matches.
@@ -1045,7 +1052,11 @@ fn union_sub_issue_relative_paths() {
     let errors = iss[0]["errors"].as_array().unwrap();
     for branch in errors {
         for sub in branch.as_array().unwrap() {
-            assert_eq!(sub["path"], json!(["name"]), "sub-issue path should be relative: {sub:?}");
+            assert_eq!(
+                sub["path"],
+                json!(["name"]),
+                "sub-issue path should be relative: {sub:?}"
+            );
         }
     }
 }
@@ -1067,7 +1078,11 @@ fn format_issue_includes_pattern_and_key_order() {
     let obj = iss[0].as_object().unwrap();
     // Key order: code, origin, format, pattern, path
     let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
-    assert_eq!(keys, vec!["code", "origin", "format", "pattern", "path"], "key order: {keys:?}");
+    assert_eq!(
+        keys,
+        vec!["code", "origin", "format", "pattern", "path"],
+        "key order: {keys:?}"
+    );
     assert_eq!(obj["code"], "invalid_format");
     assert_eq!(obj["origin"], "string");
     assert_eq!(obj["format"], "uuid");
@@ -1095,6 +1110,10 @@ fn discunion_note_field_and_key_order() {
     let obj = iss[0].as_object().unwrap();
     // Key order: code, errors, note, discriminator, options, path
     let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
-    assert_eq!(keys, vec!["code", "errors", "note", "discriminator", "options", "path"], "key order: {keys:?}");
+    assert_eq!(
+        keys,
+        vec!["code", "errors", "note", "discriminator", "options", "path"],
+        "key order: {keys:?}"
+    );
     assert_eq!(obj["note"], "No matching discriminator");
 }

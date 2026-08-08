@@ -9,9 +9,12 @@ pub mod formats;
 pub mod issue;
 pub mod jsonschema;
 pub mod plan;
+/// Byte-scanner fast path. Exposed for integration tests; not a stable API.
+#[doc(hidden)]
+pub mod scan;
 pub mod validate;
 
-pub use compile::{compile, CompileError, CompiledPlan};
-pub use issue::{issues_to_json, Issue, Path, PathSeg};
+pub use compile::{CompileError, CompiledPlan, compile};
+pub use issue::{Issue, Path, PathSeg, issues_to_json};
 pub use plan::{Check, NodeId, PlanNode, RawPlan};
-pub use validate::{validate, Verdict};
+pub use validate::{Verdict, validate};

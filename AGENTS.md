@@ -15,6 +15,10 @@ pnpm -C packages/conformance test       # vendored Zod v4 corpus
 pnpm exec oxlint --config .oxlintrc.json packages/
 ```
 
+## Publishing
+
+- Keep the workspace package name as `zodrs`; use `publishConfig.name: zod-rs` to publish to npm under the `zod-rs` name.
+
 Pre-commit hooks are managed by lefthook (`lefthook.yml`); install once with
 `pnpm exec lefthook install`.
 

@@ -39,6 +39,29 @@ zodrs location shorthand used in the tables:
 
 ---
 
+## Intentional divergences
+
+Behaviors zodrs does **not** reproduce, because reproducing them would carry a
+zod bug across.
+
+### A valid `__proto__` field survives the parse
+
+Zod writes results with `result[key] = value`. For a shape key named
+`__proto__` that assignment reaches the inherited setter, so the field is
+validated and then silently dropped: `z.object({ __proto__: z.string() })`
+parsing `{"__proto__":"s"}` returns `{}`.
+
+zodrs defines the property instead (`defineValue`), so the field it just
+validated is the field it returns. Pinned by `keeps a valid __proto__ field in
+the output` in `packages/zodrs/src/core/shape-access.test.ts`.
+
+Everything else about the key matches zod: a wrong value is rejected, and the
+key is dropped when it arrives as an *unknown* key rather than a declared one.
+A plan carrying a `__proto__` shape key is not byte-path eligible, for the same
+prototype-visibility reason as `constructor` and its siblings.
+
+---
+
 ## Gaps found
 
 Essential behaviors missing or behaviorally wrong in zodrs at audit time. Each

@@ -9,6 +9,8 @@
 //!
 //! The whole batch serializes as one JSON array.
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value as Json};
 use smallvec::SmallVec;
 
@@ -20,6 +22,30 @@ pub enum PathSeg {
     /// An array or tuple index.
     Index(u32),
 }
+
+/// A borrowed path segment for the validation walk: schema keys and indices
+/// need no allocation; only record keys (borrowed from the input DOM, whose
+/// lifetime is shorter than the plan's) are pushed owned.
+#[derive(Debug, Clone)]
+pub enum PathSegRef<'a> {
+    /// An object property name.
+    Key(Cow<'a, str>),
+    /// An array or tuple index.
+    Index(u32),
+}
+
+impl PathSegRef<'_> {
+    /// Converts to the owned segment stored in an emitted issue.
+    pub(crate) fn to_owned_seg(&self) -> PathSeg {
+        match self {
+            PathSegRef::Key(k) => PathSeg::Key(k.clone().into_owned()),
+            PathSegRef::Index(i) => PathSeg::Index(*i),
+        }
+    }
+}
+
+/// The path stack accumulated during a validation walk.
+pub type PathRef<'a> = SmallVec<[PathSegRef<'a>; 8]>;
 
 impl PathSeg {
     /// Renders this path segment as its JSON form (string key or number index).
@@ -55,9 +81,9 @@ pub struct Issue {
 impl Issue {
     /// Creates an aborting issue (TS `issue()`: `continue` is undefined).
     #[must_use]
-    pub fn new(code: &'static str, path: &Path) -> Issue {
+    pub fn new(code: &'static str, path: &PathRef<'_>) -> Issue {
         Issue {
-            path: path.clone(),
+            path: path.iter().map(PathSegRef::to_owned_seg).collect(),
             fields: vec![("code", Json::String(code.to_string()))],
             aborting: true,
         }
@@ -66,9 +92,9 @@ impl Issue {
     /// Creates a non-aborting check issue (TS `checkPayloadIssues()`:
     /// `continue: true`).
     #[must_use]
-    pub fn new_check(code: &'static str, path: &Path) -> Issue {
+    pub fn new_check(code: &'static str, path: &PathRef<'_>) -> Issue {
         Issue {
-            path: path.clone(),
+            path: path.iter().map(PathSegRef::to_owned_seg).collect(),
             fields: vec![("code", Json::String(code.to_string()))],
             aborting: false,
         }
@@ -116,4 +142,3 @@ pub fn issues_to_json(issues: &[Issue]) -> String {
 pub fn issues_to_value(issues: &[Issue]) -> Json {
     Json::Array(issues.iter().map(Issue::to_json).collect())
 }
-

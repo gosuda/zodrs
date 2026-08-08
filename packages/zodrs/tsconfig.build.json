@@ -5,9 +5,16 @@
     "outDir": "dist",
     "noEmit": false,
     "paths": {
-      "#module-url": ["./src/core/module-url.ts"]
+      "#module-url": [
+        "./src/core/module-url.ts"
+      ]
     }
   },
-  "include": ["src"],
-  "exclude": ["src/core/module-url-cjs.ts"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/core/module-url-cjs.ts",
+    "src/**/*.test.ts"
+  ]
 }
