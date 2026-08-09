@@ -190,6 +190,7 @@ const JS_DATE: &str = r"^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468]
 ///
 /// Returns an error string when the format id is unknown or its regex fails to
 /// compile; either outcome poisons JSON eligibility.
+#[allow(clippy::too_many_lines)]
 pub fn compile(id: &str, params: Option<&Json>) -> Result<FormatValidator, String> {
     match id {
         // hand-written scanners — pattern from the JS PATTERNS table
