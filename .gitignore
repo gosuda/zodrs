@@ -18,9 +18,10 @@ pnpm-debug.log*
 # === NAPI ===
 *.node
 *.wasm
-packages/zodrs/native/
-packages/zodrs/wasm/
-
+packages/zodrs/native/*
+!packages/zodrs/native/package.json
+packages/zodrs/wasm/*
+!packages/zodrs/wasm/package.json
 # === AI TOOLING ===
 .agent-tasks/
 .cursor/
