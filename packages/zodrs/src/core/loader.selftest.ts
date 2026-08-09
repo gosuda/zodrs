@@ -57,7 +57,11 @@ if (tier === "none") {
   );
 } else {
   check(`${tier} tier: backend registered`, isNativeAvailable(), loaderDiagnostics);
-
+  if (tier === "native") {
+    check("native tier: diagnostics shows native registered", loaderDiagnostics.includes("native: registered"), loaderDiagnostics);
+  } else if (tier === "wasm") {
+    check("wasm tier: diagnostics shows wasm registered", loaderDiagnostics.some((d) => d.includes("wasm: registered")), loaderDiagnostics);
+  }
   // Valid, already canonical: single schema key, schema key order, no extras.
   const valid = validateJson(plan.json, null, validBytes);
   check("valid input: available with a handle", valid.available && typeof valid.handle === "number", valid);
