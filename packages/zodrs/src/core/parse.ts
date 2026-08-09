@@ -83,6 +83,30 @@ function releaseContext(ctx: ValidationContext): void {
 }
 
 export function parse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): output<T> {
+  // Fast path: no caller context, sync, forward — the overwhelmingly common shape.
+  // Inlined here to avoid the validationContext/releaseContext/isPromise call chain
+  // that added ~20ns per parse on primitive schemas (where validate itself is ~10ns).
+  if (context === undefined) {
+    let ctx = CTX_POOL.pop();
+    if (!ctx) ctx = { issues: null, async: false, direction: "forward", poolable: true };
+    let result: unknown;
+    let issues: $ZodRawIssue[] | null = null;
+    try {
+      result = schema._zod.validate(value, ctx);
+      issues = ctx.issues;
+    } finally {
+      if (ctx.poolable === true && ctx.exposed !== true && CTX_POOL.length < CTX_POOL_MAX) {
+        ctx.issues = null;
+        ctx.fallback = 0;
+        ctx.exposed = undefined;
+        CTX_POOL.push(ctx);
+      }
+    }
+    if (typeof result === "object" && result !== null && "then" in result) throw new $ZodAsyncError();
+    if (result === FAIL || hasFatalIssue(issues)) throw makeError<output<T>>(issues, context);
+    return result as output<T>;
+  }
+  // Slow path: caller context present.
   const ctx = validationContext(context, false);
   let issues: $ZodRawIssue[] | null;
   let result: unknown;
@@ -93,11 +117,32 @@ export function parse<T extends RuntimeSchema>(schema: T, value: unknown, contex
   } finally {
     releaseContext(ctx);
   }
-  if (result === FAIL || hasFatalIssue(issues!)) throw makeError<output<T>>(issues!, context);
+  if (result === FAIL || hasFatalIssue(issues)) throw makeError<output<T>>(issues, context);
   return result as output<T>;
 }
 
 export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, context?: ParseContext): SafeParseResult<output<T>> {
+  if (context === undefined) {
+    let ctx = CTX_POOL.pop();
+    if (!ctx) ctx = { issues: null, async: false, direction: "forward", poolable: true };
+    let result: unknown;
+    let issues: $ZodRawIssue[] | null = null;
+    try {
+      result = schema._zod.validate(value, ctx);
+      issues = ctx.issues;
+    } finally {
+      if (ctx.poolable === true && ctx.exposed !== true && CTX_POOL.length < CTX_POOL_MAX) {
+        ctx.issues = null;
+        ctx.fallback = 0;
+        ctx.exposed = undefined;
+        CTX_POOL.push(ctx);
+      }
+    }
+    if (typeof result === "object" && result !== null && "then" in result) throw new $ZodAsyncError();
+    return result === FAIL || hasFatalIssue(issues)
+      ? { success: false, error: makeError<output<T>>(issues, context) }
+      : { success: true, data: result as output<T> };
+  }
   const ctx = validationContext(context, false);
   let issues: $ZodRawIssue[] | null;
   let result: unknown;
@@ -108,8 +153,8 @@ export function safeParse<T extends RuntimeSchema>(schema: T, value: unknown, co
   } finally {
     releaseContext(ctx);
   }
-  return result === FAIL || hasFatalIssue(issues!)
-    ? { success: false, error: makeError<output<T>>(issues!, context) }
+  return result === FAIL || hasFatalIssue(issues)
+    ? { success: false, error: makeError<output<T>>(issues, context) }
     : { success: true, data: result as output<T> };
 }
 

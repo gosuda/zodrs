@@ -226,6 +226,233 @@ parallel; several of these are live conformance failures.)
 
 ---
 
+## Tier payload/trace divergences (native vs TS)
+
+zodrs has four validation tiers, all designed to produce identical observable
+results. The loader (`core/loader.ts`) selects the first available:
+
+| Tier | Backend | Loader key | Selection |
+|---|---|---|---|
+| Native | Rust napi cdylib (`crates/zodrs-node/`) | `ZODRS_LOADER=native` (default) | Synchronous; first choice |
+| WASM | wasm32-wasip1-threads addon (`packages/zodrs/wasm/`) | `ZODRS_LOADER=wasm` | Async fire-and-forget; second choice |
+| TS codegen | Compiled closures (`core/codegen.ts`) | `ZODRS_BACKEND=codegen` (default) | Fallback when no native/WASM |
+| TS interpreter | Reference validator (`core/interpreter.ts`) | `ZODRS_BACKEND=interpreter` | Fallback when `config().jitless` or codegen unavailable |
+
+The TS codegen and interpreter share the same issue-construction code paths
+(`issue()`, `addIssue()`, `checkPayloadIssues()` in `interpreter.ts`), so
+payload/trace divergences between them are not expected. The native tier
+constructs issues independently in Rust (`issue.rs`, `validate.rs`), then
+serializes them as JSON for the TS side to finalize (`parse.ts`).
+
+### Native issue pipeline
+
+The native path produces **raw issues** (no `message`, no `input`) and the TS
+side finalizes them:
+
+1. Rust `validate.rs` walks a `sonic-rs` DOM against the compiled plan arena,
+   constructing `Issue` structs with ordered `(field, value)` pairs and a
+   `Path` (`issue.rs:69–79`). Fields are pushed in insertion order; `path` is
+   serialized last (`Issue::to_json`, `issue.rs:122–130`).
+2. Issues serialize as a JSON array string (`issues_to_json`) in the
+   `Verdict.payload` (`validate.rs:36–43`).
+3. TS `parse.ts:parseRawIssues` (line 183) parses the payload into
+   `$ZodRawIssue[]`.
+4. TS `parse.ts:backFillInput` (line 207) walks each issue's path against the
+   original `JSON.parse`'d value to attach the `input` field — needed for
+   message resolution ("received X") and stripped by `finalizeIssue` unless
+   `reportInput` is set.
+5. TS `errors.ts:finalizeNested` (line 354) recursively finalizes nested
+   union/key/element sub-issues, then `finalizeIssue` (line 336) resolves
+   `message` through the error-map precedence chain:
+   `issue.message → inst.error → context.error → global.customError →
+   global.localeError → defaultError → "Invalid input"`.
+
+### Differential fuzz harness
+
+The differential fuzz harness (`packages/conformance/differential/`) asserts
+the two-backend invariant: for random schemas and inputs,
+`schema.safeParseJson(bytes)` (Rust) and `schema.safeParse(JSON.parse(bytes))`
+(TS) produce deep-equal results — same success flag, deep-equal data,
+deep-equal issue arrays including code, path, payload fields, message, and
+back-filled input (`compare.ts:106–148`).
+
+**Current status (2026-08-07):** The gate FAILS. The fuzz found 12 distinct
+root-cause divergence classes between the backends. Last survey (seed 24301,
+20000 cases): 19535 compared, 13009 matched, 4810 known-skips, 1716 new
+mismatches across 52 signatures, wall ~2s. `KNOWN-MISMATCHES.json` is
+currently empty (`"entries": []`); previously recorded entries were cleared
+after their fixes landed.
+
+The `compare.ts:deepEqual` function (line 77) compares issue objects by
+filtered key set — keys with `undefined` values count as absent (line 93–94),
+so a field present-but-undefined on one side and absent on the other is NOT a
+mismatch. This means payload field **presence** is the primary divergence
+surface, not field value differences.
+
+### Known payload/trace divergence classes
+
+Each class is grounded in the source files that produce the divergent payloads.
+The fuzz harness classifies mismatches by `caseKind|diffTag` signatures; the
+classes below map to the source-level root causes.
+
+#### P1. Issue field key insertion order
+
+Rust `issue.rs` constructs issues with `Issue::new("code", path).with("k", v)`
+— fields pushed in insertion order, `path` serialized last
+(`issue.rs:122–130`). TS `interpreter.ts:issue()` (line 56) constructs
+`{...details, input, path, inst: {error: node.error}}` — the key order depends
+on the `details` object literal construction at each call site. The
+`issue.rs` doc comment (line 64–67) states insertion order "mirrors the TS
+interpreter's issue-construction sites exactly", and `insert_before_code`
+(`issue.rs:114`) handles codes whose canonical key order has `origin` or
+`expected` before `code` (e.g. `too_small`, `invalid_format`, `invalid_type`).
+Divergences occur when a Rust issue-construction site pushes fields in a
+different order than the corresponding TS `details` object literal.
+
+**Files:** `crates/zodrs/src/issue.rs:64–130`, `packages/zodrs/src/core/interpreter.ts:56–65`
+
+#### P2. `received` field on `invalid_type`
+
+TS `interpreter.ts` includes a `received` field on `invalid_type` issues for
+NaN (`"NaN"`), Infinity (`"Infinity"`), and invalid Date (`"Invalid Date"`)
+cases (lines 654, 697). Rust `validate.rs:invalid_type` (line 154) emits only
+`code` and `expected` — no `received` field. Since `compare.ts` treats
+`undefined` as absent, a missing `received` on the Rust side matches an absent
+`received` on the TS side, but a present `received` on the TS side with no
+corresponding Rust field is a mismatch.
+
+**Files:** `crates/zodrs/src/validate.rs:154–156`, `packages/zodrs/src/core/interpreter.ts:652–654,697`
+
+#### P3. `origin` field presence on format issues
+
+TS `interpreter.ts` conditionally includes `origin: "string"` on
+`invalid_format` issues — present for regex-backed formats (line 284), absent
+for procedural formats like `jwt`, `ipv6`, `cidrv6`, `base64`, `base64url`
+(line 278). Rust `validate.rs:format_issue` (line 1061) includes `origin` when
+a `pattern` is present but omits it for patternless formats (line 1068). The
+two sides must agree on which formats are "procedural" (no `origin`) vs
+"regex-backed" (with `origin`).
+
+**Files:** `crates/zodrs/src/validate.rs:1053–1072`, `packages/zodrs/src/core/interpreter.ts:259–288`
+
+#### P4. Number representation edge cases
+
+Rust uses `f64` and `num_json()` to serialize numbers in issue payload fields
+(`minimum`, `maximum`, `divisor`). TS uses JavaScript numbers. Edge cases:
+`-0` serializes as `0` in Rust but `-0` in JS (though `Object.is(-0, 0)` is
+false, `deepEqual` uses `Object.is` for numbers, `compare.ts:78`). Large
+integers beyond `MAX_SAFE_INT` (2^53-1) may lose precision in `f64`. The
+`compare.ts:show` function (line 62) preserves `-0`, `NaN`, `Infinity` in
+mismatch reports, confirming these are known comparison concerns.
+
+**Files:** `crates/zodrs/src/validate.rs:27,1029–1052`, `packages/conformance/differential/compare.ts:62–80`
+
+#### P5. Union branch error flattening
+
+Both sides flatten union branch errors into `invalid_union` issues with an
+`errors` array of per-branch issue arrays. TS `interpreter.ts` (lines 547,
+554, 577) has three distinct paths: first-success-wins, zero-success
+(`errors: branchErrors`), and multi-success (`errors: [], inclusive: false`).
+It also surfaces a single non-aborted branch's own issues instead of
+`invalid_union` (line 569–575). Rust `validate.rs` (lines 516, 985) has two
+paths: zero-success and disc-union no-match. The non-aborted-branch surfacing
+and `inclusive: false` multi-match paths may not have Rust equivalents.
+
+**Files:** `crates/zodrs/src/validate.rs:510–520,980–990`, `packages/zodrs/src/core/interpreter.ts:540–578`
+
+#### P6. Record duplicate-key detection
+
+Rust `scan.rs` has a 128-entry cap for duplicate-key detection in the byte
+scanner; beyond that, `dirty_hint` is set and the DOM walk handles it
+(`validate.rs` Record arm uses `HashMap` for O(n) duplicate detection). TS
+`interpreter.ts` uses `Reflect.ownKeys` which naturally de-duplicates (last
+value wins). The issue sets may differ when the scanner's cap changes which
+path processes the input, or when the DOM walk's `HashMap`-based detection
+produces different `unrecognized_keys` issues than `Reflect.ownKeys`.
+
+**Files:** `crates/zodrs/src/scan.rs`, `crates/zodrs/src/validate.rs:360–390`, `packages/zodrs/src/core/interpreter.ts:766–818`
+
+#### P7. `note` field on specific issue codes
+
+Both sides include `note` fields on certain issues: "Integers must be within
+the safe integer range." on `too_big`/`too_small` for int format checks
+(Rust `validate.rs:720,732`; TS does not include this `note` — it's absent
+from `interpreter.ts` number_format check, line 243–249), and "No matching
+discriminator" on `invalid_union` for disc-union no-match (Rust
+`validate.rs:1020`; TS `interpreter.ts:525`). The `note` field presence must
+match on both sides.
+
+**Files:** `crates/zodrs/src/validate.rs:706–734,1018–1022`, `packages/zodrs/src/core/interpreter.ts:243–249,522–528`
+
+#### P8. `input` back-fill path walking
+
+The native path back-fills `input` by walking the issue's `path` against the
+original `JSON.parse`'d value (`parse.ts:backFillInput`, line 207). If the
+Rust-constructed path differs from what the TS interpreter would have
+constructed (e.g., different key order in a record, or a missing path segment
+for a nested issue), the back-filled `input` will be the wrong value, causing
+a data mismatch in the `input` field. Sub-issues inside `errors`/`issues`
+carry paths relative to their parent, so the parent's path is prepended
+(line 210–211).
+
+**Files:** `packages/zodrs/src/core/parse.ts:204–225`, `crates/zodrs/src/issue.rs:17–62`
+
+#### P9. `invalid_value` vs `invalid_format` for MIME checks
+
+TS `interpreter.ts` emits `invalid_value` with `values: check.v` for MIME
+type checks (line 314). Rust `validate.rs` must match this — emitting
+`invalid_value` (not `invalid_format`) with the same `values` array. A
+code-level mismatch here would produce a `diffTag` of `issue:code` in the
+fuzz harness.
+
+**Files:** `crates/zodrs/src/validate.rs` (MIME check path), `packages/zodrs/src/core/interpreter.ts:314`
+
+#### P10. `template_literal` format issue fields
+
+TS `interpreter.ts` emits `invalid_format` with `format: "template_literal"`
+and `pattern: node.pattern.source` (line 895). Rust `validate.rs` emits
+`invalid_format` with `format: "template_literal"` but without a `pattern`
+field (line 432–436). The missing `pattern` field is a payload divergence.
+
+**Files:** `crates/zodrs/src/validate.rs:428–437`, `packages/zodrs/src/core/interpreter.ts:895`
+
+#### P11. `not_multiple_of` `origin` field
+
+TS `interpreter.ts` sets `origin: typeof value` (which is `"number"` or
+`"bigint"`) on `not_multiple_of` issues (line 235). Rust `validate.rs` sets
+`origin: "number"` (line 686). For bigint inputs, the TS side produces
+`origin: "bigint"` while the Rust side may produce `origin: "number"` or
+omit `origin` entirely — a payload field mismatch.
+
+**Files:** `crates/zodrs/src/validate.rs:682–690`, `packages/zodrs/src/core/interpreter.ts:233–236`
+
+#### P12. Disc-union no-match issue path and fields
+
+TS `interpreter.ts` emits the disc-union no-match `invalid_union` issue at
+path `[...path, node.key]` (line 522) with fields `errors: []`, `note`,
+`discriminator`, `options` (lines 523–528). Rust `validate.rs` emits at
+path `[...path, disc_key]` (line 1016–1017) with `errors`, `note`,
+`discriminator`, `options` (lines 1018–1022). The field sets match, but the
+`options` array construction may differ: TS uses `[...node.map.keys()]`
+(line 527), Rust uses `Json::Array(options)` from the compiled plan
+(line 1022). If the plan's option ordering differs from the map's insertion
+order, the `options` arrays will differ.
+
+**Files:** `crates/zodrs/src/validate.rs:989–1025`, `packages/zodrs/src/core/interpreter.ts:511–528`
+
+### Fuzz harness infrastructure
+
+| Component | File | Role |
+|---|---|---|
+| Fuzz loop | `differential/fuzz.test.ts` | Schema-per-50-cases, per-case sub-seeds, mismatch classification, summary |
+| Schema generator | `differential/genSchema.ts` | Random JSON-eligible plan IR: primitives, formats, objects, arrays, tuples, unions, records, enums, literals, wrappers |
+| Input generator | `differential/genInput.ts` | Valid, near-miss mutations, adversarial bytes (`__proto__`, lone surrogates, `1e400`, 100-deep arrays, duplicate keys, BOM, NaN/Infinity) |
+| Comparator | `differential/compare.ts` | Runs both paths, deep-compares results, classifies first difference |
+| Mismatch ledger | `differential/ledger.ts` + `KNOWN-MISMATCHES.json` | Confirmed divergences with self-retiring skip rules |
+| README | `differential/README.md` | Status, knobs, layout |
+
+Run: `pnpm -C packages/conformance test:differential` (100k cases, plan §4 CI count).
+
 ## Plan residue items: confirmation
 
 Each item from plan step 9, verified by grep over `packages/zodrs/src`

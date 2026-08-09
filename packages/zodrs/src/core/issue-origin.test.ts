@@ -5,9 +5,17 @@ import * as z from "../classic/index.js";
 /**
  * `origin` on `not_multiple_of` and `invalid_format` issues.
  *
- * Both codes carry it in zod v4 (`checks.ts` pushes `origin: typeof value`
- * for multipleOf; `$ZodIssueInvalidStringFormat` declares `origin: "string"`),
- * and the differential fuzz previously excused 108 cases where one of our two
+ * Both codes carry `origin` at runtime in zod v4 (`checks.ts` pushes
+ * `origin: typeof value` for multipleOf and `origin: "string"` for the
+ * regex-backed string checks). The TypeScript issue interfaces in
+ * zod v4 omit the field (it is typed via the internal $ZodIssueBase extra
+ * properties), so at the type level it is undeclared — at runtime it is
+ * present. zodrs mirrors the runtime payload exactly on both paths and
+ * declares `origin?: string` on the two interfaces as an ergonomic
+ * superset (optional, so code typed against the narrower oracle type still
+ * checks).
+ *
+ * The differential fuzz previously excused 108 cases where one of our two
  * paths dropped it — the TS path on `not_multiple_of`, the Rust path on a
  * regex `invalid_format`. The excuse is gone, so these pin the field on both
  * paths at once: an issue from bytes and an issue from a value must agree.
