@@ -362,8 +362,8 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     // StandardJSONSchemaV1: expose jsonSchema.input/output on every schema.
     Object.assign(this["~standard"], {
       jsonSchema: {
-        input: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "input", ...options.libraryOptions }),
-        output: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "output", ...options.libraryOptions }),
+        input: (options?: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { ...options?.libraryOptions, target: options?.target as ToJSONSchemaParams["target"], io: "input" }),
+        output: (options?: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { ...options?.libraryOptions, target: options?.target as ToJSONSchemaParams["target"], io: "output" }),
       },
     });
     schemaByNode.set(schemaNode, this);
@@ -675,11 +675,12 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   float64(params?: ErrorParam): this { return this.check(float64Check(params)); }
   int64(params?: ErrorParam): this { return this.check(int64Check(params)); }
   uint64(params?: ErrorParam): this { return this.check(uint64Check(params)); }
-  jsonString(_params?: ErrorParam): this {
+  jsonString(params?: ErrorParam): this {
     const inner = json();
+    const error = errorMap(params);
     const parseHost: HostFunction = (value, context) => {
       try { return JSON.parse(value as string); } catch {
-        context.addIssue({ code: "custom", message: "Invalid JSON", input: value } as never);
+        context.addIssue({ code: "custom", ...(error ? { inst: { error } } : { message: "Invalid JSON" }), input: value } as never);
         return undefined;
       }
     };
