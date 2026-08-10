@@ -53,9 +53,9 @@
       "require": "./dist-cjs/mini/index.js"
     },
     "./v4/locales/*": {
-      "types": "./dist/locales/*",
-      "import": "./dist/locales/*",
-      "require": "./dist-cjs/locales/*"
+      "types": "./dist/locales/*.d.ts",
+      "import": "./dist/locales/*.js",
+      "require": "./dist-cjs/locales/*.js"
     },
     "./package.json": "./package.json"
   },

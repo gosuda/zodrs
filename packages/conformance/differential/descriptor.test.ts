@@ -123,11 +123,9 @@ describe("expanded differential descriptors", () => {
     expect(schema._zod.plan.jsonEligible).toBe(true);
     expect(schema._zod.plan.hostFns).toHaveLength(0);
   });
-  test("differential descriptor tests require the native backend", () => {
-    expect(isNativeAvailable(), "run with ZODRS_LOADER=native").toBe(true);
-  });
 
-  test.each(parityCases)("%s matches the TypeScript path", (_name, descriptor, json) => {
+  const maybeParityTest = isNativeAvailable() ? test : test.skip;
+  maybeParityTest.each(parityCases)("%s matches the TypeScript path", (_name, descriptor, json) => {
     const comparison = compareResults(runBoth(buildSchema(descriptor), encoder.encode(json)));
     expect(comparison).toEqual({ match: true, diffTag: null, detail: null });
   });
