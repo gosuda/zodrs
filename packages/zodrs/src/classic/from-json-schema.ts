@@ -47,7 +47,9 @@ const RECOGNIZED_KEYS: Record<string, true> = {
   minimum: true, maximum: true, exclusiveMinimum: true, exclusiveMaximum: true, multipleOf: true,
   description: true, default: true,
   contentEncoding: true, contentMediaType: true, contentSchema: true,
-  unevaluatedItems: true, unevaluatedProperties: true, if: true, then: true, else: true,
+  // `then` is a JSON Schema keyword, not a promise-like callback.
+  // oxlint-disable-next-line unicorn/no-thenable
+  unevaluatedItems: true, unevaluatedProperties: true, if: true, ["then"]: true, else: true,
   dependentSchemas: true, dependentRequired: true,
   nullable: true, readOnly: true,
 };

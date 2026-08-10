@@ -1,9 +1,9 @@
-import { config } from "./config.js";
-import { finalizeIssue, finalizeNested, ZodError } from "./errors.js";
-import type { $ZodIssue, $ZodRawIssue, ParseContext } from "./errors.js";
+import { finalizeNested, ZodError } from "./errors.js";
+import type { $ZodRawIssue, ParseContext } from "./errors.js";
 import type { AsyncValidator, ValidationContext, Validator } from "./interpreter.js";
 import { $ZodAsyncError, isPromise } from "./interpreter.js";
 import { validateJson as validateNativeJson } from "./native.js";
+import type { NativePlanRef } from "./native.js";
 import type { CompiledPlan } from "./plan.js";
 import { isProtoPolluted } from "./plan.js";
 import { FAIL } from "./util.js";
@@ -15,7 +15,7 @@ export interface RuntimeSchema<Output = unknown, Input = unknown> {
     readonly validate: Validator;
     readonly validateAsync: AsyncValidator;
     readonly plan: CompiledPlan;
-    nativeHandle: number | null;
+    nativePlan: NativePlanRef | null;
     /** Finite accepted value set (enum/literal/derived), else undefined. */
     readonly values?: ReadonlySet<unknown> | undefined;
     /** Per-property accepted value sets, else undefined. */
@@ -219,11 +219,15 @@ declare const TextDecoder: { new (): { decode(input?: ArrayBufferView | ArrayBuf
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function bytesAndText(value: Uint8Array | ArrayBuffer | string): { readonly bytes: Uint8Array; readonly text: string } {
-  if (typeof value === "string") return { bytes: textEncoder.encode(value), text: value };
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  return { bytes, text: textDecoder.decode(bytes) };
+function jsonBytes(value: Uint8Array | ArrayBuffer | string): Uint8Array {
+  if (typeof value === "string") return textEncoder.encode(value);
+  return value instanceof Uint8Array ? value : new Uint8Array(value);
 }
+
+function jsonText(value: Uint8Array | ArrayBuffer | string): string {
+  return typeof value === "string" ? value : textDecoder.decode(value);
+}
+
 
 function parseRawIssues(payload: string): $ZodRawIssue[] {
   const parsed: unknown = JSON.parse(payload);
@@ -255,7 +259,12 @@ function backFillInput(
   parentPath: readonly PropertyKey[] = [],
 ): $ZodRawIssue {
   const fullPath = [...parentPath, ...(raw.path ?? [])];
-  const withInput = { ...raw, input: inputAtPath(original, fullPath) } as $ZodRawIssue;
+  const coercedInput = raw.received === "NaN"
+    ? Number.NaN
+    : raw.received === "Infinity"
+      ? Number.POSITIVE_INFINITY
+      : inputAtPath(original, fullPath);
+  const withInput = { ...raw, input: coercedInput } as $ZodRawIssue;
   if (Array.isArray(withInput.errors)) {
     const errors = withInput.errors.map((branch: unknown) => Array.isArray(branch)
       ? branch.map((entry: unknown) => backFillInput(entry as $ZodRawIssue, original, fullPath))
@@ -270,14 +279,15 @@ function backFillInput(
 }
 
 export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array | ArrayBuffer | string, context?: ParseContext): output<T> {
-  const source = bytesAndText(value);
   const plan = schema._zod.plan;
-  if (!plan.jsonEligible || isProtoPolluted(plan)) return parse(schema, JSON.parse(source.text), context);
-  const native = validateNativeJson(plan.json, schema._zod.nativeHandle, source.bytes);
-  if (!native.available || !native.verdict) return parse(schema, JSON.parse(source.text), context);
-  schema._zod.nativeHandle = native.handle;
+  if (!plan.jsonEligible || isProtoPolluted(plan)) return parse(schema, JSON.parse(jsonText(value)), context);
+
+  const native = validateNativeJson(plan.json, schema._zod.nativePlan, jsonBytes(value));
+  schema._zod.nativePlan = native.plan;
+  if (!native.available || !native.verdict) return parse(schema, JSON.parse(jsonText(value)), context);
+
   switch (native.verdict.status) {
-    case 0: return JSON.parse(source.text) as output<T>;
+    case 0: return JSON.parse(jsonText(value)) as output<T>;
     case 1:
       if (native.verdict.payload === null) throw new Error("Native validator omitted rewritten payload");
       return JSON.parse(native.verdict.payload) as output<T>;
@@ -286,16 +296,13 @@ export function parseJson<T extends RuntimeSchema>(schema: T, value: Uint8Array 
       let raw = parseRawIssues(native.verdict.payload);
       // Message resolution needs `input` ("received X"); finalizeIssue strips
       // it from delivered issues unless reportInput is set. Back-fill always.
-      const original: unknown = JSON.parse(source.text);
+      const original: unknown = JSON.parse(jsonText(value));
       raw = raw.map((entry) => backFillInput(entry, original));
       throw makeError<output<T>>(raw, context);
     }
     case 3:
-      // Status 3: the native parser rejected input that JS handles differently
-      // (BOM, lone-surrogate escapes, 1e400→Infinity, NaN/Infinity literals, truncated
-      // JSON). Fall back to JSON.parse + the TS validator — identical observable result.
-      // JSON.parse throwing SyntaxError propagates as-is.
-      return parse(schema, JSON.parse(source.text), context);
+      // The native parser rejected syntax that JSON.parse handles differently.
+      return parse(schema, JSON.parse(jsonText(value)), context);
     default:
       throw new Error(`Native validator returned unknown status ${native.verdict.status}`);
   }

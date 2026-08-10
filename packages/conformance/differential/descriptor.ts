@@ -14,7 +14,8 @@
 
 import * as z from "zodrs";
 
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export type JsonScalar = null | boolean | number | string;
+export type Json = JsonScalar | Json[] | { [key: string]: Json };
 
 export type StringCheck =
   | { c: "min" | "max" | "length"; v: number }
@@ -46,22 +47,31 @@ export type NumberCheck =
   | { c: "positive" | "negative" };
 
 export type Descriptor =
-  | { k: "string"; checks: StringCheck[] }
-  | { k: "number"; checks: NumberCheck[] }
-  | { k: "boolean" }
+  | { k: "string"; checks: StringCheck[]; coerce?: false }
+  | { k: "string"; checks: Exclude<StringCheck, { c: "format" }>[]; coerce: true }
+  | { k: "number"; checks: NumberCheck[]; coerce?: boolean }
+  | { k: "boolean"; coerce?: boolean }
   | { k: "null" }
+  | { k: "any" }
+  | { k: "unknown" }
   | { k: "literal"; values: (string | number | boolean | null)[] }
   | { k: "enum"; values: string[] }
-  | { k: "object"; mode: "strip" | "strict" | "passthrough"; shape: [string, Descriptor][] }
+  | { k: "object"; mode: "strip" | "strict" | "passthrough"; shape: [string, Descriptor][]; catchall: Descriptor | null }
   | { k: "array"; el: Descriptor; min: number; max: number }
-  | { k: "tuple"; items: Descriptor[] }
+  | { k: "tuple"; items: Descriptor[]; rest: Descriptor | null }
   | { k: "union"; options: Descriptor[] }
   | { k: "discunion"; key: string; options: { tag: string; shape: [string, Descriptor][] }[] }
   | { k: "record"; value: Descriptor }
+  | { k: "partialRecord"; keys: string[]; value: Descriptor }
   | { k: "optional"; inner: Descriptor }
+  | { k: "exactOptional"; inner: Descriptor }
   | { k: "nullable"; inner: Descriptor }
-  | { k: "default"; inner: Descriptor; value: Json }
-  | { k: "catch"; inner: Descriptor; value: Json };
+  | { k: "nonoptional"; inner: Descriptor }
+  | { k: "default"; inner: Descriptor; value: JsonScalar }
+  | { k: "prefault"; inner: Descriptor; value: JsonScalar }
+  | { k: "catch"; inner: Descriptor; value: JsonScalar }
+  | { k: "templateLiteral"; prefix: string; suffix: string }
+  | { k: "lazy"; inner: Descriptor };
 
 export type AnySchema = z.ZodType;
 
@@ -125,19 +135,25 @@ export function buildSchema(d: Descriptor): AnySchema {
   switch (d.k) {
     case "string": {
       const format = d.checks.find((c) => c.c === "format");
-      const base = format && format.c === "format" ? formatSchema(format.f) : z.string();
-            return d.checks.filter((c) => c.c !== "format").reduce<AnySchema>(applyStringCheck, base);
+      const base = d.coerce ? z.coerce.string() : format && format.c === "format" ? formatSchema(format.f) : z.string();
+      return d.checks.filter((c) => c.c !== "format").reduce<AnySchema>(applyStringCheck, base);
     }
-    case "number": return d.checks.reduce<AnySchema>(applyNumberCheck, z.number());
-    case "boolean": return z.boolean();
+    case "number": {
+      const base = d.coerce ? z.coerce.number() : z.number();
+      return d.checks.reduce<AnySchema>(applyNumberCheck, base);
+    }
+    case "boolean": return d.coerce ? z.coerce.boolean() : z.boolean();
     case "null": return z.null();
+    case "any": return z.any();
+    case "unknown": return z.unknown();
     case "literal": return z.literal(d.values);
     case "enum": return z.enum(d.values);
     case "object": {
       const shape: Record<string, unknown> = {};
       for (const [key, child] of d.shape) setOwn(shape, key, buildSchema(child));
       const make = d.mode === "strict" ? z.strictObject : d.mode === "passthrough" ? z.looseObject : z.object;
-      return make(shape as z.ZodRawShape);
+      const schema = make(shape as z.ZodRawShape);
+      return d.catchall === null ? schema : schema.catchall(buildSchema(d.catchall));
     }
     case "array": {
       let s = z.array(buildSchema(d.el));
@@ -145,7 +161,10 @@ export function buildSchema(d: Descriptor): AnySchema {
       if (d.max < 8) s = s.max(d.max);
       return s;
     }
-    case "tuple": return z.tuple(d.items.map(buildSchema));
+    case "tuple": {
+      const schema = z.tuple(d.items.map(buildSchema));
+      return d.rest === null ? schema : schema.rest(buildSchema(d.rest));
+    }
     case "union": return z.union(d.options.map(buildSchema) as [AnySchema, AnySchema, ...AnySchema[]]);
     case "discunion":
       return z.discriminatedUnion(
@@ -158,9 +177,18 @@ export function buildSchema(d: Descriptor): AnySchema {
         }) as [AnySchema, AnySchema, ...AnySchema[]],
       );
     case "record": return z.record(z.string(), buildSchema(d.value));
+    case "partialRecord": return z.partialRecord(z.enum(d.keys), buildSchema(d.value));
     case "optional": return buildSchema(d.inner).optional();
+    case "exactOptional": return buildSchema(d.inner).exactOptional();
     case "nullable": return buildSchema(d.inner).nullable();
+    case "nonoptional": return buildSchema(d.inner).nonoptional();
     case "default": return buildSchema(d.inner).default(d.value);
+    case "prefault": return buildSchema(d.inner).prefault(d.value);
     case "catch": return buildSchema(d.inner).catch(d.value);
+    case "templateLiteral": return z.templateLiteral([d.prefix, z.string(), d.suffix]);
+    case "lazy": {
+      const inner = buildSchema(d.inner);
+      return z.lazy(() => inner);
+    }
   }
 }

@@ -8,5 +8,29 @@
   "rules": {
     "no-explicit-any": "off"
   },
-  "ignorePatterns": ["dist/", "native/", "wasm/", "node_modules/"]
+  "overrides": [
+    {
+      "files": ["packages/conformance/tests/**/*.ts"],
+      "rules": {
+        "no-unused-expressions": "off",
+        "no-useless-escape": "off",
+        "no-unused-vars": "off",
+        "no-unsafe-optional-chaining": "off",
+        "unicorn/no-new-array": "off",
+        "unicorn/no-thenable": "off"
+      }
+    }
+  ],
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/dist-cjs/**",
+    "**/native/**",
+    "**/wasm/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/*.node",
+    "**/*.wasm",
+    "**/*.tsbuildinfo",
+    "**/*.log"
+  ]
 }

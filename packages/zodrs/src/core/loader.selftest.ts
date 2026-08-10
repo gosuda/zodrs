@@ -52,7 +52,7 @@ if (tier === "none") {
   const result = validateJson(plan.json, null, validBytes);
   check(
     "none tier: seam reports unavailable",
-    !result.available && result.handle === null && result.verdict === null,
+    !result.available && result.plan === null && result.verdict === null,
     result,
   );
 } else {
@@ -64,26 +64,26 @@ if (tier === "none") {
   }
   // Valid, already canonical: single schema key, schema key order, no extras.
   const valid = validateJson(plan.json, null, validBytes);
-  check("valid input: available with a handle", valid.available && typeof valid.handle === "number", valid);
+  check("valid input: available with a plan", valid.available && valid.plan !== null, valid);
   check("valid input: status 0 (canonical)", valid.verdict?.status === 0, valid.verdict);
 
-  // Handle reuse: a second call passes the cached handle back through.
-  const reused = validateJson(plan.json, valid.handle, validBytes);
+  // A second call reuses the opaque plan reference.
+  const reused = validateJson(plan.json, valid.plan, validBytes);
   check(
-    "handle reuse: same handle, status 0",
-    reused.available && reused.handle === valid.handle && reused.verdict?.status === 0,
+    "plan reuse: same reference, status 0",
+    reused.available && reused.plan === valid.plan && reused.verdict?.status === 0,
     reused,
   );
 
-  // Compile dedupe: a fresh call with no handle resolves to the same handle.
+  // A fresh call with no reference resolves to the same cached plan.
   const deduped = validateJson(plan.json, null, validBytes);
-  check("compile dedupe: identical plan shares the handle", deduped.handle === valid.handle, {
-    first: valid.handle,
-    second: deduped.handle,
+  check("compile dedupe: identical plan shares the reference", deduped.plan === valid.plan, {
+    first: valid.plan,
+    second: deduped.plan,
   });
 
   // Valid but rewritten: the unknown key is stripped, so status 1.
-  const stripped = validateJson(plan.json, valid.handle, stripBytes);
+  const stripped = validateJson(plan.json, valid.plan, stripBytes);
   check("unknown key: status 1 (rewritten)", stripped.verdict?.status === 1, stripped.verdict);
   const strippedPayload = stripped.verdict?.payload;
   check(
@@ -93,7 +93,7 @@ if (tier === "none") {
   );
 
   // Invalid: status 2 with a raw issue array.
-  const invalid = validateJson(plan.json, valid.handle, invalidBytes);
+  const invalid = validateJson(plan.json, valid.plan, invalidBytes);
   check("invalid input: status 2 (issues)", invalid.verdict?.status === 2, invalid.verdict);
   const issuePayload = invalid.verdict?.payload;
   const issues = typeof issuePayload === "string" ? (JSON.parse(issuePayload) as unknown) : null;

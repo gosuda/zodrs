@@ -1,4 +1,4 @@
-import type { FormatId, MetadataBag, SchemaNode } from "./nodes.js";
+import type { FormatId, SchemaNode } from "./nodes.js";
 import { patternForFormat } from "./formats.js";
 import { escapeRegex } from "./util.js";
 

@@ -10,36 +10,106 @@ export interface NativeVerdict {
   readonly payload: string | null;
 }
 
-export interface NativeBackend {
-  compile(planJson: string): number;
-  dispose(handle: number): void;
-  validateJson(handle: number, bytes: Uint8Array): NativeVerdict;
+const NATIVE_PLAN: unique symbol = Symbol("zodrs.native-plan");
+
+interface NativePlanState {
+  readonly validateJson: (bytes: Uint8Array) => NativeVerdict;
+  readonly dispose: () => void;
+  disposed: boolean;
 }
 
-let backend: NativeBackend | null = null;
+/** Opaque plan identity. Only the backend factory can create one. */
+export interface NativePlanRef {
+  readonly [NATIVE_PLAN]: NativePlanState;
+}
 
-/** Register a native/WASM backend. Called by the addon's loader when present. */
-export function registerNativeBackend(candidate: NativeBackend): void {
-  backend = candidate;
+/** Create one backend-owned plan reference without exposing its raw handle. */
+export function createNativePlanRef(
+  validateJson: (bytes: Uint8Array) => NativeVerdict,
+  dispose: () => void,
+): NativePlanRef {
+  const state: NativePlanState = { validateJson, dispose, disposed: false };
+  return Object.freeze({ [NATIVE_PLAN]: state });
+}
+
+export interface NativeBackend {
+  compile(planJson: string): NativePlanRef;
+}
+
+interface BackendRegistration {
+  readonly backend: NativeBackend;
+  /** planJson strings that threw during compile on this backend generation. */
+  readonly failed: Set<string>;
+}
+
+const registrations = new WeakMap<NativePlanRef, BackendRegistration>();
+let registration: BackendRegistration | null = null;
+
+function releasePlan(plan: NativePlanRef): void {
+  const state = plan[NATIVE_PLAN];
+  if (state.disposed) return;
+  state.disposed = true;
+  try {
+    state.dispose();
+  } catch {
+    // Cleanup failure must not change parse behavior or escape a finalizer path.
+  }
+}
+
+/** Register a native/WASM backend, or clear it by passing `null`. */
+export function registerNativeBackend(candidate: NativeBackend | null): void {
+  registration = candidate === null ? null : { backend: candidate, failed: new Set() };
 }
 
 export function getNativeBackend(): NativeBackend | null {
-  return backend;
+  return registration?.backend ?? null;
 }
 
 export function isNativeAvailable(): boolean {
-  return backend !== null;
+  return registration !== null;
 }
 
 export interface NativeCallResult {
   readonly available: boolean;
-  readonly handle: number | null;
+  readonly plan: NativePlanRef | null;
   readonly verdict: NativeVerdict | null;
 }
 
-/** Compile on first use, then validate bytes across one addon boundary. */
-export function validateJson(planJson: string, handle: number | null, bytes: Uint8Array): NativeCallResult {
-  if (!backend) return { available: false, handle: null, verdict: null };
-  const compiled = handle ?? backend.compile(planJson);
-  return { available: true, handle: compiled, verdict: backend.validateJson(compiled, bytes) };
+/** Compile on first use, then validate bytes against the current backend generation. */
+export function validateJson(
+  planJson: string,
+  plan: NativePlanRef | null,
+  bytes: Uint8Array,
+): NativeCallResult {
+  const current = registration;
+  if (current === null) {
+    if (plan !== null) releasePlan(plan);
+    return { available: false, plan: null, verdict: null };
+  }
+
+  let active = plan;
+  if (active !== null && (registrations.get(active) !== current || active[NATIVE_PLAN].disposed)) {
+    releasePlan(active);
+    active = null;
+  }
+
+  if (active === null) {
+    if (current.failed.has(planJson)) {
+      return { available: false, plan: null, verdict: null };
+    }
+    try {
+      active = current.backend.compile(planJson);
+      registrations.set(active, current);
+    } catch {
+      current.failed.add(planJson);
+      return { available: false, plan: null, verdict: null };
+    }
+  }
+
+  try {
+    return { available: true, plan: active, verdict: active[NATIVE_PLAN].validateJson(bytes) };
+  } catch {
+    releasePlan(active);
+    return { available: false, plan: null, verdict: null };
+  }
 }

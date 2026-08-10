@@ -318,7 +318,7 @@ fn object_key_reorder_sets_dirty() {
 #[test]
 fn object_default_applied_sets_dirty() {
     let compiled = plan(&json!([
-        {"k":"object","keys":["name","role"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["name","role"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
         {"k":"string","checks":[]},
         {"k":"default","inner":3,"value":"user"},
         {"k":"string","checks":[]}
@@ -462,6 +462,31 @@ fn union_first_match() {
     let v = validate(&compiled, b"true");
     assert_eq!(v.status, 2);
     assert_eq!(issues(&v.payload)[0]["code"], json!("invalid_union"));
+}
+#[test]
+fn union_nonfinite_failed_branch_does_not_force_fallback() {
+    // A number branch coerces "Infinity" (nonfinite) but fails lt(10). The
+    // following string branch is clean and matches the input. An outer default
+    // makes the overall output dirty, so without restoring nonfinite the leaked
+    // flag would force a fallback (3); with the fix it returns a valid rewrite.
+    let compiled = plan(&json!([
+        {"k":"object","keys":["u","d"],"values":[1,4],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"union","options":[2,3]},
+        {"k":"number","coerce":true,"checks":[{"c":"lt","v":10,"inclusive":true}]},
+        {"k":"string","checks":[]},
+        {"k":"default","inner":5,"value":0,"dynamic":false},
+        {"k":"number","checks":[]}
+    ]));
+    let v = validate(&compiled, br#"{"u":"Infinity"}"#);
+    assert_eq!(
+        v.status, 1,
+        "union must select the clean string branch: {v:?}"
+    );
+    assert_eq!(
+        v.payload.as_deref(),
+        Some(r#"{"u":"Infinity","d":0}"#),
+        "default must still be applied"
+    );
 }
 
 #[test]
@@ -975,11 +1000,11 @@ fn coerce_number_js_semantics() {
     // NaN-producing strings fail as invalid_type.
     assert_issue(
         &validate(&num, br#""nan""#),
-        &json!({"code":"invalid_type","expected":"number","path":[]}),
+        &json!({"code":"invalid_type","expected":"number","received":"NaN","path":[]}),
     );
     assert_issue(
         &validate(&num, br#""inf""#),
-        &json!({"code":"invalid_type","expected":"number","path":[]}),
+        &json!({"code":"invalid_type","expected":"number","received":"NaN","path":[]}),
     );
     // Radix prefixes and null follow JS Number().
     assert_eq!(output(&validate(&num, br#""0x1F""#)), json!(31));
@@ -1116,4 +1141,173 @@ fn discunion_note_field_and_key_order() {
         "key order: {keys:?}"
     );
     assert_eq!(obj["note"], "No matching discriminator");
+}
+
+// ------------------------------------------------------------------------
+// Regression: absent/default output for wrappers and cycles.
+// ------------------------------------------------------------------------
+
+#[test]
+fn object_default_optional_applies() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"optional","inner":2},
+        {"k":"default","inner":3,"value":"x","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
+}
+
+#[test]
+fn object_catch_optional_omits() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"optional","inner":2},
+        {"k":"catch","inner":3,"value":"caught","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    let v = validate(&p, br"{}");
+    assert_eq!(v.status, 0, "expected clean/omitted: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+#[test]
+fn object_default_nullable_applies() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"nullable","inner":2},
+        {"k":"default","inner":3,"value":"x","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
+}
+
+#[test]
+fn object_union_wraps_default() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"union","options":[2,3]},
+        {"k":"number","checks":[]},
+        {"k":"default","inner":4,"value":"x","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
+}
+
+#[test]
+fn object_bare_optional_omits() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"optional","inner":2},
+        {"k":"string","checks":[]}
+    ]));
+    let v = validate(&p, br"{}");
+    assert_eq!(v.status, 0, "expected clean/omitted: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+#[test]
+fn cyclic_lazy_object_falls_back() {
+    let p = plan(&json!([
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"lazy","inner":1}
+    ]));
+    let v = validate(&p, br"{}");
+    assert_eq!(v.status, 3, "expected fallback for cyclic lazy: {v:?}");
+    let v = validate(&p, br#"{"a":1}"#);
+    assert_eq!(v.status, 3, "expected fallback for cyclic lazy: {v:?}");
+}
+
+#[test]
+fn tuple_default_optional_applies_and_catch_optional_omits() {
+    let default_optional = plan(&json!([
+        {"k":"tuple","items":[1],"rest":null},
+        {"k":"optional","inner":2},
+        {"k":"default","inner":3,"value":"x","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    assert_eq!(output(&validate(&default_optional, br"[]")), json!(["x"]));
+
+    let catch_optional = plan(&json!([
+        {"k":"tuple","items":[1],"rest":null},
+        {"k":"optional","inner":2},
+        {"k":"catch","inner":3,"value":"x","dynamic":false},
+        {"k":"string","checks":[]}
+    ]));
+    let v = validate(&catch_optional, br"[]");
+    assert_eq!(v.status, 0, "expected clean/omitted: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+// ------------------------------------------------------------------------
+// JSON eligibility: unsupported node/check kinds and unknown tags.
+// ------------------------------------------------------------------------
+
+#[test]
+fn unsupported_node_is_ineligible() {
+    let compiled = plan(&json!([{"k":"unsupported"}]));
+    assert!(!compiled.json_eligible);
+    let v = validate(&compiled, b"null");
+    assert_eq!(v.status, 3);
+}
+
+#[test]
+fn unsupported_check_is_ineligible() {
+    let compiled = plan(&json!([{"k":"string","checks":[{"c":"unsupported"}]}]));
+    assert!(!compiled.json_eligible);
+    let v = validate(&compiled, b"\"x\"");
+    assert_eq!(v.status, 3);
+}
+
+#[test]
+fn unknown_node_tag_errors() {
+    let r = compile(r#"[{"k":"nope"}]"#);
+    assert!(r.is_err(), "unknown node tag must fail compilation");
+}
+
+#[test]
+fn unknown_check_tag_errors() {
+    let r = compile(r#"[{"k":"string","checks":[{"c":"nope"}]}]"#);
+    assert!(r.is_err(), "unknown check tag must fail compilation");
+}
+
+#[rstest]
+#[case(json!([{"k":"unsupported"}]))]
+#[case(json!([{"k":"date"}]))]
+#[case(json!([{"k":"file"}]))]
+#[case(json!([{"k":"map","value":1},{"k":"any"}]))]
+#[case(json!([{"k":"set","value":1},{"k":"any"}]))]
+#[case(json!([{"k":"symbol"}]))]
+#[case(json!([{"k":"nan"}]))]
+#[case(json!([{"k":"promise","inner":1},{"k":"any"}]))]
+#[case(json!([{"k":"intersection","left":1,"right":2},{"k":"any"},{"k":"any"}]))]
+#[case(json!([{"k":"readonly","inner":1},{"k":"any"}]))]
+#[case(json!([{"k":"pipe","a":1,"b":2},{"k":"any"},{"k":"any"}]))]
+#[case(json!([{"k":"host","fn":0}]))]
+#[case(json!([{"k":"bigint"}]))]
+#[case(json!([{"k":"default","inner":1,"value":null,"dynamic":true},{"k":"any"}]))]
+#[case(json!([{"k":"prefault","inner":1,"value":null,"dynamic":true},{"k":"any"}]))]
+#[case(json!([{"k":"catch","inner":1,"value":null,"dynamic":true},{"k":"any"}]))]
+#[case(json!([{"k":"string","checks":[{"c":"property","key":"x","node":1}]},{"k":"any"}]))]
+#[case(json!([{"k":"string","checks":[{"c":"unsupported"}]}]))]
+fn raw_plan_ineligible_kinds(#[case] plan_json: Json) {
+    let compiled = plan(&plan_json);
+    assert!(
+        !compiled.json_eligible,
+        "plan must be ineligible: {plan_json}"
+    );
+    let v = validate(&compiled, b"null");
+    assert_eq!(v.status, 3, "ineligible plan must fall back");
+}
+
+#[test]
+fn representative_ordinary_json_plan_stays_eligible() {
+    let compiled = plan(&json!([
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]}
+    ]));
+    assert!(compiled.json_eligible, "ordinary JSON plan stays eligible");
+    let v = validate(&compiled, br#"{"a":"hello","b":5}"#);
+    assert_eq!(v.status, 0, "expected clean canonical input");
 }

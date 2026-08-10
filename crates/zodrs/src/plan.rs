@@ -249,6 +249,12 @@ pub enum PlanNode {
         /// Schema used when a value is present.
         inner: NodeId,
     },
+    /// Delegates absent input to `inner` without optional fallback swallowing.
+    #[serde(rename = "exact_optional")]
+    ExactOptional {
+        /// Wrapped schema.
+        inner: NodeId,
+    },
     /// Accepts null or delegates to `inner`.
     #[serde(rename = "nullable")]
     Nullable {
@@ -341,6 +347,9 @@ pub enum PlanNode {
         #[serde(rename = "fn")]
         func: u32,
     },
+    /// Placeholder for a wire node the Rust byte path cannot validate.
+    #[serde(rename = "unsupported")]
+    Unsupported,
 }
 
 /// A built-in validation check attached to a plan node.
@@ -500,10 +509,13 @@ pub enum Check {
     /// Executes a JavaScript check and poisons JSON eligibility.
     #[serde(rename = "host")]
     Host {
-        /// Index into the TypeScript host-function table.
+        /// Index into the TypeScript plan's host-function table.
         #[serde(rename = "fn")]
         func: u32,
     },
+    /// Placeholder for a wire check the Rust byte path cannot validate.
+    #[serde(rename = "unsupported")]
+    Unsupported,
 }
 
 /// Numeric range and integrality formats supported by number checks.

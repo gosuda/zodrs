@@ -4,11 +4,8 @@ import type { $ZodErrorMap, $ZodIssue, ParseContext } from "../core/errors.js";
 import { createAsyncInterpreter, createInterpreter } from "../core/interpreter.js";
 import type { ValidationContext } from "../core/interpreter.js";
 import type {
-  Check,
-  DynamicValue,
   FormatId,
   HostFunction,
-  MetadataBag,
   ObjectMode,
   RuntimeCheck,
   SchemaNode,
@@ -26,7 +23,7 @@ import type { ToJSONSchemaParams } from "../core/json-schema.js";
 import { globalRegistry } from "../core/registries.js";
 import type { $ZodRegistry, $replace, GlobalMeta } from "../core/registries.js";
 import { createStandardProps } from "../core/standard-schema.js";
-import type { StandardJSONSchemaV1, StandardSchemaV1, StandardSchemaWithJSONProps } from "../core/standard-schema.js";
+import type { StandardJSONSchemaV1, StandardSchemaWithJSONProps } from "../core/standard-schema.js";
 import { escapeRegex, FAIL, isObject } from "../core/util.js";
 import type { JSONType, MaybeAsync, NoUndefined, Primitive } from "../core/util.js";
 
@@ -44,7 +41,7 @@ export type BRAND<T extends PropertyKey> = { readonly [$brand]: { readonly [K in
 
 // T is a phantom parameter kept for API compatibility; it is intentionally
 // structurally inert so `$ZodCheck<number>` and `$ZodCheck<string>` unify.
-export interface $ZodCheck<T = unknown> {
+export interface $ZodCheck<_T = unknown> {
   readonly _zod: RuntimeCheck;
 }
 export type CheckFn = (payload: { value: unknown; issues: $ZodIssue[] }) => MaybeAsync<void>;
@@ -150,10 +147,6 @@ function childSchema(schemaNode: SchemaNode): $ZodType {
   return schemaByNode.get(schemaNode) ?? fromNode(schemaNode);
 }
 
-function withCheck<Output, Input>(schema: $ZodType<Output, Input>, check: $ZodCheck | RuntimeCheck): $ZodType<Output, Input> {
-  const runtime = "_zod" in check ? check._zod : check;
-  return fromNode(cloneNode(schema._zod.node, { checks: [...schema._zod.node.checks, runtime] }), schema);
-}
 
 /** Zod v4-style `.def` facade: the raw `SchemaNode` plus a `type` string (the
  * kind) and lazy structural accessors that surface child schemas as full
@@ -356,7 +349,7 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
       input: undefined as Input,
       node: schemaNode,
       parent,
-      nativeHandle: null,
+      nativePlan: null,
     } as SchemaInternals<Output, Input>;
     Object.defineProperties(internals, INTERNALS_ACCESSORS);
     this._zod = internals;
@@ -369,8 +362,8 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
     // StandardJSONSchemaV1: expose jsonSchema.input/output on every schema.
     Object.assign(this["~standard"], {
       jsonSchema: {
-        input: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "input", ...(options.libraryOptions ?? {}) }),
-        output: (options: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { target: options.target as ToJSONSchemaParams["target"], io: "output", ...(options.libraryOptions ?? {}) }),
+        input: (options?: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { ...options?.libraryOptions, target: options?.target as ToJSONSchemaParams["target"], io: "input" }),
+        output: (options?: StandardJSONSchemaV1.Options) => coreToJSONSchema(this, { ...options?.libraryOptions, target: options?.target as ToJSONSchemaParams["target"], io: "output" }),
       },
     });
     schemaByNode.set(schemaNode, this);
@@ -684,9 +677,10 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   uint64(params?: ErrorParam): this { return this.check(uint64Check(params)); }
   jsonString(params?: ErrorParam): this {
     const inner = json();
+    const error = errorMap(params);
     const parseHost: HostFunction = (value, context) => {
       try { return JSON.parse(value as string); } catch {
-        context.addIssue({ code: "custom", message: "Invalid JSON", input: value } as never);
+        context.addIssue({ code: "custom", ...(error ? { inst: { error } } : { message: "Invalid JSON" }), input: value } as never);
         return undefined;
       }
     };
@@ -916,7 +910,7 @@ export type ZodArray<T extends SomeType = SomeType> = $ZodType<output<T>[], inpu
 export type ZodTuple<T extends readonly SomeType[] = readonly SomeType[], Rest extends SomeType | null = null> = $ZodType<TupleOutput<T, Rest>, TupleInput<T, Rest>>;
 export type ZodUnion<T extends readonly SomeType[] = readonly SomeType[]> = $ZodType<output<T[number]>, input<T[number]>>;
 export type ZodIntersection<A extends SomeType = SomeType, B extends SomeType = SomeType> = $ZodType<output<A> & output<B>, input<A> & input<B>>;
-export type ZodRecord<K extends SomeType = SomeType, V extends SomeType = SomeType> = $ZodType<Record<string, output<V>>, Record<string, input<V>>>;
+export type ZodRecord<_K extends SomeType = SomeType, V extends SomeType = SomeType> = $ZodType<Record<string, output<V>>, Record<string, input<V>>>;
 export type ZodMap<K extends SomeType = SomeType, V extends SomeType = SomeType> = $ZodType<Map<output<K>, output<V>>, Map<input<K>, input<V>>>;
 export type ZodSet<T extends SomeType = SomeType> = $ZodType<Set<output<T>>, Set<input<T>>>;
 export type ZodOptional<T extends SomeType = SomeType> = $ZodType<output<T> | undefined, input<T> | undefined>;
@@ -1115,15 +1109,6 @@ export function tuple<const T extends readonly SomeType[], Rest extends SomeType
 }
 export function union<const T extends readonly SomeType[]>(options: T, params?: ErrorParam): ZodUnion<T> { return fromNode(node({ kind: "union", options: options.map((option) => option._zod.node) }, { error: errorMap(params) })); }
 
-function discriminantValues(schema: SomeType, key: string): Primitive[] {
-  const current = schema._zod.node;
-  if (current.kind !== "object") return [];
-  const target = current.shape[key];
-  if (!target) return [];
-  if (target.kind === "literal") return [...target.values];
-  if (target.kind === "enum") return [...target.values];
-  return [];
-}
 
 export function discriminatedUnion<const T extends readonly SomeType[]>(key: string, options: T, params?: ErrorParam & { readonly unionFallback?: boolean }): ZodUnion<T> {
   const map = new Map<Primitive, SchemaNode>();

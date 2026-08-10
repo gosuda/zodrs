@@ -1,6 +1,6 @@
 {
-  "name": "zodrs-node",
-  "version": "0.1.0",
+  "name": "zod-rs-node",
+  "version": "0.1.1",
   "private": true,
   "napi": {
     "binaryName": "zodrs_node",

@@ -238,6 +238,24 @@ results. The loader (`core/loader.ts`) selects the first available:
 | TS codegen | Compiled closures (`core/codegen.ts`) | `ZODRS_BACKEND=codegen` (default) | Fallback when no native/WASM |
 | TS interpreter | Reference validator (`core/interpreter.ts`) | `ZODRS_BACKEND=interpreter` | Fallback when `config().jitless` or codegen unavailable |
 
+### Release artifacts
+
+`pnpm -C packages/zodrs prepack` builds and verifies two release artifacts:
+
+- `native/zodrs_node.linux-x64-gnu.node` for Linux x64 GNU;
+- `wasm/zodrs_node.wasm32-wasi.wasm` with its generated WASI loaders.
+
+`crates/zodrs-node/package.json` is the N-API metadata source. It advertises
+only those two build targets. The generated native loader uses the
+`zod-rs-node-*` fallback package prefix. The npm package embeds both artifacts;
+it does not claim separate native packages or other native platforms. On an
+unsupported native platform, loader resolution continues to the embedded WASM
+tier.
+
+The prepack gate forces one native loader self-test and one WASM loader
+self-test. `scripts/verify-artifacts.mjs` then checks versions, target names,
+release files, loader references, and debug/self-test exclusions.
+
 The TS codegen and interpreter share the same issue-construction code paths
 (`issue()`, `addIssue()`, `checkPayloadIssues()` in `interpreter.ts`), so
 payload/trace divergences between them are not expected. The native tier
@@ -270,11 +288,11 @@ side finalizes them:
 ### Differential fuzz harness
 
 The differential fuzz harness (`packages/conformance/differential/`) asserts
-the two-backend invariant: for random schemas and inputs,
-`schema.safeParseJson(bytes)` (Rust) and `schema.safeParse(JSON.parse(bytes))`
-(TS) produce deep-equal results — same success flag, deep-equal data,
-deep-equal issue arrays including code, path, payload fields, message, and
-back-filled input (`compare.ts:106–148`).
+the two-backend invariant for random schemas and inputs.
+`schema.safeParseJson(bytes)` (Rust) and
+`schema.safeParse(JSON.parse(bytes))` (TS) must have the same success flag.
+Successful data uses `exactDataEqual`; issue arrays use
+`issuePayloadEqual` (`compare.ts:124–177`).
 
 **Current status (2026-08-07):** The gate FAILS. The fuzz found 12 distinct
 root-cause divergence classes between the backends. Last survey (seed 24301,
@@ -283,11 +301,11 @@ mismatches across 52 signatures, wall ~2s. `KNOWN-MISMATCHES.json` is
 currently empty (`"entries": []`); previously recorded entries were cleared
 after their fixes landed.
 
-The `compare.ts:deepEqual` function (line 77) compares issue objects by
-filtered key set — keys with `undefined` values count as absent (line 93–94),
-so a field present-but-undefined on one side and absent on the other is NOT a
-mismatch. This means payload field **presence** is the primary divergence
-surface, not field value differences.
+`compare.ts:issuePayloadEqual` treats issue keys with `undefined` values as
+absent. This matches the TS and Rust issue-construction paths. In contrast,
+`exactDataEqual` preserves every own enumerable key in parsed output. It
+therefore reports `{}` and `{ a: undefined }` as different successful results
+(`compare.ts:100–133`).
 
 ### Known payload/trace divergence classes
 
@@ -339,13 +357,13 @@ two sides must agree on which formats are "procedural" (no `origin`) vs
 
 Rust uses `f64` and `num_json()` to serialize numbers in issue payload fields
 (`minimum`, `maximum`, `divisor`). TS uses JavaScript numbers. Edge cases:
-`-0` serializes as `0` in Rust but `-0` in JS (though `Object.is(-0, 0)` is
-false, `deepEqual` uses `Object.is` for numbers, `compare.ts:78`). Large
-integers beyond `MAX_SAFE_INT` (2^53-1) may lose precision in `f64`. The
-`compare.ts:show` function (line 62) preserves `-0`, `NaN`, `Infinity` in
-mismatch reports, confirming these are known comparison concerns.
+`-0` serializes as `0` in Rust but `-0` in JS. The shared comparator uses
+`Object.is` for numbers, so it reports that difference (`compare.ts:81–83`).
+Large integers beyond `MAX_SAFE_INT` (2^53-1) may lose precision in `f64`.
+`compare.ts:show` preserves `-0`, `NaN`, and `Infinity` in mismatch reports,
+so reports also retain these numeric edge cases.
 
-**Files:** `crates/zodrs/src/validate.rs:27,1029–1052`, `packages/conformance/differential/compare.ts:62–80`
+**Files:** `crates/zodrs/src/validate.rs:27,1029–1052`, `packages/conformance/differential/compare.ts:61–134`
 
 #### P5. Union branch error flattening
 

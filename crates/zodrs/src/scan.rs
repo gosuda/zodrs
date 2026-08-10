@@ -17,7 +17,9 @@ use smallvec::SmallVec;
 
 use crate::compile::{CompiledCheck, CompiledPlan, NodeDispatch};
 use crate::plan::{Check, NodeId, PlanNode};
-use crate::validate::{apply_overwrite, float_multiple_of, number_format_range, utf16_len};
+use crate::validate::{
+    apply_overwrite, float_multiple_of, number_format_range, utf16_len, utf16_offset_to_byte,
+};
 
 /// JavaScript's maximum safe integer, `2^53 - 1`.
 const MAX_SAFE_INT: f64 = 9_007_199_254_740_991.0;
@@ -45,6 +47,7 @@ pub fn scan(plan: &CompiledPlan, input: &[u8]) -> Scan {
         i: 0,
         depth: 0,
         dirty_hint: false,
+        hops: 256,
     };
     s.ws();
     if s.value(plan.root()) {
@@ -71,6 +74,7 @@ struct Scanner<'a> {
     /// a hard failure is; once set, the verdict is `Defer` regardless, and
     /// every further check short-circuits.
     dirty_hint: bool,
+    hops: usize,
 }
 
 /// SWAR constants for the inline string scanner.
@@ -448,47 +452,84 @@ impl<'a> Scanner<'a> {
             }
             PlanNode::DiscUnion { key, .. } => self.disc_union(id, key),
             PlanNode::Intersection { left, right } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let (left, right) = (*left, *right);
-                self.value(left) && self.value(right)
+                let res = self.value(left) && self.value(right);
+                self.hops += 1;
+                res
             }
             PlanNode::Record { .. } => self.record(id),
             PlanNode::Optional { inner }
+            | PlanNode::ExactOptional { inner }
             | PlanNode::NonOptional { inner }
             | PlanNode::Readonly { inner }
             | PlanNode::Lazy { inner }
             | PlanNode::Promise { inner }
             | PlanNode::Default { inner, .. }
             | PlanNode::Prefault { inner, .. } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let inner = *inner;
-                self.value(inner)
+                let res = self.value(inner);
+                self.hops += 1;
+                res
             }
             PlanNode::Nullable { inner } => {
                 if self.peek() == Some(b'n') {
                     self.eat(b"null")
                 } else {
+                    if self.hops == 0 {
+                        self.dirty_hint = true;
+                        return false;
+                    }
+                    self.hops -= 1;
                     let inner = *inner;
-                    self.value(inner)
+                    let res = self.value(inner);
+                    self.hops += 1;
+                    res
                 }
             }
             PlanNode::Catch { .. } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 // A clean inner value stays clean; a failure fires the catch,
                 // which rewrites the output: the node validates dirty.
                 let mark = self.i;
                 let PlanNode::Catch { inner, .. } = self.node(id) else {
+                    self.hops += 1;
                     return false;
                 };
                 let inner = *inner;
-                if self.value(inner) {
+                let res = if self.value(inner) {
                     true
                 } else {
                     self.i = mark;
                     self.dirty_hint = true;
                     true
-                }
+                };
+                self.hops += 1;
+                res
             }
             PlanNode::Pipe { a, b } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let (a, b) = (*a, *b);
-                self.value(a) && self.value(b)
+                let res = self.value(a) && self.value(b);
+                self.hops += 1;
+                res
             }
             PlanNode::TemplateLiteral { .. } => {
                 if self.peek() != Some(b'"') {
@@ -517,6 +558,10 @@ impl<'a> Scanner<'a> {
             | PlanNode::Nan
             | PlanNode::Symbol
             | PlanNode::Host { .. } => false,
+            PlanNode::Unsupported => {
+                self.dirty_hint = true;
+                false
+            }
         }
     }
 
@@ -586,7 +631,9 @@ impl<'a> Scanner<'a> {
                 Check::StartsWith { v } => s.starts_with(v),
                 Check::EndsWith { v } => s.ends_with(v),
                 Check::Includes { v, position } => match position {
-                    Some(p) => s.get(*p..).is_some_and(|tail| tail.contains(v)),
+                    Some(p) => s
+                        .get(utf16_offset_to_byte(s, *p)..)
+                        .is_some_and(|tail| tail.contains(v)),
                     None => s.contains(v),
                 },
                 Check::Lowercase => !s.chars().any(char::is_uppercase),
@@ -608,6 +655,10 @@ impl<'a> Scanner<'a> {
                         self.dirty_hint = true;
                     }
                     true
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };
@@ -646,6 +697,10 @@ impl<'a> Scanner<'a> {
                         crate::plan::BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
                     };
                     n >= min && n <= max
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };
@@ -694,6 +749,10 @@ impl<'a> Scanner<'a> {
             }
             PlanNode::Null => Some(self.eat(b"null")),
             PlanNode::Literal { values } | PlanNode::Enum { values } => Some(self.literal(values)),
+            PlanNode::Unsupported => {
+                self.dirty_hint = true;
+                Some(false)
+            }
             _ => None,
         }
     }
@@ -888,6 +947,10 @@ impl<'a> Scanner<'a> {
                 Check::MaxLength { v } | Check::MaxSize { v } => len_f <= *v,
                 Check::Length { v } | Check::Size { v } => {
                     len_f.partial_cmp(v) == Some(std::cmp::Ordering::Equal)
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };

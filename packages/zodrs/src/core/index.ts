@@ -1,6 +1,5 @@
 /** zodrs core surface (`zodrs/core`). */
 import "./loader.js";
-import { config } from "./config.js";
 import { bagOf } from "./introspect.js";
 
 export * from "./errors.js";

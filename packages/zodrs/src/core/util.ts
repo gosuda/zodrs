@@ -74,6 +74,15 @@ export function isObject(data: unknown): data is Record<PropertyKey, unknown> {
   return typeof data === "object" && data !== null && !Array.isArray(data);
 }
 
+// Bypass Object.prototype.__proto__ only when that inherited setter would intercept the write.
+export function setOwn(target: Record<PropertyKey, unknown>, key: PropertyKey, value: unknown): void {
+  if (key === "__proto__") {
+    Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+    return;
+  }
+  target[key] = value;
+}
+
 export function isPlainObject(data: unknown): data is Record<string, unknown> {
   if (!isObject(data)) return false;
   const proto: unknown = Object.getPrototypeOf(data);

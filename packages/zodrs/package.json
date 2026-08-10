@@ -47,6 +47,16 @@
       "import": "./dist/mini/index.js",
       "require": "./dist-cjs/mini/index.js"
     },
+    "./v4/mini": {
+      "types": "./dist/mini/index.d.ts",
+      "import": "./dist/mini/index.js",
+      "require": "./dist-cjs/mini/index.js"
+    },
+    "./v4/locales/*": {
+      "types": "./dist/locales/*.d.ts",
+      "import": "./dist/locales/*.js",
+      "require": "./dist-cjs/locales/*.js"
+    },
     "./package.json": "./package.json"
   },
   "imports": {
@@ -61,33 +71,24 @@
     "native",
     "wasm",
     "!dist/**/*.test.*",
+    "!dist/**/*.selftest.*",
     "!dist-cjs/**/*.test.*",
+    "!dist-cjs/**/*.selftest.*",
     "!wasm/node_modules",
     "!wasm/package-lock.json",
     "!wasm/*.debug.wasm"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\n')\"",
     "build:esm": "tsc -p tsconfig.build.json",
-    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\\\n')\"",
-    "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --output-dir ../../packages/zodrs/native",
-    "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm",
-    "prepack": "pnpm run build:native && pnpm run build:wasm && pnpm run build",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\n')\"",
+    "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --target x86_64-unknown-linux-gnu --output-dir ../../packages/zodrs/native",
+    "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm && cd ../../packages/zodrs && node -e \"require('fs').rmSync('wasm/zodrs_node.wasm32-wasi.debug.wasm',{force:true})\"",
+    "selftest:native": "ZODRS_LOADER=native node dist/core/loader.selftest.js",
+    "selftest:wasm": "ZODRS_LOADER=wasm node dist/core/loader.selftest.js",
+    "verify:artifacts": "node scripts/verify-artifacts.mjs",
+    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
     "test": "vitest run"
-  },
-  "napi": {
-    "binaryName": "zodrs",
-    "targets": [
-      "x86_64-apple-darwin",
-      "aarch64-apple-darwin",
-      "x86_64-unknown-linux-gnu",
-      "x86_64-unknown-linux-musl",
-      "aarch64-unknown-linux-gnu",
-      "aarch64-unknown-linux-musl",
-      "x86_64-pc-windows-msvc",
-      "aarch64-pc-windows-msvc",
-      "wasm32-wasip1-threads"
-    ]
   },
   "engines": {
     "node": ">=20.17"
