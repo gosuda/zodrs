@@ -92,7 +92,7 @@ function genJsonScalar(rng: Rng): Json {
 function genValidObject(
   rng: Rng,
   shape: [string, Descriptor][],
-  mode: string,
+  mode: Extract<Descriptor, { k: "object" }>["mode"],
   catchall: Descriptor | null,
 ): Json {
   const out: Record<string, Json> = {};
@@ -100,8 +100,10 @@ function genValidObject(
     if ((child.k === "optional" || child.k === "exactOptional" || child.k === "default" || child.k === "prefault") && rng.chance(0.35)) continue;
     setOwn(out, key, genValid(rng, child));
   }
-  if (catchall !== null && rng.chance(0.5)) {
-    for (let i = 0, extras = rng.int(1, 2); i < extras; i++) setOwn(out, rng.pick(EXTRA_KEYS), genValid(rng, catchall));
+  if (catchall !== null) {
+    if (rng.chance(0.5)) {
+      for (let i = 0, extras = rng.int(1, 2); i < extras; i++) setOwn(out, rng.pick(EXTRA_KEYS), genValid(rng, catchall));
+    }
   } else if (mode !== "strict" && rng.chance(0.3)) {
     for (let i = 0, extras = rng.int(1, 2); i < extras; i++) setOwn(out, rng.pick(EXTRA_KEYS), genJsonScalar(rng));
   }

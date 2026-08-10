@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { isNativeAvailable } from "zodrs/core";
 import { buildSchema, type Descriptor } from "./descriptor.js";
 import { compareResults, runBoth } from "./compare.js";
 
@@ -121,6 +122,9 @@ describe("expanded differential descriptors", () => {
     const schema = buildSchema(descriptor);
     expect(schema._zod.plan.jsonEligible).toBe(true);
     expect(schema._zod.plan.hostFns).toHaveLength(0);
+  });
+  test("differential descriptor tests require the native backend", () => {
+    expect(isNativeAvailable(), "run with ZODRS_LOADER=native").toBe(true);
   });
 
   test.each(parityCases)("%s matches the TypeScript path", (_name, descriptor, json) => {
