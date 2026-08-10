@@ -9,6 +9,8 @@ pre-commit:
       run: cargo nextest run --workspace
     tsc:
       run: pnpm -C packages/zodrs build
+    zodrs-test:
+      run: pnpm -C packages/zodrs test
     oxlint:
       run: pnpm exec oxlint --config .oxlintrc.json packages/
     conformance:

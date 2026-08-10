@@ -1,18 +1,5 @@
 {
-  "name": "zodrs-native",
-  "version": "0.1.0",
-  "private": true,
-  "napi": {
-    "binaryName": "zodrs_node",
-    "targets": [
-      "x86_64-apple-darwin",
-      "aarch64-apple-darwin",
-      "x86_64-unknown-linux-gnu",
-      "x86_64-unknown-linux-musl",
-      "aarch64-unknown-linux-gnu",
-      "aarch64-unknown-linux-musl",
-      "x86_64-pc-windows-msvc",
-      "aarch64-pc-windows-msvc"
-    ]
-  }
+  "name": "zod-rs-node",
+  "version": "0.1.1",
+  "private": true
 }
