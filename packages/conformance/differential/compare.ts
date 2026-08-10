@@ -74,34 +74,64 @@ export function show(value: unknown): string {
 
 export interface Diff { eq: boolean; at?: string }
 
-export function deepEqual(a: unknown, b: unknown, at: string): Diff { if (typeof a === "number" && typeof b === "number") {
-  const eq = (Number.isNaN(a) && Number.isNaN(b)) || Object.is(a, b);
-  return eq ? { eq: true } : { eq: false, at: `${at} (${show(a)} vs ${show(b)})` };
-}
-if (a === b) return { eq: true };
-if (a === undefined || b === undefined) return { eq: false, at };
-if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return { eq: false, at: `${at} (${show(a)} vs ${show(b)})` };
-if (Array.isArray(a) || Array.isArray(b)) {
-  if (!Array.isArray(a) || !Array.isArray(b)) return { eq: false, at };
-  if (a.length !== b.length) return { eq: false, at: `${at} (length ${a.length} vs ${b.length})` };
-  for (let i = 0; i < a.length; i++) {
-    const sub = deepEqual(a[i], b[i], `${at}[${i}]`);
+type CompareMode = "exact" | "issue";
+
+/** Shared recursive core: one traversal, two key-set policies. */
+function compareValues(a: unknown, b: unknown, at: string, mode: CompareMode): Diff {
+  if (typeof a === "number" && typeof b === "number") {
+    const eq = (Number.isNaN(a) && Number.isNaN(b)) || Object.is(a, b);
+    return eq ? { eq: true } : { eq: false, at: `${at} (${show(a)} vs ${show(b)})` };
+  }
+  if (a === b) return { eq: true };
+  if (a === undefined || b === undefined) return { eq: false, at };
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") {
+    return { eq: false, at: `${at} (${show(a)} vs ${show(b)})` };
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return { eq: false, at };
+    if (a.length !== b.length) return { eq: false, at: `${at} (length ${a.length} vs ${b.length})` };
+    for (let i = 0; i < a.length; i++) {
+      const sub = compareValues(a[i], b[i], `${at}[${i}]`, mode);
+      if (!sub.eq) return sub;
+    }
+    return { eq: true };
+  }
+
+  const keysOf = (o: object) => {
+    const keys = Object.keys(o);
+    // Issue-payload parity: a present key whose value is undefined is treated
+    // as if the key were absent, matching the TS/Rust issue-construction sites.
+    if (mode === "issue") {
+      return keys.filter((k) => (o as Record<string, unknown>)[k] !== undefined);
+    }
+    // Exact parsed-data parity: every own enumerable key counts, including
+    // undefined-valued keys. This catches `{}` vs `{ a: undefined }` in output.
+    return keys;
+  };
+
+  const aKeys = keysOf(a);
+  const bKeys = keysOf(b);
+  if (aKeys.length !== bKeys.length || !aKeys.every((k) => bKeys.includes(k))) {
+    return { eq: false, at: `${at} (keys [${aKeys}] vs [${bKeys}])` };
+  }
+  for (const k of aKeys) {
+    const sub = compareValues((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${at}.${k}`, mode);
     if (!sub.eq) return sub;
   }
   return { eq: true };
 }
-// Object keys with value === undefined count as absent (issue payload parity).
-const keysOf = (o: object) => Object.keys(o).filter((k) => (o as Record<string, unknown>)[k] !== undefined);
-const aKeys = keysOf(a);
-const bKeys = keysOf(b);
-if (aKeys.length !== bKeys.length || !aKeys.every((k) => bKeys.includes(k))) {
-  return { eq: false, at: `${at} (keys [${aKeys}] vs [${bKeys}])` };
+
+/** Exact parsed-data comparison: all own enumerable keys, including undefined-valued keys. */
+export function exactDataEqual(a: unknown, b: unknown, at: string): Diff {
+  const result = compareValues(a, b, at, "exact");
+  return result;
 }
-for (const k of aKeys) {
-  const sub = deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], `${at}.${k}`);
-  if (!sub.eq) return sub;
+
+/** Issue-payload comparison: undefined-valued keys are treated as absent. */
+export function issuePayloadEqual(a: unknown, b: unknown, at: string): Diff {
+  const result = compareValues(a, b, at, "issue");
+  return result;
 }
-return { eq: true }; }
 
 export function compareResults(both: BothResults): Comparison {
   if (both.refThrew !== null) {
@@ -122,7 +152,7 @@ export function compareResults(both: BothResults): Comparison {
     return { match: false, diffTag: "success-flag", detail: `ref.success=${ref.success} native.success=${native.success}` };
   }
   if (ref.success && native.success) {
-    const sub = deepEqual(ref.data, native.data, "$");
+    const sub = exactDataEqual(ref.data, native.data, "$");
     return sub.eq ? { match: true, diffTag: null, detail: null } : { match: false, diffTag: "data", detail: `data differ at ${sub.at}` };
   }
   const refIssues = (ref as SafeParseFailure).error.issues;
@@ -135,7 +165,7 @@ export function compareResults(both: BothResults): Comparison {
     };
   }
   for (let i = 0; i < refIssues.length; i++) {
-    const sub = deepEqual(refIssues[i], nativeIssues[i], `issues[${i}]`);
+    const sub = issuePayloadEqual(refIssues[i], nativeIssues[i], `issues[${i}]`);
     if (!sub.eq) {
       return {
         match: false,

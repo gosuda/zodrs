@@ -147,6 +147,28 @@ that surface if zodrs does not re-export it.
 - **Rewritten to:** `import { util as zc } from "zodrs/core"`
 - **Note:** Same as above.
 
+## Noted: inert upstream tests (not excised)
+
+These files remain in the vendored corpus unchanged. Their active tests do not
+exercise the behavior named by the file or test title, so passing them provides
+no conformance evidence for that behavior.
+
+### `classic/tests/lazy.test.ts` — `"mutual recursion with cyclical data"`
+
+- **Present behavior:** The test constructs two plain objects, links them into a
+  cycle, and makes no schema, parse call, or assertion.
+- **Disposition:** The test is inert, not excised. zodrs owns a separate core
+  regression that constructs mutually recursive lazy schemas, parses cyclic
+  input, and pins the termination/error behavior under both interpreter and
+  codegen execution.
+
+### `classic/tests/coalesce.test.ts` — `"coalesce"`
+
+- **Present behavior:** The only active assertion is `expect(true).toBe(true)`;
+  the sample that calls `.coalesce()` is commented out.
+- **Disposition:** The test is inert, not excised. Zod v4.4.3 exposes no
+  `coalesce` API, so zodrs does not invent or test one.
+
 ## Summary
 
 | Category | Count |
@@ -157,5 +179,6 @@ that surface if zodrs does not re-export it.
 | Deprecated `message` parameter alias noted | ~6+ files (not excised) |
 | Deprecated type aliases noted | 1 (`ZodErrorMap`) |
 | Internal module names noted | 5 names across 6 files |
+| Inert upstream tests noted (not excised) | 2 (`lazy.test.ts`, `coalesce.test.ts`) |
 | **Total source files** | **109** |
 | **Total vendored files** | **108** (109 − 1 excised) |

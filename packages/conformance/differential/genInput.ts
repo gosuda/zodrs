@@ -1,5 +1,5 @@
 import type { Descriptor, Json } from "./descriptor.js";
-import { buildSchema, type AnySchema } from "./descriptor.js";
+import type { AnySchema } from "./descriptor.js";
 import { EXTRA_KEYS, FORMAT_VALID, WEIRD_KEYS } from "./genSchema.js";
 import { Rng } from "./prng.js";
 
@@ -89,14 +89,20 @@ function genJsonScalar(rng: Rng): Json {
   return rng.pick(["s", "t", "", "x y"]);
 }
 
-function genValidObject(rng: Rng, shape: [string, Descriptor][], mode: string): Json {
+function genValidObject(
+  rng: Rng,
+  shape: [string, Descriptor][],
+  mode: string,
+  catchall: Descriptor | null,
+): Json {
   const out: Record<string, Json> = {};
   for (const [key, child] of shape) {
-    if ((child.k === "optional" || child.k === "default") && rng.chance(0.35)) continue;
+    if ((child.k === "optional" || child.k === "exactOptional" || child.k === "default" || child.k === "prefault") && rng.chance(0.35)) continue;
     setOwn(out, key, genValid(rng, child));
   }
-  if (mode !== "strict" && rng.chance(0.3)) {
-    // Extra keys exercise strip (drop + dirty) and passthrough (retain).
+  if (catchall !== null && rng.chance(0.5)) {
+    for (let i = 0, extras = rng.int(1, 2); i < extras; i++) setOwn(out, rng.pick(EXTRA_KEYS), genValid(rng, catchall));
+  } else if (mode !== "strict" && rng.chance(0.3)) {
     for (let i = 0, extras = rng.int(1, 2); i < extras; i++) setOwn(out, rng.pick(EXTRA_KEYS), genJsonScalar(rng));
   }
   return out;
@@ -108,11 +114,19 @@ function genValid(rng: Rng, d: Descriptor): Json {
     case "number": return genValidNumber(rng, d.checks);
     case "boolean": return rng.chance(0.5);
     case "null": return null;
+    case "any":
+    case "unknown": return genJsonScalar(rng);
     case "literal":
     case "enum": return rng.pick(d.values) as Json;
-    case "object": return genValidObject(rng, d.shape, d.mode);
+    case "object": return genValidObject(rng, d.shape, d.mode, d.catchall);
     case "array": return Array.from({ length: rng.int(d.min, Math.max(d.min, Math.min(d.max, d.min + 4))) }, () => genValid(rng, d.el));
-    case "tuple": return d.items.map((item) => genValid(rng, item));
+    case "tuple": {
+      const result = d.items.map((item) => genValid(rng, item));
+      if (d.rest !== null) {
+        for (let i = 0, count = rng.int(0, 2); i < count; i++) result.push(genValid(rng, d.rest));
+      }
+      return result;
+    }
     case "union": return genValid(rng, rng.pick(d.options));
     case "discunion": {
       const opt = rng.pick(d.options);
@@ -132,38 +146,57 @@ function genValid(rng: Rng, d: Descriptor): Json {
       }
       return out;
     }
-    case "optional": return genValid(rng, d.inner);
+    case "partialRecord": {
+      const out: Record<string, Json> = {};
+      for (const key of d.keys) {
+        if (rng.chance(0.5)) setOwn(out, key, genValid(rng, d.value));
+      }
+      return out;
+    }
+    case "optional":
+    case "exactOptional":
+    case "nonoptional":
+    case "default":
+    case "prefault":
+    case "lazy": return genValid(rng, d.inner);
     case "nullable": return rng.chance(0.3) ? null : genValid(rng, d.inner);
-    case "default": return genValid(rng, d.inner);
     case "catch":
-      // 25% of the time feed the catch an input its inner schema rejects.
       if (rng.chance(0.25)) {
         const wrong = mistypedValue(rng, d.inner);
         if (wrong !== undefined) return wrong;
       }
       return genValid(rng, d.inner);
+    case "templateLiteral": return `${d.prefix}${rng.pick(["value", "", "héllo"])}${d.suffix}`;
   }
 }
 
 /** A JSON value the descriptor's top-level type definitely rejects, or undefined. */
 function mistypedValue(rng: Rng, d: Descriptor): Json | undefined {
   switch (d.k) {
-    case "string":
+    case "string": return d.coerce ? undefined : rng.int(0, 1000);
     case "enum": return rng.int(0, 1000);
-    case "number": return "not-a-number";
-    case "boolean": return rng.int(0, 1);
+    case "number": return d.coerce ? undefined : "not-a-number";
+    case "boolean": return d.coerce ? undefined : rng.int(0, 1);
     case "null": return rng.int(0, 1);
+    case "any":
+    case "unknown": return undefined;
     case "literal": return "\0literal-miss";
+    case "templateLiteral": return rng.int(0, 1000);
     case "object":
     case "discunion":
-    case "record": return [1, 2];
+    case "record":
+    case "partialRecord": return [1, 2];
     case "array":
     case "tuple": return { wrong: true };
     case "union": return undefined;
     case "optional":
+    case "exactOptional":
     case "nullable":
+    case "nonoptional":
     case "default":
-    case "catch": return mistypedValue(rng, d.inner);
+    case "prefault":
+    case "catch":
+    case "lazy": return mistypedValue(rng, d.inner);
   }
 }
 

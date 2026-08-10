@@ -3,7 +3,7 @@
  * of the Plan IR grammar. Deterministic given an Rng.
  */
 
-import type { Descriptor, FormatName, Json, NumberCheck, StringCheck } from "./descriptor.js";
+import type { Descriptor, FormatName, JsonScalar, NumberCheck, StringCheck } from "./descriptor.js";
 import { Rng } from "./prng.js";
 
 const MAX_DEPTH = 5;
@@ -101,7 +101,7 @@ function genNumberChecks(rng: Rng): NumberCheck[] {
   return checks;
 }
 
-export function genJsonScalar(rng: Rng): Json {
+export function genJsonScalar(rng: Rng): JsonScalar {
   const roll = rng.int(0, 5);
   if (roll === 0) return null;
   if (roll === 1) return rng.chance(0.5);
@@ -111,32 +111,35 @@ export function genJsonScalar(rng: Rng): Json {
 }
 
 function genLeaf(rng: Rng): Descriptor {
-  switch (rng.int(0, 6)) {
-    case 0:
-    case 1: return { k: "string", checks: genStringChecks(rng) };
-    case 2:
-    case 3: return { k: "number", checks: genNumberChecks(rng) };
-    case 4: return { k: "boolean" };
-    case 5: {
+  switch (rng.int(0, 10)) {
+    case 0: return { k: "string", checks: genStringChecks(rng) };
+    case 1: return { k: "string", checks: [], coerce: true };
+    case 2: return { k: "number", checks: genNumberChecks(rng) };
+    case 3: return { k: "number", checks: genNumberChecks(rng), coerce: true };
+    case 4: return { k: "boolean", coerce: rng.chance(0.35) };
+    case 5: return { k: "null" };
+    case 6: return { k: "any" };
+    case 7: return { k: "unknown" };
+    case 8: {
       const values = Array.from({ length: rng.int(1, 4) }, () =>
         rng.pick([null, true, false, 0, 1, -7, 2.5, "red", "blue", "", "héllo"] as const));
       return { k: "literal", values: [...new Set(values)] };
     }
-    default: {
+    case 9: {
       const pool = ["a", "b", "c", "red", "blue", "", "with space", "héllo"];
       const values = [...new Set(Array.from({ length: rng.int(2, 5) }, () => rng.pick(pool)))];
       return { k: "enum", values };
     }
+    default: return { k: "templateLiteral", prefix: rng.pick(["id-", "", "pre:"]), suffix: rng.pick(["", "-end", ":post"]) };
   }
 }
 
-export function genDescriptor(rng: Rng, state: GenState, depth: number, allowWrapper: boolean): Descriptor {
+export function genDescriptor(rng: Rng, state: GenState, depth: number): Descriptor {
   state.nodes++;
   if (depth >= MAX_DEPTH || state.nodes >= NODE_BUDGET) return genLeaf(rng);
-  const roll = rng.int(0, 19);
+  const roll = rng.int(0, 20);
   if (roll <= 8) return genLeaf(rng);
   if (roll <= 12) {
-    // object
     const mode = rng.pick(["strip", "strip", "strict", "passthrough"] as const);
     const taken = new Set<string>();
     const shape: [string, Descriptor][] = Array.from({ length: rng.int(0, 5) }, () => {
@@ -144,15 +147,20 @@ export function genDescriptor(rng: Rng, state: GenState, depth: number, allowWra
       taken.add(key);
       return [key, genWrapped(rng, state, depth + 1)];
     });
-    return { k: "object", mode, shape };
+    const catchall = rng.chance(0.2) ? genDescriptor(rng, state, depth + 1) : null;
+    return { k: "object", mode, shape, catchall };
   }
   if (roll <= 14) {
     const min = rng.int(0, 2);
     return { k: "array", el: genWrapped(rng, state, depth + 1), min, max: min + rng.int(0, 5) };
   }
-  if (roll === 15) return { k: "tuple", items: Array.from({ length: rng.int(0, 3) }, () => genWrapped(rng, state, depth + 1)) };
+  if (roll === 15) {
+    const items = Array.from({ length: rng.int(0, 3) }, () => genWrapped(rng, state, depth + 1));
+    const rest = rng.chance(0.35) ? genDescriptor(rng, state, depth + 1) : null;
+    return { k: "tuple", items, rest };
+  }
   if (roll === 16) {
-    const options = Array.from({ length: rng.int(2, 3) }, () => genDescriptor(rng, state, depth + 1, false));
+    const options = Array.from({ length: rng.int(2, 3) }, () => genDescriptor(rng, state, depth + 1));
     return { k: "union", options };
   }
   if (roll === 17) {
@@ -174,45 +182,92 @@ export function genDescriptor(rng: Rng, state: GenState, depth: number, allowWra
       }),
     };
   }
-  return { k: "record", value: genWrapped(rng, state, depth + 1) };
+  if (roll === 18) return { k: "record", value: genWrapped(rng, state, depth + 1) };
+  if (roll === 19) {
+    const keys = [...new Set(Array.from({ length: rng.int(1, 4) }, () => rng.pick(SHAPE_KEYS)))];
+    return { k: "partialRecord", keys, value: genWrapped(rng, state, depth + 1) };
+  }
+  return { k: "lazy", inner: genDescriptor(rng, state, depth + 1) };
 }
 
 /** Wrappers apply anywhere except the root (undefined is not byte-representable). */
 function genWrapped(rng: Rng, state: GenState, depth: number): Descriptor {
-  const inner = genDescriptor(rng, state, depth, true);
+  const inner = genDescriptor(rng, state, depth);
   if (!rng.chance(0.22)) return inner;
-  const roll = rng.int(0, 4);
+  const roll = rng.int(0, 6);
   if (roll === 0) return { k: "optional", inner };
-  if (roll === 1) return { k: "nullable", inner };
-  if (roll === 2) return { k: "default", inner, value: defaultValueFor(inner) };
-  return { k: "catch", inner, value: defaultValueFor(inner) };
+  if (roll === 1) return { k: "exactOptional", inner };
+  if (roll === 2) return { k: "nullable", inner };
+  if (roll === 3) return { k: "nonoptional", inner };
+  if (roll === 4) return { k: "default", inner, value: defaultValueFor(inner) };
+  if (roll === 5) return { k: "catch", inner, value: defaultValueFor(inner) };
+  return supportsScalarPrefault(inner)
+    ? { k: "prefault", inner, value: defaultValueFor(inner) }
+    : { k: "default", inner, value: defaultValueFor(inner) };
 }
 
-/** A fixed, obviously-valid fallback value for default/catch, by descriptor kind. */
-function defaultValueFor(d: Descriptor): Json {
+/** A JSON scalar suitable for wrapper fallbacks. */
+function defaultValueFor(d: Descriptor): JsonScalar {
   switch (d.k) {
     case "string": return "fallback";
     case "number": return 7;
     case "boolean": return true;
-    case "null": return null;
+    case "null":
+    case "any":
+    case "unknown": return null;
     case "literal":
-    case "enum": return d.values[0] as Json;
-    case "object": return {};
-    case "array": return [];
-    case "tuple": return d.items.map(defaultValueFor);
-    case "union": return defaultValueFor(d.options[0]);
-    case "discunion": return { [d.key]: d.options[0].tag };
-    case "record": return {};
+    case "enum": return d.values[0] ?? null;
+    case "templateLiteral": return `${d.prefix}fallback${d.suffix}`;
     case "optional":
-    case "nullable": return null;
+    case "exactOptional":
+    case "nullable":
+    case "nonoptional":
+    case "lazy": return defaultValueFor(d.inner);
     case "default":
+    case "prefault":
     case "catch": return d.value;
+    case "object":
+    case "array":
+    case "tuple":
+    case "union":
+    case "discunion":
+    case "record":
+    case "partialRecord": return null;
+  }
+}
+
+function supportsScalarPrefault(d: Descriptor): boolean {
+  switch (d.k) {
+    case "string":
+    case "number":
+    case "boolean":
+    case "null":
+    case "any":
+    case "unknown":
+    case "literal":
+    case "enum":
+    case "templateLiteral": return true;
+    case "optional":
+    case "exactOptional":
+    case "nullable":
+    case "nonoptional":
+    case "default":
+    case "prefault":
+    case "catch":
+    case "lazy": return supportsScalarPrefault(d.inner);
+    case "object":
+    case "array":
+    case "tuple":
+    case "union":
+    case "discunion":
+    case "record":
+    case "partialRecord": return false;
   }
 }
 
 export function genSchemaDescriptor(seed: number): Descriptor {
   const rng = new Rng(seed);
-  return genDescriptor(rng, { nodes: 0 }, 0, false);
+  return genDescriptor(rng, { nodes: 0 }, 0);
 }
 
 export { EXTRA_KEYS, WEIRD_KEYS };
