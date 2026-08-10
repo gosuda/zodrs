@@ -87,7 +87,7 @@
     "selftest:native": "ZODRS_LOADER=native node dist/core/loader.selftest.js",
     "selftest:wasm": "ZODRS_LOADER=wasm node dist/core/loader.selftest.js",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
-    "prepack": "pnpm run build:native && pnpm run build:wasm && pnpm run build && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
+    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
     "test": "vitest run"
   },
   "engines": {
