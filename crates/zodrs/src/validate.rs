@@ -1334,10 +1334,10 @@ impl<'p> Validator<'p> {
                 Missing::Cycle
             }
         };
-        if let Missing::Value(value) = &result {
-            if let Some(slot) = self.missing_values.get_mut(id as usize) {
-                *slot = Some(value.clone());
-            }
+        if let Missing::Value(value) = &result
+            && let Some(slot) = self.missing_values.get_mut(id as usize)
+        {
+            *slot = Some(value.clone());
         }
         result
     }
