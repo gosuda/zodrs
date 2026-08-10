@@ -301,7 +301,7 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
         // only a missing key. `__proto__` is already handled everywhere.
         if (Object.hasOwn(Object.prototype as object, key)) state.protoKey = true;
         const child = schema.shape[key];
-        if (!child) continue;
+        if (!child) return poisonNode(state);
         values.push(emit(child, state));
         if (state.unsupported) return poisonNode(state);
         optional.push(optinOf(child) === "optional");
@@ -416,13 +416,14 @@ export function compilePlan(root: SchemaNode): CompiledPlan {
   return {
     json: JSON.stringify(state.nodes),
     hostFns: state.hostFns,
-    // Three shapes disqualify the byte path outright. A bigint node parses to a
-    // JS `BigInt`, which has no JSON encoding, so the Rust walk can neither
-    // return the right value nor compare against bounds the plan carries as
-    // decimal strings. A shape key naming an `Object.prototype` member reads
-    // through the prototype when absent, which the scanner cannot see. Any
-    // unsupported node/check/value means the wire plan cannot be trusted. The TS
-    // path owns all three.
+    // Four shapes disqualify the byte path outright. A host function
+    // (refinement/transform) cannot cross the wire, so the Rust walk can never
+    // run it. A bigint node parses to a JS `BigInt`, which has no JSON
+    // encoding, so the Rust walk can neither return the right value nor
+    // compare against bounds the plan carries as decimal strings. A shape key
+    // naming an `Object.prototype` member reads through the prototype when
+    // absent, which the scanner cannot see. Any unsupported node/check/value
+    // means the wire plan cannot be trusted. The TS path owns all four.
     jsonEligible: !state.unsupported && state.hostFns.length === 0 && !state.bigint && !state.protoKey,
     objectShapeKeys: [...state.objectShapeKeys],
   };
