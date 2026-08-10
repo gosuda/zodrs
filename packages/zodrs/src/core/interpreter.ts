@@ -185,9 +185,14 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
         addIssue(context, { code: "invalid_format", format: check.format ?? "unknown", input: value, inst: { error: runtime.error }, path, continue: runtime.abort !== true } as $ZodRawIssue);
       } else if (check.op === "overwrite" || check.op === "transform" || check.op === "preprocess") value = result;
     } else if (check.c === "property") {
-      const propertyValue = (value as Record<PropertyKey, unknown>)[check.key];
-      const result = runSync(check.schema, propertyValue, context, [...path, check.key]);
-      if (result === FAIL) failed = true;
+      if (value === null || value === undefined) {
+        addIssue(context, { code: "invalid_type", expected: "object", input: value, path: [...path, check.key] } as $ZodRawIssue);
+        failed = true;
+      } else {
+        const propertyValue = (value as Record<PropertyKey, unknown>)[check.key];
+        const result = runSync(check.schema, propertyValue, context, [...path, check.key]);
+        if (result === FAIL) failed = true;
+      }
     } else {
       const origin = node.kind === "array" ? "array" : node.kind === "set" ? "set" : node.kind === "map" ? "map" : node.kind;
       switch (check.c) {
@@ -910,11 +915,26 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
         const shouldRun = runtime.when({ value, issues: context.issues ?? [] });
         if (!shouldRun) continue;
       }
-      const before = context.issues?.length ?? 0;
-      const propertyValue = (value as Record<PropertyKey, unknown>)[runtime.check.key];
-      const result = await runAsync(runtime.check.schema, propertyValue, context, [...path, runtime.check.key]);
-      if (result === FAIL || (context.issues?.length ?? 0) > before) failed = true;
-      if ((context.issues?.length ?? 0) > before && abortedSince(context, before)) break;
+      // Flush queued synchronous checks (e.g. trim) before reading the
+      // property so declaration order is preserved on the async path.
+      if (synchronous.length > 0) {
+        const flushNode = { ...node, checks: synchronous } as SchemaNode;
+        const flushResult = applyChecksSync(flushNode, value, context, path);
+        if (flushResult === FAIL) failed = true;
+        else value = flushResult;
+        synchronous.length = 0;
+      }
+      const check = runtime.check;
+      if (value === null || value === undefined) {
+        addIssue(context, { code: "invalid_type", expected: "object", input: value, path: [...path, check.key] } as $ZodRawIssue);
+        failed = true;
+      } else {
+        const before = context.issues?.length ?? 0;
+        const propertyValue = (value as Record<PropertyKey, unknown>)[check.key];
+        const result = await runAsync(check.schema, propertyValue, context, [...path, check.key]);
+        if (result === FAIL || (context.issues?.length ?? 0) > before) failed = true;
+        if ((context.issues?.length ?? 0) > before && abortedSince(context, before)) break;
+      }
       continue;
     }
     if (runtime.check.c !== "host_runtime") { synchronous.push(runtime); continue; }
