@@ -31,6 +31,16 @@ const MAX_SAFE_INT: f64 = 9_007_199_254_740_991.0;
 /// above it the quadratic term would dominate.
 const RECORD_LINEAR_MAX: usize = 32;
 
+/// The recursive DOM validator first aborted at depth 119 under the default
+/// Rust test-thread stack. A 64-level cap leaves a wide margin for frame-size
+/// changes and falls back before sonic-rs or recursive validation.
+const DOM_MAX_DEPTH: usize = 64;
+const DOM_KIND_WORDS: usize = DOM_MAX_DEPTH.div_ceil(64);
+
+/// Bounds wrapper/union traversal on absent input without allocating a visited
+/// set. Exhaustion is treated as a cyclic or pathologically deep graph.
+const ABSENT_MAX_HOPS: usize = 256;
+
 /// The result of a byte-path validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -66,6 +76,9 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
             payload: None,
         };
     }
+    if !within_dom_depth(input) {
+        return Verdict::fallback();
+    }
     let value: Value = match sonic_rs::from_slice(input) {
         Ok(v) => v,
         Err(_) => return Verdict::fallback(),
@@ -77,11 +90,17 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         path: PathRef::new(),
         dirty: false,
         nonfinite: false,
+        fallback: false,
         fail_count: 0,
-        quiet: false,
+        catch_count: 0,
+        issue_mode: IssueMode::Collect,
+        missing_values: vec![None; plan.nodes().len()],
     };
     v.check(plan.root(), &value);
 
+    if v.fallback {
+        return Verdict::fallback();
+    }
     if !v.issues.is_empty() {
         return Verdict {
             status: 2,
@@ -101,11 +120,26 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         return Verdict::fallback();
     }
     let mut out = String::new();
-    write_output(plan, plan.root(), &value, &mut out);
+    write_output(plan, plan.root(), &value, &mut out, &v.missing_values);
     Verdict {
         status: 1,
         payload: Some(out),
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IssueMode {
+    Collect,
+    Suppress,
+}
+
+#[derive(Clone, Copy)]
+struct ValidationMark {
+    issues_len: usize,
+    fail_count: usize,
+    catch_count: usize,
+    dirty: bool,
+    nonfinite: bool,
 }
 
 struct Validator<'p> {
@@ -119,12 +153,20 @@ struct Validator<'p> {
     /// represent `Infinity` in the rewritten output, so the verdict must
     /// defer to the JS path (`status: 3`).
     nonfinite: bool,
+    /// Set when bounded plan traversal detects a cycle or pathological wrapper
+    /// graph. The caller must use the JS path instead of recursing further.
+    fallback: bool,
     /// Monotonic count of every issue the walk would have emitted, including
     /// suppressed ones. Union branch probing detects failure from the delta
     /// without materializing the branch's issue list.
     fail_count: usize,
-    /// When set, issue construction is suppressed (union dry-run probing).
-    quiet: bool,
+    /// Counts catch fallbacks so Optional can detect and swallow a fallback
+    /// produced while evaluating absent input.
+    catch_count: usize,
+    /// Controls issue allocation during union dry-run probing.
+    issue_mode: IssueMode,
+    /// Canonical concrete outputs produced by missing fields or tuple slots.
+    missing_values: Vec<Option<Json>>,
 }
 
 impl<'p> Validator<'p> {
@@ -135,18 +177,36 @@ impl<'p> Validator<'p> {
         &self.plan.dispatch[id as usize]
     }
 
+    fn mark(&self) -> ValidationMark {
+        ValidationMark {
+            issues_len: self.issues.len(),
+            fail_count: self.fail_count,
+            catch_count: self.catch_count,
+            dirty: self.dirty,
+            nonfinite: self.nonfinite,
+        }
+    }
+
+    fn restore(&mut self, mark: ValidationMark) {
+        self.issues.truncate(mark.issues_len);
+        self.fail_count = mark.fail_count;
+        self.catch_count = mark.catch_count;
+        self.dirty = mark.dirty;
+        self.nonfinite = mark.nonfinite;
+    }
+
     fn push(&mut self, issue: Issue) {
         self.fail_count += 1;
-        if !self.quiet {
+        if self.issue_mode == IssueMode::Collect {
             self.issues.push(issue);
         }
     }
 
     /// Emit the issue built by `build`, counting it even when suppressed.
-    /// In `quiet` mode the closure never runs, so probing allocates nothing.
+    /// In suppress mode the closure never runs, so probing allocates nothing.
     fn emit(&mut self, build: impl FnOnce(&PathRef<'p>) -> Issue) {
         self.fail_count += 1;
-        if !self.quiet {
+        if self.issue_mode == IssueMode::Collect {
             self.issues.push(build(&self.path));
         }
     }
@@ -275,21 +335,25 @@ impl<'p> Validator<'p> {
                         self.check(*item_id, elem);
                         self.path.pop();
                     } else {
-                        // Absent slot: the item runs on `undefined`. A failing
-                        // optional-tail item is swallowed (its slot and the
-                        // remaining tail drop out of the output); a passing
-                        // default/catch fills the slot, rewriting the input.
-                        match absent_result(self.plan, *item_id) {
-                            Absent::Fail => {
-                                if i >= optout_start {
-                                    break;
-                                }
-                                self.path.push(idx(i));
-                                self.check_missing(*item_id);
-                                self.path.pop();
+                        let mark = self.mark();
+                        self.path.push(idx(i));
+                        let mut hops = ABSENT_MAX_HOPS;
+                        let missing = self.eval_missing(*item_id, &mut hops);
+                        self.path.pop();
+                        match missing {
+                            Missing::Fail if i >= optout_start => {
+                                let catches = self.catch_count;
+                                self.restore(mark);
+                                self.catch_count = catches;
+                                break;
                             }
-                            Absent::Undefined => {}
-                            Absent::Value(..) => self.dirty = true,
+                            Missing::Fail => {}
+                            Missing::Cycle => {
+                                self.fallback = true;
+                                break;
+                            }
+                            Missing::Undefined => {}
+                            Missing::Value(_) => self.dirty = true,
                         }
                     }
                 }
@@ -364,7 +428,6 @@ impl<'p> Validator<'p> {
                     // key schema round-trips through a parsed JSON string.
                     let before_i = self.issues.len();
                     let before_f = self.fail_count;
-                    let saved = std::mem::take(&mut self.path);
                     if string_key {
                         self.string_checks(key_id, Cow::Borrowed(k));
                     } else {
@@ -372,14 +435,19 @@ impl<'p> Validator<'p> {
                             sonic_rs::from_str(&json_string(k)).unwrap_or_default();
                         self.check(key_id, &key_val);
                     }
-                    self.path = saved;
-                    if self.fail_count != before_f && !self.quiet {
-                        let key_issues = self.issues.split_off(before_i);
-                        self.push(
-                            Issue::new("invalid_key", &self.path)
-                                .with("origin", Json::from("record"))
-                                .with("issues", issues_to_value(&key_issues)),
-                        );
+                    let key_failed = self.fail_count != before_f;
+                    if key_failed {
+                        if self.issue_mode == IssueMode::Collect {
+                            let key_issues = self.issues.split_off(before_i);
+                            self.path.push(PathSegRef::Key(Cow::Owned(k.to_string())));
+                            self.push(
+                                Issue::new("invalid_key", &self.path)
+                                    .with("origin", Json::from("record"))
+                                    .with("issues", issues_to_value(&key_issues)),
+                            );
+                            self.path.pop();
+                        }
+                        continue;
                     }
                     self.path.push(PathSegRef::Key(Cow::Owned(k.to_string())));
                     self.check(val_id, entry);
@@ -388,6 +456,7 @@ impl<'p> Validator<'p> {
             }
 
             PlanNode::Optional { inner }
+            | PlanNode::ExactOptional { inner }
             | PlanNode::NonOptional { inner }
             | PlanNode::Readonly { inner }
             | PlanNode::Lazy { inner }
@@ -411,6 +480,7 @@ impl<'p> Validator<'p> {
                 if self.fail_count != before_f {
                     self.issues.truncate(before_i);
                     self.fail_count = before_f;
+                    self.catch_count += 1;
                     self.dirty = true; // catch value replaces the input
                 }
             }
@@ -422,21 +492,24 @@ impl<'p> Validator<'p> {
                     self.check(b, value);
                 }
             }
-            PlanNode::TemplateLiteral { .. } => {
-                let Some(s) = value.as_str() else {
-                    return self.invalid_type("string");
-                };
-                if let Some(re) = &self.dispatch(id).template
-                    && !re.is_match(s)
-                {
+            PlanNode::TemplateLiteral { pattern } => {
+                let pattern = pattern.clone();
+                let matches = value.as_str().is_some_and(|text| {
+                    self.dispatch(id)
+                        .template
+                        .as_ref()
+                        .is_some_and(|re| re.is_match(text))
+                });
+                if !matches {
                     self.emit(|p| {
                         Issue::new("invalid_format", p)
-                            .with("origin", Json::from("string"))
                             .with("format", Json::from("template_literal"))
+                            .with("pattern", Json::from(pattern))
                     });
                 }
             }
             PlanNode::Host { .. } => {} // unreachable: host poisons eligibility
+            PlanNode::Unsupported => self.fallback = true,
         }
     }
 
@@ -456,8 +529,14 @@ impl<'p> Validator<'p> {
             | PlanNode::Prefault { .. }
             | PlanNode::Catch { .. }
             | PlanNode::Host { .. } => {}
-            PlanNode::String { .. } | PlanNode::TemplateLiteral { .. } => {
-                self.invalid_type("string");
+            PlanNode::String { .. } => self.invalid_type("string"),
+            PlanNode::TemplateLiteral { pattern } => {
+                let pattern = pattern.clone();
+                self.emit(|p| {
+                    Issue::new("invalid_format", p)
+                        .with("format", Json::from("template_literal"))
+                        .with("pattern", Json::from(pattern))
+                });
             }
             PlanNode::Number { .. } => self.invalid_type("number"),
             PlanNode::Boolean { .. } => self.invalid_type("boolean"),
@@ -479,7 +558,8 @@ impl<'p> Validator<'p> {
                 let values = values.clone();
                 self.invalid_value(values);
             }
-            PlanNode::Nullable { inner }
+            PlanNode::ExactOptional { inner }
+            | PlanNode::Nullable { inner }
             | PlanNode::Readonly { inner }
             | PlanNode::Lazy { inner }
             | PlanNode::Promise { inner } => {
@@ -507,7 +587,7 @@ impl<'p> Validator<'p> {
                     if self.fail_count == before_f {
                         return; // an option accepts undefined
                     }
-                    if !self.quiet {
+                    if self.issue_mode == IssueMode::Collect {
                         let branch = self.issues.split_off(before_i);
                         branch_errors.push(issues_to_value(&branch));
                     }
@@ -516,6 +596,7 @@ impl<'p> Validator<'p> {
                     Issue::new("invalid_union", p).with("errors", Json::Array(branch_errors))
                 });
             }
+            PlanNode::Unsupported => self.fallback = true,
         }
     }
 
@@ -528,7 +609,7 @@ impl<'p> Validator<'p> {
     fn check_string(&mut self, id: NodeId, value: &Value, coerce: bool) {
         let cur: Cow<'_, str> = if let Some(s) = value.as_str() {
             Cow::Borrowed(s)
-        } else if coerce && (value.is_number() || value.is_boolean()) {
+        } else if coerce {
             self.dirty = true;
             Cow::Owned(coerce_to_string(value))
         } else {
@@ -583,7 +664,9 @@ impl<'p> Validator<'p> {
                 }
                 Check::Includes { v, position } => {
                     let found = match position {
-                        Some(p) => cur.get(*p..).is_some_and(|tail| tail.contains(v)),
+                        Some(p) => cur
+                            .get(utf16_offset_to_byte(&cur, *p)..)
+                            .is_some_and(|s| s.contains(v)),
                         None => cur.contains(v),
                     };
                     if !found {
@@ -629,6 +712,10 @@ impl<'p> Validator<'p> {
                         cur = Cow::Owned(next);
                     }
                 }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.fallback = true;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -639,22 +726,21 @@ impl<'p> Validator<'p> {
         if let Some(f) = number_of(value) {
             n = f;
         } else if coerce {
-            match coerce_to_number(value) {
-                Some(f) => {
-                    // JS Number() yielding NaN fails z.number() as
-                    // invalid_type; Infinity validates but cannot be written
-                    // back as JSON, so the verdict defers to the JS path.
-                    if f.is_nan() {
-                        return self.invalid_type("number");
-                    }
-                    if !f.is_finite() {
-                        self.nonfinite = true;
-                    }
-                    n = f;
-                    self.dirty = true;
-                }
-                None => return self.invalid_type("number"),
+            let f = coerce_to_number(value);
+            // JS Number() yielding NaN reports the coerced type, not
+            // the source JSON type. Infinity cannot be written back.
+            if f.is_nan() {
+                return self.emit(|p| {
+                    Issue::new("invalid_type", p)
+                        .with("expected", Json::from("number"))
+                        .with("received", Json::from("NaN"))
+                });
             }
+            if !f.is_finite() {
+                self.nonfinite = true;
+            }
+            n = f;
+            self.dirty = true;
         } else {
             return self.invalid_type("number");
         }
@@ -690,6 +776,10 @@ impl<'p> Validator<'p> {
                 }
                 Check::NumberFormat { v } => self.number_format(*v, n),
                 Check::BigIntFormat { v } => self.bigint_format(*v, n),
+                Check::Property { .. } | Check::Unsupported => {
+                    self.fallback = true;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -807,6 +897,10 @@ impl<'p> Validator<'p> {
                         self.too_big(origin, *v, true, true);
                     }
                 }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.fallback = true;
+                    return;
+                }
                 _ => {}
             }
         }
@@ -820,6 +914,7 @@ impl<'p> Validator<'p> {
         let PlanNode::Object {
             keys,
             values,
+            optional,
             mode,
             catchall,
             ..
@@ -879,16 +974,15 @@ impl<'p> Validator<'p> {
         // missing-input issue.
         for (schema_i, key) in keys.iter().enumerate() {
             let slot = pos[schema_i];
-            if slot != u32::MAX {
+            if slot == u32::MAX {
+                self.check_missing_object_field(values[schema_i], optional[schema_i], key.as_str());
+                if self.fallback {
+                    return;
+                }
+            } else {
                 let child = known[slot as usize].1;
                 self.path.push(PathSegRef::Key(Cow::Borrowed(key.as_str())));
                 self.check(values[schema_i], child);
-                self.path.pop();
-            } else if has_default(self.plan, values[schema_i]) {
-                self.dirty = true;
-            } else {
-                self.path.push(PathSegRef::Key(Cow::Borrowed(key.as_str())));
-                self.check_missing(values[schema_i]);
                 self.path.pop();
             }
         }
@@ -916,19 +1010,43 @@ impl<'p> Validator<'p> {
             }
         }
     }
+    fn check_missing_object_field(&mut self, child_id: NodeId, optional_input: bool, key: &'p str) {
+        let mark = self.mark();
+        self.path.push(PathSegRef::Key(Cow::Borrowed(key)));
+        let mut hops = ABSENT_MAX_HOPS;
+        let missing = self.eval_missing(child_id, &mut hops);
+        self.path.pop();
+        match missing {
+            Missing::Fail if optional_input && self.dispatch(child_id).optout_optional => {
+                let catches = self.catch_count;
+                self.restore(mark);
+                self.catch_count = catches;
+            }
+            Missing::Fail => {}
+            Missing::Cycle => self.fallback = true,
+            Missing::Undefined if optional_input => {}
+            Missing::Value(_) if optional_input => self.dirty = true,
+            Missing::Undefined | Missing::Value(_) => {
+                self.path.push(PathSegRef::Key(Cow::Borrowed(key)));
+                self.invalid_type("nonoptional");
+                self.path.pop();
+            }
+        }
+    }
 
     fn check_union(&mut self, options: &[NodeId], value: &Value) {
-        let saved_quiet = self.quiet;
+        let saved_issue_mode = self.issue_mode;
         let union_path = self.path.clone();
         let union_dirty = self.dirty;
+        let union_nonfinite = self.nonfinite;
         let entry_fails = self.fail_count;
         // Dry-run pass: the first passing option wins. Failures are detected
         // from the fail counter with issue construction suppressed, so an
         // option that does not match costs no allocation.
         for opt in options {
-            self.quiet = true;
+            self.issue_mode = IssueMode::Suppress;
             self.check(*opt, value);
-            self.quiet = saved_quiet;
+            self.issue_mode = saved_issue_mode;
             if self.fail_count == entry_fails {
                 return; // first successful option wins
             }
@@ -937,6 +1055,7 @@ impl<'p> Validator<'p> {
             // next option is measured from a clean baseline.
             self.fail_count = entry_fails;
             self.dirty = union_dirty;
+            self.nonfinite = union_nonfinite;
         }
         // Every option failed: re-run with issue collection to build the
         // canonical branch errors. Sub-issues keep paths relative to the
@@ -1024,6 +1143,199 @@ impl<'p> Validator<'p> {
         self.path.pop();
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "missing input must follow every JSON-eligible wrapper and union"
+    )]
+    fn eval_missing(&mut self, id: NodeId, hops: &mut usize) -> Missing {
+        if *hops == 0 {
+            self.fallback = true;
+            return Missing::Cycle;
+        }
+        *hops -= 1;
+
+        let result = match self.node(id) {
+            PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
+                Missing::Undefined
+            }
+            PlanNode::Optional { inner } => {
+                let inner = *inner;
+                if self.dispatch(inner).optin_optional {
+                    let mark = self.mark();
+                    let before_catches = self.catch_count;
+                    match self.eval_missing(inner, hops) {
+                        Missing::Fail => {
+                            let catches = self.catch_count;
+                            self.restore(mark);
+                            self.catch_count = catches;
+                            Missing::Undefined
+                        }
+                        Missing::Value(_) if self.catch_count != before_catches => {
+                            let catches = self.catch_count;
+                            self.restore(mark);
+                            self.catch_count = catches;
+                            Missing::Undefined
+                        }
+                        other => other,
+                    }
+                } else {
+                    Missing::Undefined
+                }
+            }
+            PlanNode::ExactOptional { inner }
+            | PlanNode::Nullable { inner }
+            | PlanNode::Lazy { inner } => self.eval_missing(*inner, hops),
+            PlanNode::NonOptional { inner } => match self.eval_missing(*inner, hops) {
+                Missing::Undefined => {
+                    self.invalid_type("nonoptional");
+                    Missing::Fail
+                }
+                other => other,
+            },
+            PlanNode::Default { value, .. } => Missing::Value(value.clone()),
+            PlanNode::Prefault { inner, value, .. } => {
+                let (inner, value) = (*inner, value.clone());
+                self.eval_concrete(inner, &value)
+            }
+            PlanNode::Catch { inner, value, .. } => {
+                let (inner, value) = (*inner, value.clone());
+                let mark = self.mark();
+                match self.eval_missing(inner, hops) {
+                    Missing::Fail => {
+                        self.restore(mark);
+                        self.catch_count += 1;
+                        self.dirty = true;
+                        Missing::Value(value)
+                    }
+                    other => other,
+                }
+            }
+            PlanNode::Union { options } => {
+                let union_path = self.path.clone();
+                let mut branch_errors = Vec::new();
+                let mut selected = None;
+                for option in options.clone() {
+                    let mark = self.mark();
+                    self.path = PathRef::new();
+                    let branch = self.eval_missing(option, hops);
+                    self.path.clone_from(&union_path);
+                    match branch {
+                        Missing::Fail => {
+                            if self.issue_mode == IssueMode::Collect {
+                                let issues = self.issues.split_off(mark.issues_len);
+                                branch_errors.push(issues_to_value(&issues));
+                            }
+                            self.restore(mark);
+                        }
+                        success => {
+                            selected = Some(success);
+                            break;
+                        }
+                    }
+                }
+                if let Some(success) = selected {
+                    success
+                } else {
+                    self.emit(|path| {
+                        Issue::new("invalid_union", path).with("errors", Json::Array(branch_errors))
+                    });
+                    Missing::Fail
+                }
+            }
+            PlanNode::Intersection { left, right } => {
+                let (left, right) = (*left, *right);
+                let a = self.eval_missing(left, hops);
+                let b = self.eval_missing(right, hops);
+                match (a, b) {
+                    (Missing::Cycle, _) | (_, Missing::Cycle) => Missing::Cycle,
+                    (Missing::Undefined, Missing::Undefined) => Missing::Undefined,
+                    (Missing::Value(value), Missing::Undefined)
+                    | (Missing::Undefined, Missing::Value(value)) => Missing::Value(value),
+                    (Missing::Value(Json::Object(mut a)), Missing::Value(Json::Object(b))) => {
+                        a.extend(b);
+                        Missing::Value(Json::Object(a))
+                    }
+                    (Missing::Value(a), Missing::Value(b)) if a == b => Missing::Value(a),
+                    (Missing::Fail, _)
+                    | (_, Missing::Fail)
+                    | (Missing::Value(_), Missing::Value(_)) => Missing::Fail,
+                }
+            }
+            PlanNode::String { coerce: true, .. } => Missing::Value(Json::from("undefined")),
+            PlanNode::Boolean { coerce: true } => Missing::Value(Json::from(false)),
+            PlanNode::Number { coerce: true, .. } => {
+                self.emit(|path| {
+                    Issue::new("invalid_type", path)
+                        .with("expected", Json::from("number"))
+                        .with("received", Json::from("NaN"))
+                });
+                Missing::Fail
+            }
+            PlanNode::String { coerce: false, .. }
+            | PlanNode::Number { coerce: false, .. }
+            | PlanNode::Boolean { coerce: false }
+            | PlanNode::BigInt { .. }
+            | PlanNode::Date { .. }
+            | PlanNode::File { .. }
+            | PlanNode::Null
+            | PlanNode::Never
+            | PlanNode::Symbol
+            | PlanNode::Nan
+            | PlanNode::Literal { .. }
+            | PlanNode::Enum { .. }
+            | PlanNode::Object { .. }
+            | PlanNode::Array { .. }
+            | PlanNode::Tuple { .. }
+            | PlanNode::DiscUnion { .. }
+            | PlanNode::Record { .. }
+            | PlanNode::Map { .. }
+            | PlanNode::Set { .. }
+            | PlanNode::TemplateLiteral { .. } => {
+                self.check_missing(id);
+                Missing::Fail
+            }
+            PlanNode::Readonly { .. }
+            | PlanNode::Promise { .. }
+            | PlanNode::Pipe { .. }
+            | PlanNode::Host { .. }
+            | PlanNode::Unsupported => {
+                self.fallback = true;
+                Missing::Cycle
+            }
+        };
+        if let Missing::Value(value) = &result {
+            self.missing_values[id as usize] = Some(value.clone());
+        }
+        result
+    }
+
+    fn eval_concrete(&mut self, id: NodeId, input: &Json) -> Missing {
+        let Ok(bytes) = serde_json::to_vec(input) else {
+            self.fallback = true;
+            return Missing::Cycle;
+        };
+        let Ok(value) = sonic_rs::from_slice::<Value>(&bytes) else {
+            self.fallback = true;
+            return Missing::Cycle;
+        };
+        let before = self.fail_count;
+        self.check(id, &value);
+        if self.fallback {
+            return Missing::Cycle;
+        }
+        if self.fail_count != before {
+            return Missing::Fail;
+        }
+        let mut output = String::new();
+        write_output(self.plan, id, &value, &mut output, &self.missing_values);
+        if let Ok(value) = serde_json::from_str(&output) {
+            Missing::Value(value)
+        } else {
+            self.fallback = true;
+            Missing::Cycle
+        }
+    }
+
     // ---- issue helpers -------------------------------------------------
 
     fn too_small(&mut self, origin: &str, minimum: f64, inclusive: bool, exact: bool) {
@@ -1080,7 +1392,13 @@ impl<'p> Validator<'p> {
     clippy::too_many_lines,
     reason = "one arm per plan-node kind reads clearer than a split"
 )]
-fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String) {
+fn write_output(
+    plan: &CompiledPlan,
+    id: NodeId,
+    value: &Value,
+    out: &mut String,
+    missing_values: &[Option<Json>],
+) {
     match &plan.nodes()[id as usize] {
         PlanNode::Object {
             keys,
@@ -1092,11 +1410,7 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             let Some(obj) = value.as_object() else {
                 return append_raw(value, out);
             };
-            let entries = collapse_object(obj);
-            let mut lookup: HashMap<&str, &Value> = HashMap::with_capacity(entries.len());
-            for (k, v) in &entries {
-                lookup.insert(k, v);
-            }
+            let (entries, lookup) = collapse_object(obj);
             out.push('{');
             let mut first = true;
             let disp = plan.dispatch[id as usize].object.as_ref();
@@ -1104,10 +1418,10 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             for (schema_i, key) in keys.iter().enumerate() {
                 if let Some(child) = lookup.get(key.as_str()) {
                     write_pair(key, out, &mut first);
-                    write_output(plan, values[schema_i], child, out);
-                } else if let Some(def) = default_value(plan, values[schema_i]) {
+                    write_output(plan, values[schema_i], child, out, missing_values);
+                } else if let Some(missing) = &missing_values[values[schema_i] as usize] {
                     write_pair(key, out, &mut first);
-                    out.push_str(&serde_json::to_string(&def).unwrap_or_else(|_| "null".into()));
+                    out.push_str(&serde_json::to_string(missing).unwrap_or_else(|_| "null".into()));
                 }
             }
             // Retained unknowns (passthrough / catchall), __proto__ excluded.
@@ -1120,7 +1434,7 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
                     if !known {
                         write_pair(k, out, &mut first);
                         if let Some(ca) = catchall {
-                            write_output(plan, *ca, v, out);
+                            write_output(plan, *ca, v, out, missing_values);
                         } else {
                             append_raw(v, out);
                         }
@@ -1138,7 +1452,7 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
                 if i > 0 {
                     out.push(',');
                 }
-                write_output(plan, *element, elem, out);
+                write_output(plan, *element, elem, out, missing_values);
             }
             out.push(']');
         }
@@ -1155,24 +1469,20 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             for (i, item_id) in items.iter().enumerate() {
                 if let Some(elem) = slice.get(i) {
                     let mut s = String::new();
-                    write_output(plan, *item_id, elem, &mut s);
+                    write_output(plan, *item_id, elem, &mut s, missing_values);
                     slots.push(Some(s));
+                } else if let Some(missing) = &missing_values[*item_id as usize] {
+                    slots.push(Some(
+                        serde_json::to_string(missing).unwrap_or_else(|_| "null".into()),
+                    ));
                 } else {
-                    match absent_result(plan, *item_id) {
-                        // Swallowed by the optional-tail rule (a non-swallowed
-                        // failure never reaches output construction).
-                        Absent::Fail => break,
-                        Absent::Undefined => slots.push(None),
-                        Absent::Value(v, _) => slots.push(Some(
-                            serde_json::to_string(&v).unwrap_or_else(|_| "null".into()),
-                        )),
-                    }
+                    slots.push(None);
                 }
             }
             if let Some(rest_id) = rest {
                 for elem in slice.iter().skip(items.len()) {
                     let mut s = String::new();
-                    write_output(plan, *rest_id, elem, &mut s);
+                    write_output(plan, *rest_id, elem, &mut s, missing_values);
                     slots.push(Some(s));
                 }
             }
@@ -1205,12 +1515,13 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             };
             out.push('{');
             let mut first = true;
-            for (k, v) in collapse_object(obj) {
+            let (entries, _) = collapse_object(obj);
+            for (k, v) in entries {
                 if k == "__proto__" {
                     continue; // records never retain __proto__ (see check)
                 }
                 write_pair(k, out, &mut first);
-                write_output(plan, *val, v, out);
+                write_output(plan, *val, v, out, missing_values);
             }
             out.push('}');
         }
@@ -1233,10 +1544,7 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
             if value.is_number() {
                 append_raw(value, out);
             } else if *coerce {
-                match coerce_to_number(value) {
-                    Some(f) => out.push_str(&num_json(f).to_string()),
-                    None => append_raw(value, out),
-                }
+                out.push_str(&num_json(coerce_to_number(value)).to_string());
             } else {
                 append_raw(value, out);
             }
@@ -1248,38 +1556,37 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
         } => {
             // Emit the caught fallback only when the inner schema would fail.
             if option_matches(plan, *inner, value) {
-                write_output(plan, *inner, value, out);
+                write_output(plan, *inner, value, out, missing_values);
             } else {
                 out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
             }
         }
         PlanNode::Optional { inner }
+        | PlanNode::ExactOptional { inner }
         | PlanNode::NonOptional { inner }
         | PlanNode::Readonly { inner }
         | PlanNode::Lazy { inner }
         | PlanNode::Promise { inner }
         | PlanNode::Default { inner, .. }
         | PlanNode::Prefault { inner, .. } => {
-            if value.is_null() {
-                append_raw(value, out);
-            } else {
-                write_output(plan, *inner, value, out);
-            }
+            write_output(plan, *inner, value, out, missing_values);
         }
         PlanNode::Nullable { inner } => {
             if value.is_null() {
                 out.push_str("null");
             } else {
-                write_output(plan, *inner, value, out);
+                write_output(plan, *inner, value, out, missing_values);
             }
         }
-        PlanNode::Pipe { a, .. } => write_output(plan, *a, value, out),
-        PlanNode::Intersection { left, .. } => write_output(plan, *left, value, out),
+        PlanNode::Pipe { a, .. } => write_output(plan, *a, value, out, missing_values),
+        PlanNode::Intersection { left, .. } => {
+            write_output(plan, *left, value, out, missing_values);
+        }
         PlanNode::Union { options } => {
             // Re-select the first passing option for output.
             for opt in options {
                 if option_matches(plan, *opt, value) {
-                    return write_output(plan, *opt, value, out);
+                    return write_output(plan, *opt, value, out, missing_values);
                 }
             }
             append_raw(value, out);
@@ -1303,11 +1610,41 @@ fn write_output(plan: &CompiledPlan, id: NodeId, value: &Value, out: &mut String
                         .and_then(|d| d.find_value(v))
                 });
             match target {
-                Some(node) => write_output(plan, node, value, out),
+                Some(node) => write_output(plan, node, value, out, missing_values),
                 None => append_raw(value, out),
             }
         }
-        _ => append_raw(value, out),
+        PlanNode::Boolean { coerce } => {
+            if value.is_boolean() {
+                append_raw(value, out);
+            } else if *coerce {
+                out.push_str(if coerce_to_boolean(value) {
+                    "true"
+                } else {
+                    "false"
+                });
+            } else {
+                append_raw(value, out);
+            }
+        }
+        PlanNode::BigInt { .. }
+        | PlanNode::Date { .. }
+        | PlanNode::File { .. }
+        | PlanNode::Null
+        | PlanNode::Undefined
+        | PlanNode::Any
+        | PlanNode::Unknown
+        | PlanNode::Never
+        | PlanNode::Void
+        | PlanNode::Symbol
+        | PlanNode::Nan
+        | PlanNode::Literal { .. }
+        | PlanNode::Enum { .. }
+        | PlanNode::Map { .. }
+        | PlanNode::Set { .. }
+        | PlanNode::TemplateLiteral { .. }
+        | PlanNode::Host { .. }
+        | PlanNode::Unsupported => append_raw(value, out),
     }
 }
 
@@ -1318,34 +1655,58 @@ fn option_matches(plan: &CompiledPlan, id: NodeId, value: &Value) -> bool {
         path: PathRef::new(),
         dirty: false,
         nonfinite: false,
+        fallback: false,
         fail_count: 0,
-        quiet: false,
+        catch_count: 0,
+        issue_mode: IssueMode::Collect,
+        missing_values: vec![None; plan.nodes().len()],
     };
     v.check(id, value);
-    v.issues.is_empty()
+    !v.fallback && v.issues.is_empty()
 }
 
-/// The outcome of running a schema on `undefined` (a missing tuple slot).
-enum Absent {
+/// The outcome of running a schema on `undefined`.
+enum Missing {
+    Undefined,
+    Value(Json),
+    Fail,
+    Cycle,
+}
+
+/// A conservative, allocation-light missing-input probe used only by the byte
+/// scanner. The DOM validator owns semantic missing evaluation.
+enum Absent<'a> {
     /// Validates cleanly with `undefined` output (the slot drops out of the
     /// tuple output).
     Undefined,
     /// Validates cleanly with a concrete JSON value (defaults, catches). The
     /// flag marks a catch fallback: canonical `handleOptionalResult` swallows
     /// it back to `undefined` under an `Optional` wrapper.
-    Value(Json, bool),
+    Value(Cow<'a, Json>, bool),
     /// Emits issues on `undefined` input.
     Fail,
+    /// Wrapper traversal exhausted its fixed hop budget.
+    Cycle,
 }
 
-fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent {
+fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
+    let mut hops = ABSENT_MAX_HOPS;
+    absent_result_bounded(plan, id, &mut hops)
+}
+
+fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usize) -> Absent<'a> {
+    if *hops == 0 {
+        return Absent::Cycle;
+    }
+    *hops -= 1;
+
     match &plan.nodes()[id as usize] {
         PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
             Absent::Undefined
         }
         PlanNode::Optional { inner } => {
             if plan.dispatch[*inner as usize].optin_optional {
-                match absent_result(plan, *inner) {
+                match absent_result_bounded(plan, *inner, hops) {
                     // `handleOptionalResult`: undefined input plus issues or a
                     // catch fallback resolves to a clean `undefined`.
                     Absent::Fail | Absent::Value(_, true) => Absent::Undefined,
@@ -1355,44 +1716,42 @@ fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent {
                 Absent::Undefined
             }
         }
+        PlanNode::ExactOptional { inner }
+        | PlanNode::Nullable { inner }
+        | PlanNode::Lazy { inner }
+        | PlanNode::Readonly { inner }
+        | PlanNode::Promise { inner } => absent_result_bounded(plan, *inner, hops),
         PlanNode::Default { value, .. } | PlanNode::Prefault { value, .. } => {
-            Absent::Value(value.clone(), false)
+            Absent::Value(Cow::Borrowed(value), false)
         }
-        PlanNode::Catch { inner, value, .. } => match absent_result(plan, *inner) {
-            Absent::Fail => Absent::Value(value.clone(), true),
+        PlanNode::Catch { inner, value, .. } => match absent_result_bounded(plan, *inner, hops) {
+            Absent::Fail => Absent::Value(Cow::Borrowed(value), true),
             ok => ok,
         },
         PlanNode::Union { options } => {
             for opt in options {
-                match absent_result(plan, *opt) {
+                match absent_result_bounded(plan, *opt, hops) {
                     Absent::Fail => {}
                     ok => return ok,
                 }
             }
             Absent::Fail
         }
-        PlanNode::Pipe { a, b } => match absent_result(plan, *a) {
-            Absent::Fail => Absent::Fail,
-            Absent::Undefined => absent_result(plan, *b),
-            Absent::Value(va, fell_back) => match run_concrete(plan, *b, &va) {
-                Some(vb) => Absent::Value(vb, fell_back),
-                None => Absent::Fail,
-            },
-        },
-        PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
-            absent_result(plan, *inner)
-        }
         PlanNode::Intersection { left, right } => {
-            match (absent_result(plan, *left), absent_result(plan, *right)) {
+            match (
+                absent_result_bounded(plan, *left, hops),
+                absent_result_bounded(plan, *right, hops),
+            ) {
+                (Absent::Cycle, _) | (_, Absent::Cycle) => Absent::Cycle,
                 (Absent::Fail, _) | (_, Absent::Fail) => Absent::Fail,
                 (Absent::Undefined, Absent::Undefined) => Absent::Undefined,
                 (Absent::Value(v, f), Absent::Undefined)
                 | (Absent::Undefined, Absent::Value(v, f)) => Absent::Value(v, f),
                 (Absent::Value(a, fa), Absent::Value(b, fb)) => {
-                    match (a, b) {
+                    match (a.into_owned(), b.into_owned()) {
                         (Json::Object(mut x), Json::Object(y)) => {
                             x.extend(y);
-                            Absent::Value(Json::Object(x), fa || fb)
+                            Absent::Value(Cow::Owned(Json::Object(x)), fa || fb)
                         }
                         // Non-mergeable undefined intersections do not arise
                         // in JSON-eligible schemas; treat as failure.
@@ -1401,40 +1760,41 @@ fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent {
                 }
             }
         }
-        _ => Absent::Fail,
+        PlanNode::String { coerce: true, .. } => {
+            Absent::Value(Cow::Owned(Json::from("undefined")), true)
+        }
+        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), true),
+        PlanNode::String { coerce: false, .. }
+        | PlanNode::Number { .. }
+        | PlanNode::BigInt { .. }
+        | PlanNode::Date { .. }
+        | PlanNode::File { .. }
+        | PlanNode::Boolean { coerce: false }
+        | PlanNode::Null
+        | PlanNode::Never
+        | PlanNode::Symbol
+        | PlanNode::Nan
+        | PlanNode::Literal { .. }
+        | PlanNode::Enum { .. }
+        | PlanNode::Object { .. }
+        | PlanNode::Array { .. }
+        | PlanNode::Tuple { .. }
+        | PlanNode::DiscUnion { .. }
+        | PlanNode::Record { .. }
+        | PlanNode::Map { .. }
+        | PlanNode::Set { .. }
+        | PlanNode::NonOptional { .. }
+        | PlanNode::Pipe { .. }
+        | PlanNode::TemplateLiteral { .. }
+        | PlanNode::Host { .. }
+        | PlanNode::Unsupported => Absent::Fail,
     }
 }
 
-/// Runs a schema on an already-parsed JSON value, returning its output.
-fn run_concrete(plan: &CompiledPlan, id: NodeId, v: &Json) -> Option<Json> {
-    let text = serde_json::to_string(v).ok()?;
-    let value: Value = sonic_rs::from_str(&text).ok()?;
-    if !option_matches(plan, id, &value) {
-        return None;
-    }
-    let mut s = String::new();
-    write_output(plan, id, &value, &mut s);
-    serde_json::from_str(&s).ok()
-}
-
-fn default_value(plan: &CompiledPlan, id: NodeId) -> Option<Json> {
-    match &plan.nodes()[id as usize] {
-        PlanNode::Default { value, .. }
-        | PlanNode::Prefault { value, .. }
-        | PlanNode::Catch { value, .. } => Some(value.clone()),
-        PlanNode::Readonly { inner } | PlanNode::Lazy { inner } => default_value(plan, *inner),
-        _ => None,
-    }
-}
-
-/// Whether a node supplies a default for an absent input — the non-allocating
-/// form of `default_value(..).is_some()` used on the hot object walk.
+/// Whether a node supplies a concrete value for absent input. Ordinary
+/// default/wrapper traversal only borrows plan values and allocates nothing.
 pub(crate) fn has_default(plan: &CompiledPlan, id: NodeId) -> bool {
-    match &plan.nodes()[id as usize] {
-        PlanNode::Default { .. } | PlanNode::Prefault { .. } | PlanNode::Catch { .. } => true,
-        PlanNode::Readonly { inner } | PlanNode::Lazy { inner } => has_default(plan, *inner),
-        _ => false,
-    }
+    matches!(absent_result(plan, id), Absent::Value(..))
 }
 
 fn write_pair(key: &str, out: &mut String, first: &mut bool) {
@@ -1527,15 +1887,19 @@ fn is_negative_zero_token(rest: &[u8]) -> bool {
 
 /// Collapse an object's entries to ECMA-262 JSON.parse semantics: one entry per
 /// key in first-occurrence order, carrying the last value seen for that key.
-fn collapse_object(obj: &Object) -> Vec<(&str, &Value)> {
-    let mut order: Vec<&str> = Vec::new();
-    let mut last: HashMap<&str, &Value> = HashMap::new();
+fn collapse_object(obj: &Object) -> (Vec<(&str, &Value)>, HashMap<&str, &Value>) {
+    let mut order: Vec<&str> = Vec::with_capacity(obj.len());
+    let mut last: HashMap<&str, &Value> = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
         if last.insert(k, v).is_none() {
             order.push(k);
         }
     }
-    order.into_iter().map(|k| (k, last[k])).collect()
+    let entries: Vec<(&str, &Value)> = order
+        .iter()
+        .filter_map(|k| last.get(*k).map(|v| (*k, *v)))
+        .collect();
+    (entries, last)
 }
 
 /// Converts a container index to a path segment, saturating at `u32::MAX`.
@@ -1568,6 +1932,87 @@ pub(crate) fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
+/// Converts a JavaScript UTF-16 code-unit offset to a UTF-8 byte offset. A
+/// position inside a surrogate pair rounds up to the end of that scalar;
+/// positions beyond the string clamp to its byte length.
+pub(crate) fn utf16_offset_to_byte(s: &str, position: usize) -> usize {
+    if s.is_ascii() {
+        return position.min(s.len());
+    }
+
+    let mut units = 0;
+    for (byte, ch) in s.char_indices() {
+        if units >= position {
+            return byte;
+        }
+        units += ch.len_utf16();
+        if units >= position {
+            return byte + ch.len_utf8();
+        }
+    }
+    s.len()
+}
+
+/// Returns whether raw JSON stays within the bounded DOM recursion budget.
+/// The scan is allocation-free, tracks object/array nesting so mismatched or
+/// unmatched closers are treated as malformed, and stays within the documented
+/// depth ceiling so sonic-rs and the recursive validator never consume the
+/// process stack.
+fn within_dom_depth(input: &[u8]) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    // Fixed bit-stack of open container kinds: set bit = array, clear = object.
+    // DOM_MAX_DEPTH bits with no heap allocation.
+    let mut kinds = [0u64; DOM_KIND_WORDS];
+
+    for &byte in input {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                if depth >= DOM_MAX_DEPTH {
+                    return false;
+                }
+                let word = depth / 64;
+                let bit = depth % 64;
+                if byte == b'[' {
+                    kinds[word] |= 1 << bit;
+                } else {
+                    kinds[word] &= !(1 << bit);
+                }
+                depth += 1;
+            }
+            b'}' | b']' => {
+                let Some(top) = depth.checked_sub(1) else {
+                    return false;
+                };
+                let word = top / 64;
+                let bit = top % 64;
+                let is_array = ((kinds[word] >> bit) & 1) == 1;
+                if (is_array && byte != b']') || (!is_array && byte != b'}') {
+                    return false;
+                }
+                depth = top;
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
 /// Builds a `serde_json` number from an `f64`, integral when possible so `36`
 /// stays `36`.
 #[allow(
@@ -1587,26 +2032,66 @@ fn json_string(s: &str) -> String {
 }
 
 fn coerce_to_string(value: &Value) -> String {
+    if value.is_null() {
+        return "null".into();
+    }
     if let Some(b) = value.as_bool() {
         return b.to_string();
     }
     if value.is_number() {
         return value.as_f64().map_or_else(String::new, js_number_to_string);
     }
-    value.as_str().unwrap_or_default().to_string()
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    if let Some(values) = value.as_array() {
+        let mut out = String::new();
+        for (index, entry) in values.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            if !entry.is_null() {
+                out.push_str(&coerce_to_string(entry));
+            }
+        }
+        return out;
+    }
+    "[object Object]".into()
 }
 
-fn coerce_to_number(value: &Value) -> Option<f64> {
+fn coerce_to_boolean(value: &Value) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    if let Some(value) = value.as_bool() {
+        return value;
+    }
+    if let Some(value) = value.as_f64() {
+        return value != 0.0 && !value.is_nan();
+    }
+    if let Some(value) = value.as_str() {
+        return !value.is_empty();
+    }
+    true
+}
+
+fn coerce_to_number(value: &Value) -> f64 {
     if let Some(s) = value.as_str() {
-        return js_number_str(s);
+        return js_number_str(s).unwrap_or(f64::NAN);
     }
     if let Some(b) = value.as_bool() {
-        return Some(if b { 1.0 } else { 0.0 });
+        return if b { 1.0 } else { 0.0 };
     }
     if value.is_null() {
-        return Some(0.0); // JS Number(null) === 0
+        return 0.0; // JS Number(null) === 0
     }
-    value.as_f64()
+    if let Some(value) = value.as_f64() {
+        return value;
+    }
+    if value.as_array().is_some() {
+        return js_number_str(&coerce_to_string(value)).unwrap_or(f64::NAN);
+    }
+    f64::NAN
 }
 
 /// ECMA-262 `Number(string)`: trims, accepts the exact `Infinity` literal and

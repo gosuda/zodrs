@@ -1,5 +1,13 @@
+import { TextEncoder } from "node:util";
 import { expect, test } from "vitest";
 import * as z from "../classic/index.js";
+import {
+  createNativePlanRef,
+  getNativeBackend,
+  registerNativeBackend,
+  validateJson,
+  type NativeBackend,
+} from "./native.js";
 
 /**
  * parseJson byte-path divergences surfaced by the differential fuzz. These
@@ -96,5 +104,178 @@ test("prototype pollution after plan cache falls back to TS path", () => {
     if (result.success) expect(result.data).toEqual({ pollutedKey: "evil" });
   } finally {
     delete (Object.prototype as Record<string, unknown>).pollutedKey;
+  }
+});
+
+test("mutable static fallback stays live after plan cache", () => {
+  const fallback = { value: 1 };
+  const S = z.object({ config: z.object({ value: z.number() }).default(fallback) });
+  void S._zod.plan;
+
+  fallback.value = 2;
+  expect(S.parseJson("{}")).toEqual(S.parse({}));
+  expect(S.parseJson("{}")).toEqual({ config: { value: 2 } });
+});
+
+test("20k nested array does not abort the process", () => {
+  const A = z.any();
+  const depth = 20_000;
+  const input = "[".repeat(depth) + "1" + "]".repeat(depth);
+  // The native byte path must fall back (status 3) before any recursive path
+  // can exhaust the process stack. The JS path then JSON.parses and validates.
+  const result = A.safeParseJson(input);
+  expect(result.success).toBe(true);
+  if (result.success) {
+    expect(Array.isArray(result.data)).toBe(true);
+  }
+});
+
+test("compile throw falls back to the TypeScript validator", () => {
+  const S = z.object({ a: z.string() });
+  const plan = S._zod.plan;
+  const encoder = new TextEncoder();
+
+  expect(plan.jsonEligible).toBe(true);
+
+  const original = getNativeBackend();
+  let compileCalls = 0;
+  const fake: NativeBackend = {
+    compile: (planJson) => {
+      compileCalls += 1;
+      throw new Error(`compile rejected: ${planJson.slice(0, 20)}`);
+    },
+  };
+  registerNativeBackend(fake);
+
+  try {
+    const direct = validateJson(plan.json, null, encoder.encode('{"a":"x"}'));
+    expect(direct).toEqual({ available: false, plan: null, verdict: null });
+    expect(compileCalls).toBe(1);
+
+    expect(S.parseJson('{"a":"hello"}')).toEqual({ a: "hello" });
+    expect(compileCalls).toBe(2);
+
+    const safe = S.safeParseJson('{"a":1}');
+    expect(safe.success).toBe(false);
+    expect(compileCalls).toBe(3);
+    expect(S._zod.nativePlan).toBe(null);
+  } finally {
+    registerNativeBackend(original);
+  }
+});
+
+test("status-1 byte validation does not decode the original bytes", () => {
+  const S = z.object({ a: z.string() });
+  const original = getNativeBackend();
+  const fake: NativeBackend = {
+    compile: () => createNativePlanRef(
+      () => ({ status: 1, payload: '{"a":"rewritten"}' }),
+      () => {},
+    ),
+  };
+  registerNativeBackend(fake);
+
+  try {
+    // TextDecoder rejects a Proxy because it has no Uint8Array internal slot.
+    // A status-1 result does not need the original text, so decoding it is waste.
+    const bytes = new Proxy(new Uint8Array([0]), {});
+    expect(S.parseJson(bytes)).toEqual({ a: "rewritten" });
+  } finally {
+    registerNativeBackend(null);
+    expect(S.parseJson('{"a":"cleanup"}')).toEqual({ a: "cleanup" });
+    registerNativeBackend(original);
+  }
+});
+
+test("one schema reuses its native plan", () => {
+  const S = z.string();
+  const original = getNativeBackend();
+  let compileCalls = 0;
+  const fake: NativeBackend = {
+    compile: () => {
+      compileCalls += 1;
+      return createNativePlanRef(
+        () => ({ status: 0, payload: null }),
+        () => {},
+      );
+    },
+  };
+  registerNativeBackend(fake);
+
+  try {
+    expect(S.parseJson('"one"')).toBe("one");
+    const first = S._zod.nativePlan;
+    expect(S.parseJson('"two"')).toBe("two");
+    expect(S._zod.nativePlan).toBe(first);
+    expect(compileCalls).toBe(1);
+  } finally {
+    registerNativeBackend(null);
+    expect(S.parseJson('"cleanup"')).toBe("cleanup");
+    registerNativeBackend(original);
+  }
+});
+
+test("backend replacement isolates reused raw handle identities", () => {
+  const S = z.object({ source: z.string() });
+  const original = getNativeBackend();
+  let disposedA = 0;
+  let disposedB = 0;
+  const backendA: NativeBackend = {
+    compile: () => createNativePlanRef(
+      () => ({ status: 1, payload: '{"source":"A"}' }),
+      () => {
+        disposedA += 1;
+        throw new Error("addon A dispose failure");
+      },
+    ),
+  };
+  const backendB: NativeBackend = {
+    compile: () => createNativePlanRef(
+      () => ({ status: 1, payload: '{"source":"B"}' }),
+      () => {
+        disposedB += 1;
+      },
+    ),
+  };
+
+  registerNativeBackend(backendA);
+  try {
+    expect(S.parseJson('{"source":"input"}')).toEqual({ source: "A" });
+    const planA = S._zod.nativePlan;
+
+    registerNativeBackend(backendB);
+    expect(S.parseJson('{"source":"input"}')).toEqual({ source: "B" });
+    expect(S._zod.nativePlan).not.toBe(planA);
+    expect(disposedA).toBe(1);
+  } finally {
+    registerNativeBackend(null);
+    expect(S.parseJson('{"source":"cleanup"}')).toEqual({ source: "cleanup" });
+    expect(disposedB).toBe(1);
+    registerNativeBackend(original);
+  }
+});
+
+test("validation throw disposes the plan and falls back", () => {
+  const S = z.object({ a: z.string() });
+  const original = getNativeBackend();
+  let disposeCalls = 0;
+  const fake: NativeBackend = {
+    compile: () => createNativePlanRef(
+      () => {
+        throw new Error("validation failed");
+      },
+      () => {
+        disposeCalls += 1;
+      },
+    ),
+  };
+  registerNativeBackend(fake);
+
+  try {
+    expect(S.parseJson('{"a":"value"}')).toEqual({ a: "value" });
+    expect(S._zod.nativePlan).toBe(null);
+    expect(disposeCalls).toBe(1);
+  } finally {
+    registerNativeBackend(original);
   }
 });

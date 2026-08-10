@@ -17,7 +17,9 @@ use smallvec::SmallVec;
 
 use crate::compile::{CompiledCheck, CompiledPlan, NodeDispatch};
 use crate::plan::{Check, NodeId, PlanNode};
-use crate::validate::{apply_overwrite, float_multiple_of, number_format_range, utf16_len};
+use crate::validate::{
+    apply_overwrite, float_multiple_of, number_format_range, utf16_len, utf16_offset_to_byte,
+};
 
 /// JavaScript's maximum safe integer, `2^53 - 1`.
 const MAX_SAFE_INT: f64 = 9_007_199_254_740_991.0;
@@ -453,6 +455,7 @@ impl<'a> Scanner<'a> {
             }
             PlanNode::Record { .. } => self.record(id),
             PlanNode::Optional { inner }
+            | PlanNode::ExactOptional { inner }
             | PlanNode::NonOptional { inner }
             | PlanNode::Readonly { inner }
             | PlanNode::Lazy { inner }
@@ -517,6 +520,10 @@ impl<'a> Scanner<'a> {
             | PlanNode::Nan
             | PlanNode::Symbol
             | PlanNode::Host { .. } => false,
+            PlanNode::Unsupported => {
+                self.dirty_hint = true;
+                false
+            }
         }
     }
 
@@ -586,7 +593,9 @@ impl<'a> Scanner<'a> {
                 Check::StartsWith { v } => s.starts_with(v),
                 Check::EndsWith { v } => s.ends_with(v),
                 Check::Includes { v, position } => match position {
-                    Some(p) => s.get(*p..).is_some_and(|tail| tail.contains(v)),
+                    Some(p) => s
+                        .get(utf16_offset_to_byte(s, *p)..)
+                        .is_some_and(|tail| tail.contains(v)),
                     None => s.contains(v),
                 },
                 Check::Lowercase => !s.chars().any(char::is_uppercase),
@@ -608,6 +617,10 @@ impl<'a> Scanner<'a> {
                         self.dirty_hint = true;
                     }
                     true
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };
@@ -646,6 +659,10 @@ impl<'a> Scanner<'a> {
                         crate::plan::BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
                     };
                     n >= min && n <= max
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };
@@ -694,6 +711,10 @@ impl<'a> Scanner<'a> {
             }
             PlanNode::Null => Some(self.eat(b"null")),
             PlanNode::Literal { values } | PlanNode::Enum { values } => Some(self.literal(values)),
+            PlanNode::Unsupported => {
+                self.dirty_hint = true;
+                Some(false)
+            }
             _ => None,
         }
     }
@@ -888,6 +909,10 @@ impl<'a> Scanner<'a> {
                 Check::MaxLength { v } | Check::MaxSize { v } => len_f <= *v,
                 Check::Length { v } | Check::Size { v } => {
                     len_f.partial_cmp(v) == Some(std::cmp::Ordering::Equal)
+                }
+                Check::Property { .. } | Check::Unsupported => {
+                    self.dirty_hint = true;
+                    false
                 }
                 _ => true,
             };

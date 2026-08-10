@@ -4,6 +4,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::iter;
 use zodrs::{compile, validate};
 
 /// `1e400` overflows f64. The scan's number token must not accept it as a
@@ -32,7 +33,7 @@ fn truncated_escape_no_panic() {
 #[test]
 fn missing_default_rewrites() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"default","inner":2,"value":5,"dynamic":false},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},{"k":"default","inner":2,"value":5,"dynamic":false},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, b"{}");
@@ -69,7 +70,7 @@ fn catch_inside_union_option_is_clean() {
           {"k":"record","key":5,"value":6},
           {"k":"string","checks":[]},
           {"k":"optional","inner":7},
-          {"k":"object","keys":["id","k1"],"values":[9,11],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"object","keys":["id","k1"],"values":[9,11],"optional":[false,true],"mode":"strip","catchall":null},
           {"k":"boolean"},
           {"k":"catch","inner":8,"value":true,"dynamic":false},
           {"k":"boolean"},
@@ -124,4 +125,94 @@ fn fuzz_seed24301_case2357() {
     assert!(!out.contains("extra"), "unknown key retained: {out}");
     assert!(!out.contains("$weird"), "unknown key retained: {out}");
     assert!(out.contains(r#""tag":450"#), "known key dropped: {out}");
+}
+// ------------------------------------------------------------------------
+// Depth preflight (H6).
+// ------------------------------------------------------------------------
+
+/// Plan JSON for a `depth`-level nested array terminating in a trim string.
+fn nested_array_plan(depth: usize) -> String {
+    assert!(depth > 0, "depth must be positive");
+    let mut nodes = Vec::with_capacity(depth + 1);
+    for i in 0..depth {
+        nodes.push(format!(
+            r#"{{"k":"array","element":{},"checks":[]}}"#,
+            i + 1
+        ));
+    }
+    nodes.push(r#"{"k":"string","checks":[{"c":"overwrite","op":"trim"}]}"#.into());
+    format!("[{}]", nodes.join(","))
+}
+
+fn nested_array_input(depth: usize, inner: &str) -> String {
+    format!(
+        "{}{}{}",
+        iter::repeat_n('[', depth).collect::<String>(),
+        inner,
+        iter::repeat_n(']', depth).collect::<String>()
+    )
+}
+
+/// Hostile nesting beyond the DOM budget returns status 3 without attempting
+/// the recursive sonic/validator path.
+#[test]
+fn deep_nesting_20k_returns_status_3() {
+    let plan = compile(r#"[{"k":"any"}]"#).unwrap();
+    let input = nested_array_input(20_000, "1");
+    let v = validate(&plan, input.as_bytes());
+    assert_eq!(v.status, 3, "20k nested input must fall back: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+/// The measured DOM cap still permits a real recursive validation and rewrite.
+#[test]
+fn deep_nesting_at_dom_cap_gets_verdict() {
+    let depth = 64;
+    let plan = compile(&nested_array_plan(depth)).unwrap();
+    let input = nested_array_input(depth, "\"  hello  \"");
+    let v = validate(&plan, input.as_bytes());
+    assert_eq!(
+        v.status, 1,
+        "depth-64 input must survive the DOM walk: {v:?}"
+    );
+    let expected = format!(
+        "{}{}{}",
+        iter::repeat_n('[', depth).collect::<String>(),
+        "\"hello\"",
+        iter::repeat_n(']', depth).collect::<String>()
+    );
+    assert_eq!(v.payload.as_deref(), Some(expected.as_str()));
+}
+
+/// One level beyond the cap falls back before the recursive DOM path.
+#[test]
+fn deep_nesting_above_dom_cap_falls_back() {
+    let depth = 65;
+    let plan = compile(&nested_array_plan(depth)).unwrap();
+    let input = nested_array_input(depth, "\"  hello  \"");
+    let v = validate(&plan, input.as_bytes());
+    assert_eq!(v.status, 3, "depth-65 input must fall back: {v:?}");
+}
+
+/// Brackets, escaped quotes, and escaped backslashes inside strings do not
+/// false-trigger the depth guard.
+#[test]
+fn preflight_ignores_brackets_and_escapes_in_strings() {
+    let plan = compile(r#"[{"k":"string","checks":[{"c":"overwrite","op":"trim"}]}]"#).unwrap();
+    // The string value contains literal brackets, an escaped quote, and an
+    // escaped backslash. The scanner defers on escapes, so the preflight runs.
+    let input = serde_json::to_vec(&"[ { ] } \" \\").unwrap();
+    let v = validate(&plan, &input);
+    assert_eq!(
+        v.status, 0,
+        "bracket-rich string must not false-trigger guard: {v:?}"
+    );
+}
+
+/// Mismatched and unmatched closers are rejected before sonic-rs.
+#[test]
+fn preflight_rejects_mismatched_closer() {
+    let plan = compile(r#"[{"k":"any"}]"#).unwrap();
+    assert_eq!(validate(&plan, b"[}").status, 3);
+    assert_eq!(validate(&plan, b"]").status, 3);
 }

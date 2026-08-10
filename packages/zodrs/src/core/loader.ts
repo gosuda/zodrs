@@ -30,7 +30,13 @@
 
 import { createRequire } from "node:module";
 import { moduleUrl } from "#module-url";
-import { registerNativeBackend, type NativeBackend, type NativeVerdict } from "./native.js";
+import {
+  createNativePlanRef,
+  registerNativeBackend,
+  type NativeBackend,
+  type NativePlanRef,
+  type NativeVerdict,
+} from "./native.js";
 
 declare const process: { readonly env: Record<string, string | undefined> } | undefined;
 declare global {
@@ -61,34 +67,49 @@ function describe(error: unknown): string {
 }
 
 /**
- * Wrap a loaded addon in the NativeBackend seam. Each unique plan JSON
- * compiles exactly once: handles are cached in a Map keyed by the plan string
- * so identical schemas share one Rust plan. A FinalizationRegistry disposes
- * the handle of any cache token that gets collected; the cache retains its
- * tokens, so plans in practice live for the process lifetime (the seam
- * carries no schema-lifetime signal), and the registry guarantees disposal if
- * an entry is ever evicted from the cache.
- */
+ * Wrap a loaded addon in the opaque native-plan contract. */
 function wrapAddon(addon: RawAddon): NativeBackend {
-  const cache = new Map<string, { readonly handle: number; readonly token: object }>();
-  const finalizer = new FinalizationRegistry<number>((handle) => {
-    addon.dispose(handle);
+  const cache = new Map<string, WeakRef<NativePlanRef>>();
+  interface FinalizerHolding {
+    readonly planJson: string;
+    readonly ref: WeakRef<NativePlanRef>;
+    readonly handle: number;
+  }
+  const finalizer = new FinalizationRegistry<FinalizerHolding>((holding) => {
+    if (cache.get(holding.planJson) === holding.ref) cache.delete(holding.planJson);
+    try {
+      addon.dispose(holding.handle);
+    } catch {
+      // Native cleanup cannot safely report through a garbage-collection callback.
+    }
   });
+
   return {
-    compile(planJson: string): number {
-      const cached = cache.get(planJson);
-      if (cached) return cached.handle;
+    compile(planJson: string): NativePlanRef {
+      const cachedRef = cache.get(planJson);
+      const cached = cachedRef?.deref();
+      if (cached !== undefined) return cached;
+      if (cachedRef !== undefined) cache.delete(planJson);
+
       const handle = addon.compile(planJson);
-      const token = { handle };
-      finalizer.register(token, handle);
-      cache.set(planJson, { handle, token });
-      return handle;
-    },
-    dispose(handle: number): void {
-      addon.dispose(handle);
-    },
-    validateJson(handle: number, bytes: Uint8Array): NativeVerdict {
-      return addon.validateJson(handle, bytes);
+      const unregisterToken = {};
+      let weakRef: WeakRef<NativePlanRef> | undefined;
+      const plan = createNativePlanRef(
+        (bytes) => addon.validateJson(handle, bytes),
+        () => {
+          finalizer.unregister(unregisterToken);
+          if (weakRef !== undefined && cache.get(planJson) === weakRef) cache.delete(planJson);
+          try {
+            addon.dispose(handle);
+          } catch {
+            // Disposal is best-effort after the plan leaves the active generation.
+          }
+        },
+      );
+      weakRef = new WeakRef(plan);
+      cache.set(planJson, weakRef);
+      finalizer.register(plan, { planJson, ref: weakRef, handle }, unregisterToken);
+      return plan;
     },
   };
 }

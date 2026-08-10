@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as z from "../classic/index.js";
+import { config } from "./config.js";
 import { compilePlan } from "./plan.js";
 
 /**
@@ -105,5 +106,71 @@ describe("object shape property access", () => {
     expect(z.literal(0).safeParse(-0).success).toBe(true);
     expect(z.object({ a: z.literal(0) }).safeParse({ a: -0 }).success).toBe(true);
     expect(z.object({ a: z.literal(0) }).safeParse({ a: 1 }).success).toBe(false);
+  });
+});
+
+describe("__proto__ result writes keep own keys and the original prototype", () => {
+  let wasJitless: boolean | undefined;
+  beforeAll(() => {
+    wasJitless = config().jitless;
+    config({ jitless: true });
+  });
+  afterAll(() => {
+    config({ jitless: wasJitless });
+  });
+
+  const assertProto = (result: Record<string, unknown>, value: unknown) => {
+    expect(Object.hasOwn(result, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(result, "__proto__")?.value).toBe(value);
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+  };
+
+  it("declared async object", async () => {
+    const S = z.object({ ["__proto__"]: z.string() });
+    const result = (await S.parseAsync(JSON.parse('{"__proto__":"s"}'))) as Record<string, unknown>;
+    assertProto(result, "s");
+  });
+
+  it("declared sync object", () => {
+    const S = z.object({ ["__proto__"]: z.string() });
+    const result = S.parse(JSON.parse('{"__proto__":"s"}')) as Record<string, unknown>;
+    assertProto(result, "s");
+  });
+
+  it("enumerated record async", async () => {
+    const S = z.record(z.enum(["__proto__", "x"]), z.string());
+    const result = (await S.parseAsync(JSON.parse('{"__proto__":"s","x":"t"}'))) as Record<string, unknown>;
+    assertProto(result, "s");
+    expect(Object.hasOwn(result, "x")).toBe(true);
+  });
+
+  it("enumerated record sync", () => {
+    const S = z.record(z.enum(["__proto__", "x"]), z.string());
+    const result = S.parse(JSON.parse('{"__proto__":"s","x":"t"}')) as Record<string, unknown>;
+    assertProto(result, "s");
+    expect(Object.hasOwn(result, "x")).toBe(true);
+  });
+
+  it("transformed key record async", async () => {
+    const S = z.record(
+      z.string().transform((k) => (k === "p" ? "__proto__" : k)),
+      z.string(),
+    );
+    const result = (await S.parseAsync({ p: "s", q: "t" })) as Record<string, unknown>;
+    assertProto(result, "s");
+    expect(Object.hasOwn(result, "q")).toBe(true);
+  });
+
+  it("undefined-valued declared key", () => {
+    const S = z.object({ ["__proto__"]: z.undefined() });
+    const input: Record<string, unknown> = {};
+    Object.defineProperty(input, "__proto__", {
+      value: undefined,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const result = S.parse(input) as Record<string, unknown>;
+    assertProto(result, undefined);
   });
 });

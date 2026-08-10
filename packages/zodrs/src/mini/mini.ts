@@ -6,7 +6,6 @@
  * classic `$ZodType` base). This module only adds the mini-shaped construction
  * API, the Zod-style `def` metadata view, and free-function wrappers.
  */
-import { config } from "../core/config.js";
 import { ZodError, $ZodRealError } from "../core/errors.js";
 import type { $ZodErrorMap, $ZodIssue, ParseContext } from "../core/errors.js";
 import * as coreModule from "../core/index.js";
@@ -16,7 +15,6 @@ import type { SafeParseResult } from "../core/parse.js";
 import type { Flatten, JSONType, MaybeAsync, NoUndefined, Primitive } from "../core/util.js";
 import {
   $ZodType as ClassicType,
-  $brand,
   codec as classicCodec,
   custom as classicCustom,
   discriminatedUnion as classicDiscriminatedUnion,
@@ -345,7 +343,7 @@ function toRuntimeChecks(values: readonly unknown[]): RuntimeCheck[] {
 export class ZodMiniString<Input = unknown> extends ZodMiniType<string, Input> {
   declare readonly type: "string";
 }
-export class ZodMiniStringFormat<Format extends string = string> extends ZodMiniString<string> {}
+export class ZodMiniStringFormat<_Format extends string = string> extends ZodMiniString<string> {}
 export class ZodMiniCustomStringFormat<Format extends string = string> extends ZodMiniStringFormat<Format> {}
 export class ZodMiniEmail extends ZodMiniStringFormat<"email"> {}
 export class ZodMiniGUID extends ZodMiniStringFormat<"guid"> {}
@@ -431,7 +429,7 @@ export class ZodMiniTuple<T extends readonly SomeMini[] = readonly SomeMini[], R
 > {
   declare readonly type: "tuple";
 }
-export class ZodMiniRecord<K extends SomeMini = SomeMini, V extends SomeMini = SomeMini> extends ZodMiniType<Record<string, output<V>>, Record<string, input<V>>> {
+export class ZodMiniRecord<_K extends SomeMini = SomeMini, V extends SomeMini = SomeMini> extends ZodMiniType<Record<string, output<V>>, Record<string, input<V>>> {
   declare readonly type: "record";
 }
 export class ZodMiniMap<Key extends SomeMini = SomeMini, Value extends SomeMini = SomeMini> extends ZodMiniType<
@@ -471,7 +469,7 @@ export class ZodMiniPrefault<T extends SomeMini = SomeMini> extends ZodMiniType<
 export class ZodMiniNonOptional<T extends SomeMini = SomeMini> extends ZodMiniType<Exclude<output<T>, undefined>, input<T>> {
   declare readonly type: "nonoptional";
 }
-export class ZodMiniSuccess<T extends SomeMini = SomeMini> extends ZodMiniType<boolean, unknown> {
+export class ZodMiniSuccess<_T extends SomeMini = SomeMini> extends ZodMiniType<boolean, unknown> {
   declare readonly type: "host";
 }
 export class ZodMiniCatch<T extends SomeMini = SomeMini> extends ZodMiniType<output<T>, input<T>> {

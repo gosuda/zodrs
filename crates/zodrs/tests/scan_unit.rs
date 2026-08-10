@@ -9,11 +9,16 @@
 
 use std::iter;
 
-use zodrs::{compile, scan::Scan};
+use zodrs::{compile, scan::Scan, validate};
 
 fn scan(plan_json: &str, input: &[u8]) -> Scan {
     let plan = compile(plan_json).unwrap();
     zodrs::scan::scan(&plan, input)
+}
+
+fn validate_status(plan_json: &str, input: &[u8]) -> u8 {
+    let plan = compile(plan_json).unwrap();
+    validate(&plan, input).status
 }
 
 #[test]
@@ -341,4 +346,90 @@ fn bigint_plan_is_not_json_eligible() {
     // A bigint-free sibling plan stays eligible, so the rule is not over-broad.
     let plain = r#"[{"k":"number","checks":[]}]"#;
     assert!(compile(plain).unwrap().json_eligible);
+}
+// ------------------------------------------------------------------------
+// UTF-16 code-unit position for `Check::Includes`.
+// ------------------------------------------------------------------------
+
+#[test]
+fn utf16_includes_hello_world_position_7_over_acceptance() {
+    // "héllo world" UTF-16 indices: 0 h, 1 é, 2 l, 3 l, 4 o, 5 space, 6 w, 7 o, ...
+    // Position 7 starts at the second "o" of "world"; "wor" is not reachable.
+    // UTF-8 byte 7 starts at "w", so the old byte-sliced scan over-accepted.
+    let plan = r#"[{"k":"string","checks":[{"c":"includes","v":"wor","position":7}]}]"#;
+    let input = "\"héllo world\"".as_bytes();
+    assert_eq!(
+        scan(plan, input),
+        Scan::Defer,
+        "position 7 must not find 'wor'"
+    );
+    assert_eq!(
+        validate_status(plan, input),
+        2,
+        "JS .includes('wor', 7) is false"
+    );
+}
+
+#[test]
+fn utf16_includes_bmp_mid_codepoint() {
+    // "éclair" UTF-16 index 1 is the "c". UTF-8 byte 1 is the continuation of é,
+    // so byte slicing produced None and the scanner under-accepted.
+    let plan = r#"[{"k":"string","checks":[{"c":"includes","v":"c","position":1}]}]"#;
+    let input = "\"éclair\"".as_bytes();
+    assert_eq!(scan(plan, input), Scan::Clean, "position 1 must find 'c'");
+    assert_eq!(
+        validate_status(plan, input),
+        0,
+        "JS .includes('c', 1) is true"
+    );
+}
+
+#[test]
+fn utf16_includes_emoji_surrogate_pair_round_up() {
+    // 🎉 is two UTF-16 code units; position 1 sits inside the surrogate pair
+    // and must round up to the byte after the scalar, i.e. the start of "abc".
+    let plan = r#"[{"k":"string","checks":[{"c":"includes","v":"abc","position":1}]}]"#;
+    let input = "\"🎉abc\"".as_bytes();
+    assert_eq!(
+        scan(plan, input),
+        Scan::Clean,
+        "position inside surrogate rounds up"
+    );
+    assert_eq!(
+        validate_status(plan, input),
+        0,
+        "JS .includes('abc', 1) is true"
+    );
+}
+
+#[test]
+fn utf16_includes_past_end_nonempty_fails() {
+    let plan = r#"[{"k":"string","checks":[{"c":"includes","v":"a","position":5}]}]"#;
+    let input = b"\"abc\"";
+    assert_eq!(
+        scan(plan, input),
+        Scan::Defer,
+        "past-end position with non-empty needle fails"
+    );
+    assert_eq!(
+        validate_status(plan, input),
+        2,
+        "JS .includes('a', 5) on 'abc' is false"
+    );
+}
+
+#[test]
+fn utf16_includes_past_end_empty_succeeds() {
+    let plan = r#"[{"k":"string","checks":[{"c":"includes","v":"","position":5}]}]"#;
+    let input = b"\"abc\"";
+    assert_eq!(
+        scan(plan, input),
+        Scan::Clean,
+        "past-end position with empty needle succeeds"
+    );
+    assert_eq!(
+        validate_status(plan, input),
+        0,
+        "JS .includes('', 5) on 'abc' is true"
+    );
 }

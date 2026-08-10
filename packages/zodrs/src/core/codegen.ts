@@ -90,13 +90,19 @@ function settledUndefined(
 ): boolean {
   const present = hasOwn(input, key);
   if (undef.m === 1) {
-    if (present) result[key] = undefined;
+    if (present) {
+      if (dangerous) defineValue(result, key, undefined);
+      else result[key] = undefined;
+    }
     return true;
   }
   if (undef.m === 3) {
     const d = undef.dv;
     if (d === undefined) {
-      if (present) result[key] = undefined;
+      if (present) {
+        if (dangerous) defineValue(result, key, undefined);
+        else result[key] = undefined;
+      }
     } else if (dangerous) defineValue(result, key, d);
     else result[key] = d;
     return true;
@@ -635,8 +641,10 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             // absent-key suppression `swallow` exists for cannot apply.
             const r = checks(v, context, path, key);
             if (r === FAIL) return true;
-            if (r === undefined) result[key] = undefined;
-            else if (dangerous) defineValue(result, key, r);
+            if (r === undefined) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            } else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
             defineValue(result, key, v);
@@ -695,8 +703,10 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             // `v` is defined here, so the key counts as present.
             const r = checks(v, context, path, key);
             if (r === FAIL) return true;
-            if (r === undefined) result[key] = undefined;
-            else if (dangerous) defineValue(result, key, r);
+            if (r === undefined) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            } else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
             defineValue(result, key, v);
@@ -724,8 +734,10 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             // `v` is defined here, so the key counts as present.
             const r = checks(v, context, path, key);
             if (r === FAIL) return true;
-            if (r === undefined) result[key] = undefined;
-            else if (dangerous) defineValue(result, key, r);
+            if (r === undefined) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            } else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
             defineValue(result, key, v);
@@ -763,8 +775,10 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
           if (checks) {
             const r = checks(v, context, path, key);
             if (r === FAIL) return true;
-            if (r === undefined) result[key] = undefined;
-            else if (dangerous) defineValue(result, key, r);
+            if (r === undefined) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            } else if (dangerous) defineValue(result, key, r);
             else result[key] = r;
           } else if (dangerous) {
             defineValue(result, key, v);
@@ -796,8 +810,12 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             (context.issues ??= []).push({ code: "invalid_type", expected: "nonoptional", input: undefined, path: [...path, key] } as $ZodRawIssue);
             return true;
           }
-          if (r === undefined) { if (present) result[key] = undefined; }
-          else if (dangerous) defineValue(result, key, r);
+          if (r === undefined) {
+            if (present) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            }
+          } else if (dangerous) defineValue(result, key, r);
           else result[key] = r;
           return false;
         };
@@ -828,8 +846,12 @@ function primitiveStepFactory(node: SchemaNode, checks: CompiledChecks | null, e
             (context.issues ??= []).push({ code: "invalid_type", expected: "nonoptional", input: undefined, path: [...path, key] } as $ZodRawIssue);
             return true;
           }
-          if (r === undefined) { if (present) result[key] = undefined; }
-          else if (dangerous) defineValue(result, key, r);
+          if (r === undefined) {
+            if (present) {
+              if (dangerous) defineValue(result, key, undefined);
+              else result[key] = undefined;
+            }
+          } else if (dangerous) defineValue(result, key, r);
           else result[key] = r;
           return false;
         };
@@ -867,7 +889,10 @@ function makeStep(key: string, child: CNode, optIn: boolean, optOut: boolean, da
       return true;
     }
     if (childResult === undefined) {
-      if (present) result[key] = undefined;
+      if (present) {
+        if (dangerous) defineValue(result, key, undefined);
+        else result[key] = undefined;
+      }
     } else if (dangerous) {
       defineValue(result, key, childResult);
     } else {

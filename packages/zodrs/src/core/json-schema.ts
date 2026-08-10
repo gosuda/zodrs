@@ -17,7 +17,7 @@
 
 import { globalRegistry } from "./registries.js";
 import type { $ZodRegistry, $ZodRegistrySchema, GlobalMeta } from "./registries.js";
-import type { Check, FormatId, SchemaNode } from "./nodes.js";
+import type { FormatId, SchemaNode } from "./nodes.js";
 import { bagOf } from "./introspect.js";
 import { escapeRegex } from "./util.js";
 import type { BaseSchema, JSONSchema } from "./json-schema-types.js";
@@ -1254,9 +1254,9 @@ function finalize(ctx: GenContext, schema: SchemaLike): JSONSchema {
       ...standardBase,
       jsonSchema: {
         input: (params?: { target?: string | undefined; libraryOptions?: ToJSONSchemaParams | undefined }) =>
-          generate(schema, { ...(params?.libraryOptions ?? {}), target: params?.target, io: "input" }),
+          generate(schema, { ...params?.libraryOptions, target: params?.target, io: "input" }),
         output: (params?: { target?: string | undefined; libraryOptions?: ToJSONSchemaParams | undefined }) =>
-          generate(schema, { ...(params?.libraryOptions ?? {}), target: params?.target, io: "output" }),
+          generate(schema, { ...params?.libraryOptions, target: params?.target, io: "output" }),
       },
     },
     enumerable: false,

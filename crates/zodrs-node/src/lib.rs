@@ -9,7 +9,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use slab::Slab;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, PoisonError, RwLock};
 use zodrs::CompiledPlan;
 
 /// Process-wide registry of compiled plans, keyed by slab index.
@@ -40,20 +40,13 @@ impl From<zodrs::Verdict> for Verdict {
     }
 }
 
-fn lock_error(op: &str) -> Error {
-    Error::new(
-        Status::GenericFailure,
-        format!("plan registry lock poisoned on {op}"),
-    )
-}
-
 /// Compiles a serialized plan and registers it in the slab.
 ///
 /// # Errors
 ///
 /// Returns an error when the plan JSON cannot be deserialized or when its
 /// arena is structurally invalid.
-#[napi]
+#[napi(catch_unwind)]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi boundary: JS passes the plan JSON by value across the FFI"
@@ -61,19 +54,18 @@ fn lock_error(op: &str) -> Error {
 pub fn compile(plan_json: String) -> Result<u32> {
     let plan =
         zodrs::compile(&plan_json).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-    let mut plans = PLANS.write().map_err(|_| lock_error("compile"))?;
+    let mut plans = PLANS.write().unwrap_or_else(PoisonError::into_inner);
     let key = plans.insert(plan);
     Ok(u32::try_from(key).unwrap_or(u32::MAX))
 }
 
 /// Removes a compiled plan from the slab. Unknown handles are a no-op.
-#[napi]
+#[napi(catch_unwind)]
 pub fn dispose(plan: u32) {
-    if let Ok(mut plans) = PLANS.write() {
-        let index = plan as usize;
-        if plans.contains(index) {
-            plans.remove(index);
-        }
+    let mut plans = PLANS.write().unwrap_or_else(PoisonError::into_inner);
+    let index = plan as usize;
+    if plans.contains(index) {
+        plans.remove(index);
     }
 }
 
@@ -82,13 +74,13 @@ pub fn dispose(plan: u32) {
 /// # Errors
 ///
 /// Returns an error when `plan` is not a registered handle.
-#[napi]
+#[napi(catch_unwind)]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi boundary: the Uint8Array handle arrives by value from JS"
 )]
 pub fn validate_json(plan: u32, input: Uint8Array) -> Result<Verdict> {
-    let plans = PLANS.read().map_err(|_| lock_error("validate_json"))?;
+    let plans = PLANS.read().unwrap_or_else(PoisonError::into_inner);
     let index = plan as usize;
     let Some(compiled) = plans.get(index) else {
         return Err(Error::new(

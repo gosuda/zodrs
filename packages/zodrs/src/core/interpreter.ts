@@ -3,7 +3,6 @@ import { finalizeNested, ZodError } from "./errors.js";
 import { checkUrl, patternForFormat, testFormat } from "./formats.js";
 import { optinOf, optoutOf } from "./introspect.js";
 import type {
-  Check,
   HostRuntimeCheck,
   RuntimeCheck,
   SchemaNode,
@@ -15,6 +14,7 @@ import {
   isObject,
   isPlainObject,
   NUMBER_FORMAT_RANGES,
+  setOwn,
   shallowClone,
 } from "./util.js";
 import type { FAIL as FailType, MaybeAsync, Primitive } from "./util.js";
@@ -185,10 +185,9 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
         addIssue(context, { code: "invalid_format", format: check.format ?? "unknown", input: value, inst: { error: runtime.error }, path, continue: runtime.abort !== true } as $ZodRawIssue);
       } else if (check.op === "overwrite" || check.op === "transform" || check.op === "preprocess") value = result;
     } else if (check.c === "property") {
-      if (isObject(value)) {
-        const result = runSync(check.schema, value[check.key], context, [...path, check.key]);
-        if (result === FAIL) failed = true;
-      }
+      const propertyValue = (value as Record<PropertyKey, unknown>)[check.key];
+      const result = runSync(check.schema, propertyValue, context, [...path, check.key]);
+      if (result === FAIL) failed = true;
     } else {
       const origin = node.kind === "array" ? "array" : node.kind === "set" ? "set" : node.kind === "map" ? "map" : node.kind;
       switch (check.c) {
@@ -444,7 +443,7 @@ function objectResult(node: SchemaNode & { readonly kind: "object" }, input: unk
 }
 
 function objectShapeResult(node: SchemaNode & { readonly kind: "object" }, input: Record<PropertyKey, unknown>, context: ValidationContext, path: PropertyKey[]): unknown | FailType {
-  const result: Record<string, unknown> = {};
+  const result: Record<PropertyKey, unknown> = {};
   let failed = false;
   const known: Record<string, true> = Object.create(null) as Record<string, true>;
   for (const [key, child] of Object.entries(node.shape)) {
@@ -468,10 +467,8 @@ function objectShapeResult(node: SchemaNode & { readonly kind: "object" }, input
       failed = true;
       continue;
     }
-    if (childResult === undefined) {
-      if (present) result[key] = undefined;
-    } else {
-      Object.defineProperty(result, key, { value: childResult, enumerable: true, writable: true, configurable: true });
+    if (childResult !== undefined || present) {
+      setOwn(result, key, childResult);
     }
   }
   const extra = Object.keys(input).filter((key) => !known[key] && key !== "__proto__");
@@ -479,10 +476,10 @@ function objectShapeResult(node: SchemaNode & { readonly kind: "object" }, input
     for (const key of extra) {
       const childResult = runSync(node.catchall, input[key], context, [...path, key]);
       if (childResult === FAIL) failed = true;
-      else Object.defineProperty(result, key, { value: childResult, enumerable: true, writable: true, configurable: true });
+      else setOwn(result, key, childResult);
     }
   } else if (node.mode === "passthrough") {
-    for (const key of extra) Object.defineProperty(result, key, { value: input[key], enumerable: true, writable: true, configurable: true });
+    for (const key of extra) setOwn(result, key, input[key]);
   } else if (node.mode === "strict" && extra.length > 0) {
     // unrecognized_keys is recorded but the stripped value stays usable (Zod's
     // payload model): intersections merge it, the top-level parse still fails.
@@ -782,7 +779,7 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
           }
           const outKey = String(parsedKey);
           const parsed = runSync(node.value, (input as Record<PropertyKey, unknown>)[stringKey], context, [...path, key]);
-          if (parsed === FAIL) failed = true; else result[outKey] = parsed;
+          if (parsed === FAIL) failed = true; else setOwn(result, outKey, parsed);
         }
         const extra = Object.keys(input).filter((key) => !expected.has(key));
         if (extra.length > 0) { issue(context, node, path, { code: "unrecognized_keys", keys: extra }, input); failed = true; }
@@ -804,13 +801,13 @@ function runSync(node: SchemaNode, original: unknown, context: ValidationContext
           if (numericKey !== FAIL) { parsedKey = numericKey; keyContext.issues = retry.issues; }
         }
         if (parsedKey === FAIL) {
-          if (node.mode === "loose") { result[key] = value; continue; } // pass non-matching keys through unchanged
+          if (node.mode === "loose") { setOwn(result, key, value); continue; } // pass non-matching keys through unchanged
           issue(context, node, [...path, key], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key);
           failed = true;
           continue;
         }
         const parsed = runSync(node.value, value, context, [...path, key]);
-        if (parsed === FAIL) failed = true; else result[parsedKey as PropertyKey] = parsed;
+        if (parsed === FAIL) failed = true; else setOwn(result, parsedKey as PropertyKey, parsed);
       }
       if (failed) return FAIL;
       output = result;
@@ -908,6 +905,18 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
   let failed = false;
   const initialLen = context.issues?.length ?? 0;
   for (const runtime of node.checks) {
+    if (runtime.check.c === "property") {
+      if (runtime.when) {
+        const shouldRun = runtime.when({ value, issues: context.issues ?? [] });
+        if (!shouldRun) continue;
+      }
+      const before = context.issues?.length ?? 0;
+      const propertyValue = (value as Record<PropertyKey, unknown>)[runtime.check.key];
+      const result = await runAsync(runtime.check.schema, propertyValue, context, [...path, runtime.check.key]);
+      if (result === FAIL || (context.issues?.length ?? 0) > before) failed = true;
+      if ((context.issues?.length ?? 0) > before && abortedSince(context, before)) break;
+      continue;
+    }
     if (runtime.check.c !== "host_runtime") { synchronous.push(runtime); continue; }
     if (runtime.when) {
       const shouldRun = runtime.when({ value, issues: context.issues ?? [] });
@@ -1036,7 +1045,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
       if (checked === FAIL) return FAIL;
       return checked === input ? canary : runAsync({ ...node, checks: [] }, checked, context, path);
     }
-    const result: Record<string, unknown> = {}; let failed = false; const known: Record<string, true> = Object.create(null) as Record<string, true>;
+    const result: Record<PropertyKey, unknown> = {}; let failed = false; const known: Record<string, true> = Object.create(null) as Record<string, true>;
     for (const [key, child] of Object.entries(node.shape)) {
       known[key] = true;
       const present = Object.prototype.hasOwnProperty.call(input, key);
@@ -1054,13 +1063,15 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
         failed = true;
         continue;
       }
-      if (parsed === undefined) { if (present) result[key] = undefined; }
-      else result[key] = parsed;
+      if (parsed !== undefined || present) {
+        if (parsed === undefined) { if (present) setOwn(result, key, undefined); }
+        else setOwn(result, key, parsed);
+      }
     }
     const extraKeys = Object.keys(input).filter((entry) => !known[entry] && entry !== "__proto__");
     for (const key of extraKeys) {
-      if (node.catchall) { const parsed = await runAsync(node.catchall, input[key], context, [...path, key]); if (parsed === FAIL) failed = true; else result[key] = parsed; }
-      else if (node.mode === "passthrough") result[key] = input[key];
+      if (node.catchall) { const parsed = await runAsync(node.catchall, input[key], context, [...path, key]); if (parsed === FAIL) failed = true; else setOwn(result, key, parsed); }
+      else if (node.mode === "passthrough") setOwn(result, key, input[key]);
       else if (node.mode === "strict") { issue(context, node, path, { code: "unrecognized_keys", keys: extraKeys }, input); break; }
     }
     if (failed) { if (node.checks.length > 0) await applyChecksAsync(node, input, context, path); return FAIL; }
@@ -1211,7 +1222,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
         const parsedKey = await runAsync(node.key, key, keyContext, []);
         if (parsedKey === FAIL) { issue(context, node, [...path, stringKey], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key); failed = true; continue; }
         const parsed = await runAsync(node.value, (input as Record<PropertyKey, unknown>)[stringKey], context, [...path, key]);
-        if (parsed === FAIL) failed = true; else result[String(parsedKey)] = parsed;
+        if (parsed === FAIL) failed = true; else setOwn(result, String(parsedKey), parsed);
       }
       const extra = Object.keys(input).filter((key) => !expected.has(key));
       if (extra.length > 0) { issue(context, node, path, { code: "unrecognized_keys", keys: extra }, input); failed = true; }
@@ -1229,13 +1240,13 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
         if (numeric !== FAIL) { parsedKey = numeric; keyContext.issues = retry.issues; }
       }
       if (parsedKey === FAIL) {
-        if (node.mode === "loose") { result[key] = value; continue; }
+        if (node.mode === "loose") { setOwn(result, key, value); continue; }
         issue(context, node, [...path, key], { code: "invalid_key", origin: "record", issues: keyContext.issues ?? [] }, key);
         failed = true;
         continue;
       }
       const parsed = await runAsync(node.value, value, context, [...path, key]);
-      if (parsed === FAIL) failed = true; else result[parsedKey as PropertyKey] = parsed;
+      if (parsed === FAIL) failed = true; else setOwn(result, parsedKey as PropertyKey, parsed);
     }
     if (failed) { if (node.checks.length > 0) await applyChecksAsync(node, input, context, path); return FAIL; }
     return applyChecksAsync(node, result, context, path);
@@ -1272,8 +1283,8 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     }
     return failed ? FAIL : applyChecksAsync(node, result, context, path);
   }
-  if (node.checks.some((runtime) => runtime.check.c === "host_runtime")) {
-    // Leaf/compound node carrying host (possibly async) checks: validate the
+  if (node.checks.some((runtime) => runtime.check.c === "host_runtime" || runtime.check.c === "property")) {
+    // Leaf/compound node carrying host (possibly async) checks or property checks: validate the
     // underlying type without running checks synchronously, then apply them async.
     const base = runSync({ ...node, checks: [] }, input, context, path);
     return base === FAIL ? FAIL : applyChecksAsync(node, base, context, path);

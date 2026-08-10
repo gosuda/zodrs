@@ -39,6 +39,7 @@ export type $ZodInvalidTypeExpected =
 export interface $ZodIssueInvalidType<Input = unknown> extends $ZodIssueBase {
   readonly code: "invalid_type";
   readonly expected: $ZodInvalidTypeExpected;
+  readonly received?: string;
   readonly input?: Input;
 }
 
@@ -285,7 +286,7 @@ export const defaultError: $ZodErrorMap = (issue) => {
   switch (issue.code) {
     case "invalid_type": {
       const expected = issue.expected === "nan" ? "NaN" : issue.expected;
-      const receivedType = parsedType(issue.input);
+      const receivedType = issue.received ?? parsedType(issue.input);
       const received = receivedType === "nan" ? "NaN" : receivedType;
       return `Invalid input: expected ${expected}, received ${received}`;
     }

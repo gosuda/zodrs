@@ -13,6 +13,7 @@ export type FormatId =
   | "sha384" | "sha512" | (string & {});
 
 export type Check =
+  | { readonly c: "unsupported" }
   | { readonly c: "min_length" | "max_length" | "length" | "min_size" | "max_size" | "size"; readonly v: number }
   | { readonly c: "gt" | "lt"; readonly v: number | string; readonly inclusive: boolean; readonly bigint?: true }
   | { readonly c: "multiple_of"; readonly v: number | string }
@@ -29,6 +30,7 @@ export type Check =
   | { readonly c: "host"; readonly fn: number };
 
 export type PlanNode =
+  | { readonly k: "unsupported" }
   | { readonly k: "string" | "number" | "bigint" | "date" | "file"; readonly checks: Check[]; readonly coerce?: true }
   | { readonly k: "boolean"; readonly coerce?: true }
   | { readonly k: "null" | "undefined" | "any" | "unknown" | "never" | "void" | "symbol" | "nan" }
@@ -42,7 +44,7 @@ export type PlanNode =
   | { readonly k: "intersection"; readonly left: NodeId; readonly right: NodeId }
   | { readonly k: "record"; readonly key: NodeId; readonly value: NodeId }
   | { readonly k: "map" | "set"; readonly key?: NodeId; readonly value: NodeId; readonly checks: Check[] }
-  | { readonly k: "optional" | "nullable" | "nonoptional" | "readonly" | "lazy" | "promise"; readonly inner: NodeId }
+  | { readonly k: "optional" | "exact_optional" | "nullable" | "nonoptional" | "readonly" | "lazy" | "promise"; readonly inner: NodeId }
   | { readonly k: "default" | "prefault" | "catch"; readonly inner: NodeId; readonly value: JSONType | null; readonly dynamic: boolean }
   | { readonly k: "pipe"; readonly a: NodeId; readonly b: NodeId }
   | { readonly k: "templateLiteral"; readonly pattern: string }
@@ -71,7 +73,7 @@ export type DynamicValue = (context?: { readonly error?: unknown; readonly input
 
 export type HostRuntimeCheck = { readonly c: "host_runtime"; readonly op: HostOperation; readonly fn: HostFunction; readonly format?: string; readonly pattern?: RegExp | undefined };
 export type PropertyBuildCheck = { readonly c: "property"; readonly key: string; readonly schema: SchemaNode };
-export type WireCheck = Exclude<Check, { readonly c: "property" } | { readonly c: "host" }>;
+export type WireCheck = Exclude<Check, { readonly c: "property" } | { readonly c: "host" } | { readonly c: "unsupported" }>;
 
 export interface RuntimeCheck {
   readonly check: WireCheck | PropertyBuildCheck | HostRuntimeCheck;

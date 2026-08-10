@@ -252,6 +252,140 @@ impl From<serde_json::Error> for CompileError {
     }
 }
 
+fn compile_node_dispatch(node: &PlanNode, eligible: &mut bool) -> NodeDispatch {
+    let mut dispatch = NodeDispatch::default();
+    match node {
+        PlanNode::Object { keys, .. } => {
+            let mut words = Vec::with_capacity(keys.len());
+            let mut long = Vec::new();
+            for (schema_i, key) in keys.iter().enumerate() {
+                // Mirrors `PROTO_KEYS` in packages/zodrs/src/core/plan.ts:
+                // JS resolves such a key through `Object.prototype` when
+                // the input omits it, which the byte walk cannot see.
+                if is_proto_key(key) {
+                    *eligible = false;
+                }
+                let kb = key.as_bytes();
+                if kb.len() <= 8 {
+                    words.push(KeyWord {
+                        word: pack_key(kb),
+                        len: kb.len(),
+                        schema_i,
+                    });
+                } else {
+                    long.push((key.clone(), schema_i));
+                }
+            }
+            words.sort_by(|a, b| a.len.cmp(&b.len).then(a.word.cmp(&b.word)));
+            long.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+            dispatch.object = Some(ObjectDispatch { words, long });
+        }
+        PlanNode::DiscUnion { map, .. } => {
+            let mut compiled = DiscUnionDispatch::default();
+            for (literal, id) in map {
+                match LiteralValue::from_json(literal) {
+                    Some(key) => compiled.insert(key, *id),
+                    None => *eligible = false,
+                }
+            }
+            dispatch.disc_union = Some(compiled);
+        }
+        PlanNode::TemplateLiteral { pattern } => match Regex::new(pattern) {
+            Ok(regex) => dispatch.template = Some(regex),
+            Err(_) => *eligible = false,
+        },
+        // Wire-visible unsupported node kinds cannot preserve JS semantics.
+        PlanNode::Unsupported
+        | PlanNode::Host { .. }
+        | PlanNode::BigInt { .. }
+        | PlanNode::Date { .. }
+        | PlanNode::File { .. }
+        | PlanNode::Map { .. }
+        | PlanNode::Set { .. }
+        | PlanNode::Symbol
+        | PlanNode::Nan
+        | PlanNode::Promise { .. }
+        | PlanNode::Intersection { .. }
+        | PlanNode::Readonly { .. }
+        | PlanNode::Pipe { .. }
+        | PlanNode::Default { dynamic: true, .. }
+        | PlanNode::Prefault { dynamic: true, .. }
+        | PlanNode::Catch { dynamic: true, .. } => *eligible = false,
+        PlanNode::String { .. }
+        | PlanNode::Number { .. }
+        | PlanNode::Boolean { .. }
+        | PlanNode::Null
+        | PlanNode::Undefined
+        | PlanNode::Any
+        | PlanNode::Unknown
+        | PlanNode::Never
+        | PlanNode::Void
+        | PlanNode::Literal { .. }
+        | PlanNode::Enum { .. }
+        | PlanNode::Array { .. }
+        | PlanNode::Tuple { .. }
+        | PlanNode::Union { .. }
+        | PlanNode::Record { .. }
+        | PlanNode::Optional { .. }
+        | PlanNode::ExactOptional { .. }
+        | PlanNode::Nullable { .. }
+        | PlanNode::NonOptional { .. }
+        | PlanNode::Lazy { .. }
+        | PlanNode::Default { dynamic: false, .. }
+        | PlanNode::Prefault { dynamic: false, .. }
+        | PlanNode::Catch { dynamic: false, .. } => {}
+    }
+    dispatch
+}
+
+fn compile_node_checks(node: &PlanNode, dispatch: &mut NodeDispatch, eligible: &mut bool) {
+    let Some(checks) = node_checks(node) else {
+        return;
+    };
+    dispatch.checks.reserve(checks.len());
+    for check in checks {
+        let compiled = match check {
+            Check::Regex { src, flags } => compile_js_regex(src, flags).map_or_else(
+                |()| {
+                    *eligible = false;
+                    None
+                },
+                |regex| Some(CompiledCheck::Regex(regex)),
+            ),
+            Check::Format { v, params } => formats::compile(v, params.as_ref()).map_or_else(
+                |_| {
+                    *eligible = false;
+                    None
+                },
+                |format| Some(CompiledCheck::Format(format)),
+            ),
+            Check::Host { .. } | Check::Property { .. } | Check::Unsupported => {
+                *eligible = false;
+                None
+            }
+            Check::MinLength { .. }
+            | Check::MaxLength { .. }
+            | Check::Length { .. }
+            | Check::MinSize { .. }
+            | Check::MaxSize { .. }
+            | Check::Size { .. }
+            | Check::Gt { .. }
+            | Check::Lt { .. }
+            | Check::MultipleOf { .. }
+            | Check::NumberFormat { .. }
+            | Check::BigIntFormat { .. }
+            | Check::StartsWith { .. }
+            | Check::EndsWith { .. }
+            | Check::Includes { .. }
+            | Check::Lowercase
+            | Check::Uppercase
+            | Check::Overwrite { .. }
+            | Check::Mime { .. } => None,
+        };
+        dispatch.checks.push(compiled);
+    }
+}
+
 /// Deserializes and compiles a plan.
 ///
 /// A host node/check or a regex that Rust's linear-time `regex` crate cannot
@@ -269,91 +403,10 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
 
     let mut eligible = true;
     let mut dispatch = Vec::with_capacity(raw.nodes.len());
-
     for node in &raw.nodes {
-        let mut d = NodeDispatch::default();
-
-        match node {
-            PlanNode::Object { keys, .. } => {
-                let mut words = Vec::with_capacity(keys.len());
-                let mut long = Vec::new();
-                for (schema_i, key) in keys.iter().enumerate() {
-                    // Mirrors `PROTO_KEYS` in packages/zodrs/src/core/plan.ts:
-                    // JS resolves such a key through `Object.prototype` when
-                    // the input omits it, which the byte walk cannot see.
-                    if is_proto_key(key) {
-                        eligible = false;
-                    }
-                    let kb = key.as_bytes();
-                    if kb.len() <= 8 {
-                        words.push(KeyWord {
-                            word: pack_key(kb),
-                            len: kb.len(),
-                            schema_i,
-                        });
-                    } else {
-                        long.push((key.clone(), schema_i));
-                    }
-                }
-                words.sort_by(|a, b| a.len.cmp(&b.len).then(a.word.cmp(&b.word)));
-                long.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
-                d.object = Some(ObjectDispatch { words, long });
-            }
-            PlanNode::DiscUnion { map, .. } => {
-                let mut compiled = DiscUnionDispatch::default();
-                for (literal, id) in map {
-                    match LiteralValue::from_json(literal) {
-                        Some(k) => compiled.insert(k, *id),
-                        None => eligible = false,
-                    }
-                }
-                d.disc_union = Some(compiled);
-            }
-            PlanNode::TemplateLiteral { pattern } => match Regex::new(pattern) {
-                Ok(r) => d.template = Some(r),
-                Err(_) => eligible = false,
-            },
-            // A bigint parses to a JS `BigInt`: no JSON encoding, and its
-            // bounds arrive as decimal strings the f64 walk cannot compare.
-            // Mirrors the same rule in `packages/zodrs/src/core/plan.ts`.
-            PlanNode::Host { .. }
-            | PlanNode::BigInt { .. }
-            | PlanNode::Default { dynamic: true, .. }
-            | PlanNode::Prefault { dynamic: true, .. }
-            | PlanNode::Catch { dynamic: true, .. } => eligible = false,
-            _ => {}
-        }
-
-        if let Some(checks) = node_checks(node) {
-            d.checks.reserve(checks.len());
-            for check in checks {
-                let compiled = match check {
-                    Check::Regex { src, flags } => compile_js_regex(src, flags).map_or_else(
-                        |()| {
-                            eligible = false;
-                            None
-                        },
-                        |r| Some(CompiledCheck::Regex(r)),
-                    ),
-                    Check::Format { v, params } => formats::compile(v, params.as_ref())
-                        .map_or_else(
-                            |_| {
-                                eligible = false;
-                                None
-                            },
-                            |f| Some(CompiledCheck::Format(f)),
-                        ),
-                    Check::Host { .. } => {
-                        eligible = false;
-                        None
-                    }
-                    _ => None,
-                };
-                d.checks.push(compiled);
-            }
-        }
-
-        dispatch.push(d);
+        let mut node_dispatch = compile_node_dispatch(node, &mut eligible);
+        compile_node_checks(node, &mut node_dispatch, &mut eligible);
+        dispatch.push(node_dispatch);
     }
 
     compute_optionality(&raw.nodes, &mut dispatch);
@@ -402,7 +455,7 @@ fn optionality(
     }
     visiting[id as usize] = true;
     let flags = match &nodes[id as usize] {
-        PlanNode::Optional { .. } => (true, true),
+        PlanNode::Optional { .. } | PlanNode::ExactOptional { .. } => (true, true),
         PlanNode::Default { .. } | PlanNode::Prefault { .. } => (true, false),
         PlanNode::Catch { inner, .. } => (true, optionality(nodes, memo, visiting, *inner).1),
         PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
@@ -465,6 +518,35 @@ fn compile_js_regex(src: &str, flags: &str) -> Result<Regex, ()> {
     builder.build().map_err(|_| ())
 }
 
+fn validate_object_edges(
+    key_count: usize,
+    values: &[NodeId],
+    optional_count: usize,
+    catchall: Option<NodeId>,
+    len: usize,
+    at: usize,
+) -> Result<(), CompileError> {
+    if key_count != values.len() || key_count != optional_count {
+        return Err(CompileError::new(format!(
+            "node {at} object keys/values/optional lengths differ"
+        )));
+    }
+    for id in values {
+        edge(*id, len, &format!("node {at} object value"))?;
+    }
+    if let Some(id) = catchall {
+        edge(id, len, &format!("node {at} object catchall"))?;
+    }
+    Ok(())
+}
+
+fn validate_many_edges(ids: &[NodeId], len: usize, field: &str) -> Result<(), CompileError> {
+    for id in ids {
+        edge(*id, len, field)?;
+    }
+    Ok(())
+}
+
 /// Check every arena edge once at compile time so the validation walk may
 /// index directly without branches. Cycles are valid; out-of-bounds edges are
 /// not.
@@ -484,35 +566,19 @@ fn validate_arena(plan: &RawPlan) -> Result<(), CompileError> {
                 optional,
                 catchall,
                 ..
-            } => {
-                if keys.len() != values.len() || keys.len() != optional.len() {
-                    return Err(CompileError::new(format!(
-                        "node {at} object keys/values/optional lengths differ"
-                    )));
-                }
-                for id in values {
-                    edge(*id, len, &here("object value"))?;
-                }
-                if let Some(id) = catchall {
-                    edge(*id, len, &here("object catchall"))?;
-                }
-            }
+            } => validate_object_edges(keys.len(), values, optional.len(), *catchall, len, at)?,
             PlanNode::Array { element, checks } => {
                 edge(*element, len, &here("array element"))?;
                 check_edges(checks, len, at)?;
             }
             PlanNode::Tuple { items, rest } => {
-                for id in items {
-                    edge(*id, len, &here("tuple item"))?;
-                }
+                validate_many_edges(items, len, &here("tuple item"))?;
                 if let Some(id) = rest {
                     edge(*id, len, &here("tuple rest"))?;
                 }
             }
             PlanNode::Union { options } => {
-                for id in options {
-                    edge(*id, len, &here("union option"))?;
-                }
+                validate_many_edges(options, len, &here("union option"))?;
             }
             PlanNode::DiscUnion { map, .. } => {
                 for (_, id) in map {
@@ -539,6 +605,7 @@ fn validate_arena(plan: &RawPlan) -> Result<(), CompileError> {
                 check_edges(checks, len, at)?;
             }
             PlanNode::Optional { inner }
+            | PlanNode::ExactOptional { inner }
             | PlanNode::Nullable { inner }
             | PlanNode::NonOptional { inner }
             | PlanNode::Readonly { inner }
@@ -559,7 +626,20 @@ fn validate_arena(plan: &RawPlan) -> Result<(), CompileError> {
             | PlanNode::BigInt { checks, .. }
             | PlanNode::Date { checks, .. }
             | PlanNode::File { checks } => check_edges(checks, len, at)?,
-            _ => {}
+            PlanNode::Boolean { .. }
+            | PlanNode::Null
+            | PlanNode::Undefined
+            | PlanNode::Any
+            | PlanNode::Unknown
+            | PlanNode::Never
+            | PlanNode::Void
+            | PlanNode::Symbol
+            | PlanNode::Nan
+            | PlanNode::Literal { .. }
+            | PlanNode::Enum { .. }
+            | PlanNode::TemplateLiteral { .. }
+            | PlanNode::Host { inner: None, .. }
+            | PlanNode::Unsupported => {}
         }
     }
     Ok(())
