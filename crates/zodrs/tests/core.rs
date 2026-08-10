@@ -1214,6 +1214,8 @@ fn cyclic_lazy_object_falls_back() {
     ]));
     let v = validate(&p, br"{}");
     assert_eq!(v.status, 3, "expected fallback for cyclic lazy: {v:?}");
+    let v = validate(&p, br#"{"a":1}"#);
+    assert_eq!(v.status, 3, "expected fallback for cyclic lazy: {v:?}");
 }
 
 #[test]
