@@ -109,11 +109,11 @@ describe("object shape property access", () => {
   });
 });
 
-describe("__proto__ result writes keep own keys and the original prototype", () => {
+describe.each([["codegen", false],["interpreter", true]] as const)("__proto__ result writes keep own keys and the original prototype (%s)", (_mode, jitless) => {
   let wasJitless: boolean | undefined;
   beforeAll(() => {
     wasJitless = config().jitless;
-    config({ jitless: true });
+    config({ jitless });
   });
   afterAll(() => {
     config({ jitless: wasJitless });

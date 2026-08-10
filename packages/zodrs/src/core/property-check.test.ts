@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as z from "../classic/index.js";
 import { config } from "./config.js";
 
-describe("property check", () => {
+describe.each([["codegen", false],["interpreter", true]] as const)("property check (%s)", (_mode, jitless) => {
   let wasJitless: boolean | undefined;
   beforeAll(() => {
     wasJitless = config().jitless;
-    config({ jitless: true });
+    config({ jitless });
   });
   afterAll(() => {
     config({ jitless: wasJitless });
