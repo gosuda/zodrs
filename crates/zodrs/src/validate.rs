@@ -95,6 +95,7 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         catch_count: 0,
         issue_mode: IssueMode::Collect,
         missing_values: vec![None; plan.nodes().len()],
+        hops: ABSENT_MAX_HOPS,
     };
     v.check(plan.root(), &value);
 
@@ -167,6 +168,8 @@ struct Validator<'p> {
     issue_mode: IssueMode,
     /// Canonical concrete outputs produced by missing fields or tuple slots.
     missing_values: Vec<Option<Json>>,
+    /// Budget for wrapper/plan-edge hops without consuming input.
+    hops: usize,
 }
 
 impl<'p> Validator<'p> {
@@ -226,6 +229,31 @@ impl<'p> Validator<'p> {
         reason = "one arm per plan-node kind reads clearer than a split; some distinct kinds share a no-op body; tuple lengths are small integers"
     )]
     fn check(&mut self, id: NodeId, value: &Value) {
+        // Bound wrapper/plan-edge traversals that can cycle without consuming
+        // input (Lazy self-reference, etc.) the same way eval_missing uses
+        // ABSENT_MAX_HOPS. Exhaustion falls back to the JS path.
+        let is_wrapper = matches!(
+            self.node(id),
+            PlanNode::Optional { .. }
+                | PlanNode::ExactOptional { .. }
+                | PlanNode::NonOptional { .. }
+                | PlanNode::Readonly { .. }
+                | PlanNode::Lazy { .. }
+                | PlanNode::Promise { .. }
+                | PlanNode::Default { .. }
+                | PlanNode::Prefault { .. }
+                | PlanNode::Nullable { .. }
+                | PlanNode::Catch { .. }
+                | PlanNode::Pipe { .. }
+                | PlanNode::Intersection { .. }
+        );
+        if is_wrapper {
+            if self.hops == 0 {
+                self.fallback = true;
+                return;
+            }
+            self.hops -= 1;
+        }
         match self.node(id) {
             PlanNode::Any | PlanNode::Unknown => {}
             PlanNode::Never => self.invalid_type("never"),
@@ -510,6 +538,9 @@ impl<'p> Validator<'p> {
             }
             PlanNode::Host { .. } => {} // unreachable: host poisons eligibility
             PlanNode::Unsupported => self.fallback = true,
+        }
+        if is_wrapper {
+            self.hops += 1;
         }
     }
 
@@ -1304,7 +1335,9 @@ impl<'p> Validator<'p> {
             }
         };
         if let Missing::Value(value) = &result {
-            self.missing_values[id as usize] = Some(value.clone());
+            if let Some(slot) = self.missing_values.get_mut(id as usize) {
+                *slot = Some(value.clone());
+            }
         }
         result
     }
@@ -1660,6 +1693,7 @@ fn option_matches(plan: &CompiledPlan, id: NodeId, value: &Value) -> bool {
         catch_count: 0,
         issue_mode: IssueMode::Collect,
         missing_values: vec![None; plan.nodes().len()],
+        hops: ABSENT_MAX_HOPS,
     };
     v.check(id, value);
     !v.fallback && v.issues.is_empty()

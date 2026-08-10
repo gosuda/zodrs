@@ -47,6 +47,7 @@ pub fn scan(plan: &CompiledPlan, input: &[u8]) -> Scan {
         i: 0,
         depth: 0,
         dirty_hint: false,
+        hops: 256,
     };
     s.ws();
     if s.value(plan.root()) {
@@ -73,6 +74,7 @@ struct Scanner<'a> {
     /// a hard failure is; once set, the verdict is `Defer` regardless, and
     /// every further check short-circuits.
     dirty_hint: bool,
+    hops: usize,
 }
 
 /// SWAR constants for the inline string scanner.
@@ -450,8 +452,15 @@ impl<'a> Scanner<'a> {
             }
             PlanNode::DiscUnion { key, .. } => self.disc_union(id, key),
             PlanNode::Intersection { left, right } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let (left, right) = (*left, *right);
-                self.value(left) && self.value(right)
+                let res = self.value(left) && self.value(right);
+                self.hops += 1;
+                res
             }
             PlanNode::Record { .. } => self.record(id),
             PlanNode::Optional { inner }
@@ -462,36 +471,65 @@ impl<'a> Scanner<'a> {
             | PlanNode::Promise { inner }
             | PlanNode::Default { inner, .. }
             | PlanNode::Prefault { inner, .. } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let inner = *inner;
-                self.value(inner)
+                let res = self.value(inner);
+                self.hops += 1;
+                res
             }
             PlanNode::Nullable { inner } => {
                 if self.peek() == Some(b'n') {
                     self.eat(b"null")
                 } else {
+                    if self.hops == 0 {
+                        self.dirty_hint = true;
+                        return false;
+                    }
+                    self.hops -= 1;
                     let inner = *inner;
-                    self.value(inner)
+                    let res = self.value(inner);
+                    self.hops += 1;
+                    res
                 }
             }
             PlanNode::Catch { .. } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 // A clean inner value stays clean; a failure fires the catch,
                 // which rewrites the output: the node validates dirty.
                 let mark = self.i;
                 let PlanNode::Catch { inner, .. } = self.node(id) else {
+                    self.hops += 1;
                     return false;
                 };
                 let inner = *inner;
-                if self.value(inner) {
+                let res = if self.value(inner) {
                     true
                 } else {
                     self.i = mark;
                     self.dirty_hint = true;
                     true
-                }
+                };
+                self.hops += 1;
+                res
             }
             PlanNode::Pipe { a, b } => {
+                if self.hops == 0 {
+                    self.dirty_hint = true;
+                    return false;
+                }
+                self.hops -= 1;
                 let (a, b) = (*a, *b);
-                self.value(a) && self.value(b)
+                let res = self.value(a) && self.value(b);
+                self.hops += 1;
+                res
             }
             PlanNode::TemplateLiteral { .. } => {
                 if self.peek() != Some(b'"') {
