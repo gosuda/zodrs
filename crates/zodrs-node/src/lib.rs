@@ -56,15 +56,14 @@ pub fn compile(plan_json: String) -> Result<u32> {
         zodrs::compile(&plan_json).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
     let mut plans = PLANS.write().unwrap_or_else(PoisonError::into_inner);
     let key = plans.insert(plan);
-    match u32::try_from(key) {
-        Ok(handle) => Ok(handle),
-        Err(_) => {
-            plans.remove(key);
-            Err(Error::new(
-                Status::GenericFailure,
-                "plan registry exhausted the 32-bit handle space",
-            ))
-        }
+    if let Ok(handle) = u32::try_from(key) {
+        Ok(handle)
+    } else {
+        plans.remove(key);
+        Err(Error::new(
+            Status::GenericFailure,
+            "plan registry exhausted the 32-bit handle space",
+        ))
     }
 }
 

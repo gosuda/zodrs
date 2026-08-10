@@ -911,18 +911,24 @@ async function applyChecksAsync(node: SchemaNode, initial: unknown, context: Val
   const initialLen = context.issues?.length ?? 0;
   for (const runtime of node.checks) {
     if (runtime.check.c === "property") {
-      if (runtime.when) {
-        const shouldRun = runtime.when({ value, issues: context.issues ?? [] });
-        if (!shouldRun) continue;
-      }
-      // Flush queued synchronous checks (e.g. trim) before reading the
-      // property so declaration order is preserved on the async path.
+      // Flush queued synchronous checks (e.g. trim) before evaluating `when`
+      // and the property so declaration order is preserved and `when` sees
+      // the post-transform value. If the flush produced an aborting issue,
+      // a property without its own `when` must be skipped, matching sync.
       if (synchronous.length > 0) {
+        const beforeFlush = context.issues?.length ?? 0;
         const flushNode = { ...node, checks: synchronous } as SchemaNode;
         const flushResult = applyChecksSync(flushNode, value, context, path);
         if (flushResult === FAIL) failed = true;
-        else value = flushResult;
+        else value = flushResult as unknown;
         synchronous.length = 0;
+        if ((context.issues?.length ?? 0) > beforeFlush && abortedSince(context, beforeFlush) && !runtime.when) {
+          continue;
+        }
+      }
+      if (runtime.when) {
+        const shouldRun = runtime.when({ value, issues: context.issues ?? [] });
+        if (!shouldRun) continue;
       }
       const check = runtime.check;
       if (value === null || value === undefined) {
