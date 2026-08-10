@@ -153,11 +153,11 @@ test("compile throw falls back to the TypeScript validator", () => {
     expect(compileCalls).toBe(1);
 
     expect(S.parseJson('{"a":"hello"}')).toEqual({ a: "hello" });
-    expect(compileCalls).toBe(2);
+    expect(compileCalls).toBe(1);
 
     const safe = S.safeParseJson('{"a":1}');
     expect(safe.success).toBe(false);
-    expect(compileCalls).toBe(3);
+    expect(compileCalls).toBe(1);
     expect(S._zod.nativePlan).toBe(null);
   } finally {
     registerNativeBackend(original);

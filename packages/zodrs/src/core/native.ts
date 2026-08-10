@@ -38,6 +38,8 @@ export interface NativeBackend {
 
 interface BackendRegistration {
   readonly backend: NativeBackend;
+  /** planJson strings that threw during compile on this backend generation. */
+  readonly failed: Set<string>;
 }
 
 const registrations = new WeakMap<NativePlanRef, BackendRegistration>();
@@ -56,7 +58,7 @@ function releasePlan(plan: NativePlanRef): void {
 
 /** Register a native/WASM backend, or clear it by passing `null`. */
 export function registerNativeBackend(candidate: NativeBackend | null): void {
-  registration = candidate === null ? null : { backend: candidate };
+  registration = candidate === null ? null : { backend: candidate, failed: new Set() };
 }
 
 export function getNativeBackend(): NativeBackend | null {
@@ -92,10 +94,14 @@ export function validateJson(
   }
 
   if (active === null) {
+    if (current.failed.has(planJson)) {
+      return { available: false, plan: null, verdict: null };
+    }
     try {
       active = current.backend.compile(planJson);
       registrations.set(active, current);
     } catch {
+      current.failed.add(planJson);
       return { available: false, plan: null, verdict: null };
     }
   }
