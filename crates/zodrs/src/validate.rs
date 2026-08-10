@@ -229,9 +229,10 @@ impl<'p> Validator<'p> {
         reason = "one arm per plan-node kind reads clearer than a split; some distinct kinds share a no-op body; tuple lengths are small integers"
     )]
     fn check(&mut self, id: NodeId, value: &Value) {
-        // Bound wrapper/plan-edge traversals that can cycle without consuming
-        // input (Lazy self-reference, etc.) the same way eval_missing uses
-        // ABSENT_MAX_HOPS. Exhaustion falls back to the JS path.
+        // All nodes that can recurse without consuming input — wrappers plus
+        // Pipe/Intersection — share one hop budget. A single list is
+        // intentional: any edge can participate in a cycle (e.g. Lazy) and
+        // is bounded like eval_missing's ABSENT_MAX_HOPS.
         let is_wrapper = matches!(
             self.node(id),
             PlanNode::Optional { .. }
