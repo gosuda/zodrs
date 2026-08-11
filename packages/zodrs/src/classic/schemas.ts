@@ -87,6 +87,9 @@ export type TupleInput<T extends readonly SomeType[], Rest extends SomeType | nu
 
 function errorMap(params?: ErrorParam): $ZodErrorMap | undefined {
   if (typeof params === "string") return () => params;
+  if (params?.message !== undefined && params.error !== undefined) {
+    throw new Error("Cannot specify both `message` and `error` params");
+  }
   const candidate = params?.error ?? params?.message;
   if (typeof candidate === "string") return () => candidate;
   return candidate;

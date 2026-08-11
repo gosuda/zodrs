@@ -16,18 +16,6 @@ behavior is a bug in zodrs, not an excision.
   `from "zod/v3"` (rewritten to `zodrs/v3` before excision). No v3
   compat layer ships in zodrs.
 
-## Excised test cases
-
-### `classic/tests/error.test.ts` — test `"do not allow error and message together"`
-
-- **Behavior pinned:** The deprecated `params.message` alias for `error`.
-  The test asserts that passing both `message` and `error` to a `.refine()`
-  call throws — it specifically tests the interaction between the
-  deprecated `message` parameter and the current `error` parameter.
-- **Reason:** zodrs cuts deprecated parameter aliases. The `message`
-  parameter alias is not supported; only `error` is. The test was replaced
-  with a comment pointing here.
-
 ## Noted: compat-only symbols used in tests (not excised)
 
 These tests use symbols exported only from Zod's `classic/compat.ts`,
@@ -174,11 +162,11 @@ no conformance evidence for that behavior.
 | Category | Count |
 |---|---|
 | Files excised | 1 (`core/tests/index.test.ts`) |
-| Test cases excised | 1 (`error.test.ts` "do not allow error and message together") |
+| Test cases excised | 0 |
 | Compat-only symbols noted (not excised) | 4 files (`ZodIssueCode` ×2, `setErrorMap` ×2) |
 | Deprecated `message` parameter alias noted | ~6+ files (not excised) |
 | Deprecated type aliases noted | 1 (`ZodErrorMap`) |
-| Internal module names noted | 5 names across 6 files |
+| Internal module names noted | 5 names across 8 files |
 | Inert upstream tests noted (not excised) | 2 (`lazy.test.ts`, `coalesce.test.ts`) |
 | **Total source files** | **109** |
 | **Total vendored files** | **108** (109 − 1 excised) |
