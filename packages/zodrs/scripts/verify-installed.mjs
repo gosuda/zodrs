@@ -5,7 +5,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const TOOL = "zodrs-verify-installed";
-const SOURCE_PACKAGE_DIR = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
+const DEFAULT_EXPECTED_PACKAGE_DIR = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
 const PLAN =
   '[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"string","checks":[{"c":"min_length","v":3}]}]';
 const INPUT = new TextEncoder().encode('{"a":"abcd"}');
@@ -73,11 +73,12 @@ function errorMessage(error) {
   return error instanceof Error ? (error.stack ?? error.message) : String(error);
 }
 
-function verify(packageArg, tier) {
+function verify(packageArg, tier, expectedPackageArg = DEFAULT_EXPECTED_PACKAGE_DIR) {
   const packageDir = realpathSync(resolve(packageArg));
-  const expectedManifest = readManifest(SOURCE_PACKAGE_DIR);
+  const expectedPackageDir = realpathSync(resolve(expectedPackageArg));
+  const expectedManifest = readManifest(expectedPackageDir);
   const manifest = readManifest(packageDir);
-  const expectedName = expectedManifest.publishConfig.name;
+  const expectedName = expectedManifest.publishConfig?.name ?? expectedManifest.name;
   if (manifest.name !== expectedName) {
     throw new Error(`${packageDir} name is ${JSON.stringify(manifest.name)}, expected ${JSON.stringify(expectedName)}`);
   }
@@ -87,13 +88,13 @@ function verify(packageArg, tier) {
     );
   }
   if (tier === "wasm") {
-    requireAbsent(SOURCE_PACKAGE_DIR, DEBUG_WASM);
+    requireAbsent(expectedPackageDir, DEBUG_WASM);
     requireAbsent(packageDir, DEBUG_WASM);
   }
 
   const tierFiles = TIER_FILES[tier];
   const artifacts = tierFiles.files.map((relativePath) => {
-    const expected = regularFile(SOURCE_PACKAGE_DIR, relativePath);
+    const expected = regularFile(expectedPackageDir, relativePath);
     const installed = regularFile(packageDir, relativePath);
     if (installed.sha256 !== expected.sha256) {
       throw new Error(`${relativePath} SHA-256 ${installed.sha256} does not match release artifact ${expected.sha256}`);
@@ -123,7 +124,7 @@ function verify(packageArg, tier) {
 
   return {
     tool: TOOL,
-    package: expectedManifest.publishConfig.name,
+    package: expectedName,
     version: expectedManifest.version,
     tier,
     artifacts,
@@ -134,9 +135,10 @@ function verify(packageArg, tier) {
 
 const packageArg = process.argv[2];
 const tier = process.argv[3];
+const expectedPackageArg = process.argv[4];
 if (packageArg === undefined || (tier !== "native" && tier !== "wasm")) {
   process.stderr.write(
-    `${JSON.stringify({ tool: TOOL, ok: false, error: "usage: verify-installed <package-directory> <native|wasm>" })}\n`,
+    `${JSON.stringify({ tool: TOOL, ok: false, error: "usage: verify-installed <package-directory> <native|wasm> [expected-package-directory]" })}\n`,
   );
   process.exitCode = 2;
 } else {
@@ -150,7 +152,7 @@ if (packageArg === undefined || (tier !== "native" && tier !== "wasm")) {
   }
 
   try {
-    process.stdout.write(`${JSON.stringify(verify(packageArg, tier))}\n`);
+    process.stdout.write(`${JSON.stringify(verify(packageArg, tier, expectedPackageArg))}\n`);
   } catch (error) {
     process.stderr.write(`${JSON.stringify({ tool: TOOL, tier, ok: false, error: errorMessage(error) })}\n`);
     process.exitCode = 1;

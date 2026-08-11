@@ -23,7 +23,7 @@ export interface SuiteResult {
 }
 
 const BENCH_DIR = dirname(fileURLToPath(import.meta.url));
-const RESULTS_DIR = join(BENCH_DIR, "results");
+const RESULTS_DIR = process.env.BENCH_RESULTS_DIR?.trim() || join(BENCH_DIR, "results");
 const BENCH_FILTER = process.env.BENCH_FILTER?.trim() || undefined;
 const LOADER = process.env.ZODRS_LOADER?.trim() || undefined;
 const BACKEND = process.env.ZODRS_BACKEND?.trim() || undefined;

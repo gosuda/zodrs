@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test gate.test.mjs",
     "run": "tsx ./index.ts",
     "string": "tsx ./string.ts",
     "number": "tsx ./number.ts",

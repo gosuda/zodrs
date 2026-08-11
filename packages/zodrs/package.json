@@ -94,7 +94,7 @@
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "verify:installed": "node scripts/verify-installed.mjs",
     "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
-    "test": "vitest run"
+    "test": "node --test scripts/*.test.mjs && vitest run"
   },
   "engines": {
     "node": ">=20.17"
