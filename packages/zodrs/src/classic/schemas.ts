@@ -377,7 +377,22 @@ export class $ZodType<Output = unknown, Input = Output> implements RuntimeSchema
   }
 
   get parse(): (data: unknown, params?: ParseContext) => Output {
-    const fn = (data: unknown, params?: ParseContext) => parsing.parse(this, data, params);
+    if (!Object.hasOwn(this, "_zod")) {
+      return (data, params) => parsing.parse(this, data, params);
+    }
+    const schemaNode = this["_zod"].node;
+    let fn: (data: unknown, params?: ParseContext) => Output;
+    if (schemaNode.kind === "string" && schemaNode.coerce !== true && schemaNode.checks.length === 0) {
+      fn = (data, params) => params === undefined && typeof data === "string"
+        ? data as Output
+        : parsing.parse(this, data, params);
+    } else if (schemaNode.kind === "number" && schemaNode.coerce !== true && schemaNode.checks.length === 0) {
+      fn = (data, params) => params === undefined && typeof data === "number" && Number.isFinite(data)
+        ? data as Output
+        : parsing.parse(this, data, params);
+    } else {
+      fn = (data, params) => parsing.parse(this, data, params);
+    }
     shadowParseMethod(this, "parse", fn);
     return fn;
   }
