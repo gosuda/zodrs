@@ -95,6 +95,7 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         catch_count: 0,
         issue_mode: IssueMode::Collect,
         missing_values: vec![None; plan.nodes().len()],
+        decisions: SmallVec::new(),
         hops: ABSENT_MAX_HOPS,
     };
     v.check(plan.root(), &value);
@@ -121,7 +122,8 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
         return Verdict::fallback();
     }
     let mut out = String::new();
-    write_output(plan, plan.root(), &value, &mut out, &v.missing_values);
+    let metadata = OutputMetadata::new(&v.missing_values, &v.decisions);
+    write_output(plan, plan.root(), &value, &mut out, &metadata);
     Verdict {
         status: 1,
         payload: Some(out),
@@ -134,9 +136,39 @@ enum IssueMode {
     Suppress,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ValueIdentity(usize);
+
+impl ValueIdentity {
+    fn of(value: &Value) -> Self {
+        Self(std::ptr::from_ref(value).addr())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct DecisionKey {
+    node: NodeId,
+    value: ValueIdentity,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutputDecision {
+    Union(NodeId),
+    CatchInner,
+    CatchFallback,
+    DiscUnion(NodeId),
+}
+
+#[derive(Clone, Copy)]
+struct DecisionEntry {
+    key: DecisionKey,
+    value: OutputDecision,
+}
+
 #[derive(Clone, Copy)]
 struct ValidationMark {
     issues_len: usize,
+    decisions_len: usize,
     fail_count: usize,
     catch_count: usize,
     dirty: bool,
@@ -168,6 +200,7 @@ struct Validator<'p> {
     issue_mode: IssueMode,
     /// Canonical concrete outputs produced by missing fields or tuple slots.
     missing_values: Vec<Option<Json>>,
+    decisions: SmallVec<[DecisionEntry; 16]>,
     /// Budget for wrapper/plan-edge hops without consuming input.
     hops: usize,
 }
@@ -183,6 +216,7 @@ impl<'p> Validator<'p> {
     fn mark(&self) -> ValidationMark {
         ValidationMark {
             issues_len: self.issues.len(),
+            decisions_len: self.decisions.len(),
             fail_count: self.fail_count,
             catch_count: self.catch_count,
             dirty: self.dirty,
@@ -192,10 +226,29 @@ impl<'p> Validator<'p> {
 
     fn restore(&mut self, mark: ValidationMark) {
         self.issues.truncate(mark.issues_len);
+        self.decisions.truncate(mark.decisions_len);
         self.fail_count = mark.fail_count;
         self.catch_count = mark.catch_count;
         self.dirty = mark.dirty;
         self.nonfinite = mark.nonfinite;
+    }
+
+    fn record_decision(&mut self, node: NodeId, value: &Value, decision: OutputDecision) {
+        let key = DecisionKey {
+            node,
+            value: ValueIdentity::of(value),
+        };
+        debug_assert!(
+            self.decisions
+                .iter()
+                .filter(|entry| entry.key == key)
+                .all(|entry| entry.value == decision),
+            "conflicting output decisions for the same node and value"
+        );
+        self.decisions.push(DecisionEntry {
+            key,
+            value: decision,
+        });
     }
 
     fn push(&mut self, issue: Issue) {
@@ -395,7 +448,7 @@ impl<'p> Validator<'p> {
                 }
             }
             PlanNode::Union { options } => {
-                self.check_union(options, value);
+                self.check_union(id, options, value);
             }
             PlanNode::DiscUnion { key, .. } => {
                 self.check_disc_union(id, key, value);
@@ -462,7 +515,9 @@ impl<'p> Validator<'p> {
                     } else {
                         let key_val: Value =
                             sonic_rs::from_str(&json_string(k)).unwrap_or_default();
+                        let decisions_len = self.decisions.len();
                         self.check(key_id, &key_val);
+                        self.decisions.truncate(decisions_len);
                     }
                     let key_failed = self.fail_count != before_f;
                     if key_failed {
@@ -503,14 +558,15 @@ impl<'p> Validator<'p> {
             }
             PlanNode::Catch { inner, .. } => {
                 let inner = *inner;
-                let before_i = self.issues.len();
-                let before_f = self.fail_count;
+                let mark = self.mark();
                 self.check(inner, value);
-                if self.fail_count != before_f {
-                    self.issues.truncate(before_i);
-                    self.fail_count = before_f;
+                if self.fail_count == mark.fail_count {
+                    self.record_decision(id, value, OutputDecision::CatchInner);
+                } else {
+                    self.restore(mark);
                     self.catch_count += 1;
                     self.dirty = true; // catch value replaces the input
+                    self.record_decision(id, value, OutputDecision::CatchFallback);
                 }
             }
             PlanNode::Pipe { a, b } => {
@@ -1066,28 +1122,22 @@ impl<'p> Validator<'p> {
         }
     }
 
-    fn check_union(&mut self, options: &[NodeId], value: &Value) {
+    fn check_union(&mut self, id: NodeId, options: &[NodeId], value: &Value) {
         let saved_issue_mode = self.issue_mode;
         let union_path = self.path.clone();
-        let union_dirty = self.dirty;
-        let union_nonfinite = self.nonfinite;
-        let entry_fails = self.fail_count;
         // Dry-run pass: the first passing option wins. Failures are detected
         // from the fail counter with issue construction suppressed, so an
         // option that does not match costs no allocation.
         for opt in options {
+            let mark = self.mark();
             self.issue_mode = IssueMode::Suppress;
             self.check(*opt, value);
             self.issue_mode = saved_issue_mode;
-            if self.fail_count == entry_fails {
+            if self.fail_count == mark.fail_count {
+                self.record_decision(id, value, OutputDecision::Union(*opt));
                 return; // first successful option wins
             }
-            // A failed option may still have probed (and abandoned) branches
-            // of its own nested unions; erase those suppressed probes so the
-            // next option is measured from a clean baseline.
-            self.fail_count = entry_fails;
-            self.dirty = union_dirty;
-            self.nonfinite = union_nonfinite;
+            self.restore(mark);
         }
         // Every option failed: re-run with issue collection to build the
         // canonical branch errors. Sub-issues keep paths relative to the
@@ -1096,13 +1146,13 @@ impl<'p> Validator<'p> {
         // the union path.
         let mut branch_issues: Vec<Vec<Issue>> = Vec::new();
         for opt in options {
-            let before = self.issues.len();
+            let mark = self.mark();
             self.path = PathRef::new();
             self.check(*opt, value);
             self.path.clone_from(&union_path);
-            let branch = self.issues.split_off(before);
+            let branch = self.issues[mark.issues_len..].to_vec();
+            self.restore(mark);
             branch_issues.push(branch);
-            self.dirty = union_dirty;
         }
         // Canonical flattening: when exactly one branch is "nonaborted"
         // (all its issues have `aborting == false`, mirroring TS
@@ -1155,6 +1205,7 @@ impl<'p> Validator<'p> {
                 .and_then(|d| d.find_value(v))
         });
         if let Some(node) = target {
+            self.record_decision(id, value, OutputDecision::DiscUnion(node));
             return self.check(node, value);
         }
 
@@ -1180,159 +1231,161 @@ impl<'p> Validator<'p> {
         reason = "missing input must follow every JSON-eligible wrapper and union"
     )]
     fn eval_missing(&mut self, id: NodeId, hops: &mut usize) -> Missing {
-        if *hops == 0 {
+        let decisions_len = self.decisions.len();
+        let result = if *hops == 0 {
             self.fallback = true;
-            return Missing::Cycle;
-        }
-        *hops -= 1;
-
-        let result = match self.node(id) {
-            PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
-                Missing::Undefined
-            }
-            PlanNode::Optional { inner } => {
-                let inner = *inner;
-                if self.dispatch(inner).optin_optional {
+            Missing::Cycle
+        } else {
+            *hops -= 1;
+            match self.node(id) {
+                PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
+                    Missing::Undefined
+                }
+                PlanNode::Optional { inner } => {
+                    let inner = *inner;
+                    if self.dispatch(inner).optin_optional {
+                        let mark = self.mark();
+                        let before_catches = self.catch_count;
+                        match self.eval_missing(inner, hops) {
+                            Missing::Fail => {
+                                let catches = self.catch_count;
+                                self.restore(mark);
+                                self.catch_count = catches;
+                                Missing::Undefined
+                            }
+                            Missing::Value(_) if self.catch_count != before_catches => {
+                                let catches = self.catch_count;
+                                self.restore(mark);
+                                self.catch_count = catches;
+                                Missing::Undefined
+                            }
+                            other => other,
+                        }
+                    } else {
+                        Missing::Undefined
+                    }
+                }
+                PlanNode::ExactOptional { inner }
+                | PlanNode::Nullable { inner }
+                | PlanNode::Lazy { inner } => self.eval_missing(*inner, hops),
+                PlanNode::NonOptional { inner } => match self.eval_missing(*inner, hops) {
+                    Missing::Undefined => {
+                        self.invalid_type("nonoptional");
+                        Missing::Fail
+                    }
+                    other => other,
+                },
+                PlanNode::Default { value, .. } => Missing::Value(value.clone()),
+                PlanNode::Prefault { inner, value, .. } => {
+                    let (inner, value) = (*inner, value.clone());
+                    self.eval_concrete(inner, &value)
+                }
+                PlanNode::Catch { inner, value, .. } => {
+                    let (inner, value) = (*inner, value.clone());
                     let mark = self.mark();
-                    let before_catches = self.catch_count;
                     match self.eval_missing(inner, hops) {
                         Missing::Fail => {
-                            let catches = self.catch_count;
                             self.restore(mark);
-                            self.catch_count = catches;
-                            Missing::Undefined
-                        }
-                        Missing::Value(_) if self.catch_count != before_catches => {
-                            let catches = self.catch_count;
-                            self.restore(mark);
-                            self.catch_count = catches;
-                            Missing::Undefined
+                            self.catch_count += 1;
+                            self.dirty = true;
+                            Missing::Value(value)
                         }
                         other => other,
                     }
-                } else {
-                    Missing::Undefined
                 }
-            }
-            PlanNode::ExactOptional { inner }
-            | PlanNode::Nullable { inner }
-            | PlanNode::Lazy { inner } => self.eval_missing(*inner, hops),
-            PlanNode::NonOptional { inner } => match self.eval_missing(*inner, hops) {
-                Missing::Undefined => {
-                    self.invalid_type("nonoptional");
-                    Missing::Fail
-                }
-                other => other,
-            },
-            PlanNode::Default { value, .. } => Missing::Value(value.clone()),
-            PlanNode::Prefault { inner, value, .. } => {
-                let (inner, value) = (*inner, value.clone());
-                self.eval_concrete(inner, &value)
-            }
-            PlanNode::Catch { inner, value, .. } => {
-                let (inner, value) = (*inner, value.clone());
-                let mark = self.mark();
-                match self.eval_missing(inner, hops) {
-                    Missing::Fail => {
-                        self.restore(mark);
-                        self.catch_count += 1;
-                        self.dirty = true;
-                        Missing::Value(value)
-                    }
-                    other => other,
-                }
-            }
-            PlanNode::Union { options } => {
-                let union_path = self.path.clone();
-                let mut branch_errors = Vec::new();
-                let mut selected = None;
-                for option in options.clone() {
-                    let mark = self.mark();
-                    self.path = PathRef::new();
-                    let branch = self.eval_missing(option, hops);
-                    self.path.clone_from(&union_path);
-                    match branch {
-                        Missing::Fail => {
-                            if self.issue_mode == IssueMode::Collect {
-                                let issues = self.issues.split_off(mark.issues_len);
-                                branch_errors.push(issues_to_value(&issues));
+                PlanNode::Union { options } => {
+                    let union_path = self.path.clone();
+                    let mut branch_errors = Vec::new();
+                    let mut selected = None;
+                    for option in options.clone() {
+                        let mark = self.mark();
+                        self.path = PathRef::new();
+                        let branch = self.eval_missing(option, hops);
+                        self.path.clone_from(&union_path);
+                        match branch {
+                            Missing::Fail => {
+                                if self.issue_mode == IssueMode::Collect {
+                                    let issues = self.issues.split_off(mark.issues_len);
+                                    branch_errors.push(issues_to_value(&issues));
+                                }
+                                self.restore(mark);
                             }
-                            self.restore(mark);
-                        }
-                        success => {
-                            selected = Some(success);
-                            break;
+                            success => {
+                                selected = Some(success);
+                                break;
+                            }
                         }
                     }
+                    if let Some(success) = selected {
+                        success
+                    } else {
+                        self.emit(|path| {
+                            Issue::new("invalid_union", path)
+                                .with("errors", Json::Array(branch_errors))
+                        });
+                        Missing::Fail
+                    }
                 }
-                if let Some(success) = selected {
-                    success
-                } else {
+                PlanNode::Intersection { left, right } => {
+                    let (left, right) = (*left, *right);
+                    let a = self.eval_missing(left, hops);
+                    let b = self.eval_missing(right, hops);
+                    match (a, b) {
+                        (Missing::Cycle, _) | (_, Missing::Cycle) => Missing::Cycle,
+                        (Missing::Undefined, Missing::Undefined) => Missing::Undefined,
+                        (Missing::Value(value), Missing::Undefined)
+                        | (Missing::Undefined, Missing::Value(value)) => Missing::Value(value),
+                        (Missing::Value(Json::Object(mut a)), Missing::Value(Json::Object(b))) => {
+                            a.extend(b);
+                            Missing::Value(Json::Object(a))
+                        }
+                        (Missing::Value(a), Missing::Value(b)) if a == b => Missing::Value(a),
+                        (Missing::Fail, _)
+                        | (_, Missing::Fail)
+                        | (Missing::Value(_), Missing::Value(_)) => Missing::Fail,
+                    }
+                }
+                PlanNode::String { coerce: true, .. } => Missing::Value(Json::from("undefined")),
+                PlanNode::Boolean { coerce: true } => Missing::Value(Json::from(false)),
+                PlanNode::Number { coerce: true, .. } => {
                     self.emit(|path| {
-                        Issue::new("invalid_union", path).with("errors", Json::Array(branch_errors))
+                        Issue::new("invalid_type", path)
+                            .with("expected", Json::from("number"))
+                            .with("received", Json::from("NaN"))
                     });
                     Missing::Fail
                 }
-            }
-            PlanNode::Intersection { left, right } => {
-                let (left, right) = (*left, *right);
-                let a = self.eval_missing(left, hops);
-                let b = self.eval_missing(right, hops);
-                match (a, b) {
-                    (Missing::Cycle, _) | (_, Missing::Cycle) => Missing::Cycle,
-                    (Missing::Undefined, Missing::Undefined) => Missing::Undefined,
-                    (Missing::Value(value), Missing::Undefined)
-                    | (Missing::Undefined, Missing::Value(value)) => Missing::Value(value),
-                    (Missing::Value(Json::Object(mut a)), Missing::Value(Json::Object(b))) => {
-                        a.extend(b);
-                        Missing::Value(Json::Object(a))
-                    }
-                    (Missing::Value(a), Missing::Value(b)) if a == b => Missing::Value(a),
-                    (Missing::Fail, _)
-                    | (_, Missing::Fail)
-                    | (Missing::Value(_), Missing::Value(_)) => Missing::Fail,
+                PlanNode::String { coerce: false, .. }
+                | PlanNode::Number { coerce: false, .. }
+                | PlanNode::Boolean { coerce: false }
+                | PlanNode::BigInt { .. }
+                | PlanNode::Date { .. }
+                | PlanNode::File { .. }
+                | PlanNode::Null
+                | PlanNode::Never
+                | PlanNode::Symbol
+                | PlanNode::Nan
+                | PlanNode::Literal { .. }
+                | PlanNode::Enum { .. }
+                | PlanNode::Object { .. }
+                | PlanNode::Array { .. }
+                | PlanNode::Tuple { .. }
+                | PlanNode::DiscUnion { .. }
+                | PlanNode::Record { .. }
+                | PlanNode::Map { .. }
+                | PlanNode::Set { .. }
+                | PlanNode::TemplateLiteral { .. } => {
+                    self.check_missing(id);
+                    Missing::Fail
                 }
-            }
-            PlanNode::String { coerce: true, .. } => Missing::Value(Json::from("undefined")),
-            PlanNode::Boolean { coerce: true } => Missing::Value(Json::from(false)),
-            PlanNode::Number { coerce: true, .. } => {
-                self.emit(|path| {
-                    Issue::new("invalid_type", path)
-                        .with("expected", Json::from("number"))
-                        .with("received", Json::from("NaN"))
-                });
-                Missing::Fail
-            }
-            PlanNode::String { coerce: false, .. }
-            | PlanNode::Number { coerce: false, .. }
-            | PlanNode::Boolean { coerce: false }
-            | PlanNode::BigInt { .. }
-            | PlanNode::Date { .. }
-            | PlanNode::File { .. }
-            | PlanNode::Null
-            | PlanNode::Never
-            | PlanNode::Symbol
-            | PlanNode::Nan
-            | PlanNode::Literal { .. }
-            | PlanNode::Enum { .. }
-            | PlanNode::Object { .. }
-            | PlanNode::Array { .. }
-            | PlanNode::Tuple { .. }
-            | PlanNode::DiscUnion { .. }
-            | PlanNode::Record { .. }
-            | PlanNode::Map { .. }
-            | PlanNode::Set { .. }
-            | PlanNode::TemplateLiteral { .. } => {
-                self.check_missing(id);
-                Missing::Fail
-            }
-            PlanNode::Readonly { .. }
-            | PlanNode::Promise { .. }
-            | PlanNode::Pipe { .. }
-            | PlanNode::Host { .. }
-            | PlanNode::Unsupported => {
-                self.fallback = true;
-                Missing::Cycle
+                PlanNode::Readonly { .. }
+                | PlanNode::Promise { .. }
+                | PlanNode::Pipe { .. }
+                | PlanNode::Host { .. }
+                | PlanNode::Unsupported => {
+                    self.fallback = true;
+                    Missing::Cycle
+                }
             }
         };
         if let Missing::Value(value) = &result
@@ -1340,34 +1393,44 @@ impl<'p> Validator<'p> {
         {
             *slot = Some(value.clone());
         }
+        self.decisions.truncate(decisions_len);
         result
     }
 
     fn eval_concrete(&mut self, id: NodeId, input: &Json) -> Missing {
-        let Ok(bytes) = serde_json::to_vec(input) else {
-            self.fallback = true;
-            return Missing::Cycle;
-        };
-        let Ok(value) = sonic_rs::from_slice::<Value>(&bytes) else {
-            self.fallback = true;
-            return Missing::Cycle;
-        };
-        let before = self.fail_count;
-        self.check(id, &value);
-        if self.fallback {
-            return Missing::Cycle;
-        }
-        if self.fail_count != before {
-            return Missing::Fail;
-        }
-        let mut output = String::new();
-        write_output(self.plan, id, &value, &mut output, &self.missing_values);
-        if let Ok(value) = serde_json::from_str(&output) {
-            Missing::Value(value)
-        } else {
-            self.fallback = true;
-            Missing::Cycle
-        }
+        let decisions_len = self.decisions.len();
+        let result = (|| {
+            let Ok(bytes) = serde_json::to_vec(input) else {
+                self.fallback = true;
+                return Missing::Cycle;
+            };
+            let Ok(value) = sonic_rs::from_slice::<Value>(&bytes) else {
+                self.fallback = true;
+                return Missing::Cycle;
+            };
+            let before = self.fail_count;
+            self.check(id, &value);
+            if self.fallback {
+                return Missing::Cycle;
+            }
+            if self.fail_count != before {
+                return Missing::Fail;
+            }
+            let mut output = String::new();
+            {
+                let metadata =
+                    OutputMetadata::new(&self.missing_values, &self.decisions[decisions_len..]);
+                write_output(self.plan, id, &value, &mut output, &metadata);
+            }
+            if let Ok(value) = serde_json::from_str(&output) {
+                Missing::Value(value)
+            } else {
+                self.fallback = true;
+                Missing::Cycle
+            }
+        })();
+        self.decisions.truncate(decisions_len);
+        result
     }
 
     // ---- issue helpers -------------------------------------------------
@@ -1422,6 +1485,41 @@ impl<'p> Validator<'p> {
 // Canonical output emission (only when a valid parse went dirty).
 // ------------------------------------------------------------------------
 
+struct OutputMetadata<'a> {
+    missing_values: &'a [Option<Json>],
+    decisions: HashMap<DecisionKey, OutputDecision>,
+}
+
+impl<'a> OutputMetadata<'a> {
+    fn new(missing_values: &'a [Option<Json>], log: &[DecisionEntry]) -> Self {
+        let mut decisions = HashMap::with_capacity(log.len());
+        for entry in log {
+            if let Some(previous) = decisions.insert(entry.key, entry.value) {
+                debug_assert_eq!(previous, entry.value);
+            }
+        }
+        Self {
+            missing_values,
+            decisions,
+        }
+    }
+
+    fn decision(&self, node: NodeId, value: &Value) -> Option<OutputDecision> {
+        self.decisions
+            .get(&DecisionKey {
+                node,
+                value: ValueIdentity::of(value),
+            })
+            .copied()
+    }
+
+    fn missing(&self, node: NodeId) -> Option<&Json> {
+        self.missing_values
+            .get(node as usize)
+            .and_then(Option::as_ref)
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one arm per plan-node kind reads clearer than a split"
@@ -1431,7 +1529,7 @@ fn write_output(
     id: NodeId,
     value: &Value,
     out: &mut String,
-    missing_values: &[Option<Json>],
+    metadata: &OutputMetadata<'_>,
 ) {
     match &plan.nodes()[id as usize] {
         PlanNode::Object {
@@ -1452,8 +1550,8 @@ fn write_output(
             for (schema_i, key) in keys.iter().enumerate() {
                 if let Some(child) = lookup.get(key.as_str()) {
                     write_pair(key, out, &mut first);
-                    write_output(plan, values[schema_i], child, out, missing_values);
-                } else if let Some(missing) = &missing_values[values[schema_i] as usize] {
+                    write_output(plan, values[schema_i], child, out, metadata);
+                } else if let Some(missing) = metadata.missing(values[schema_i]) {
                     write_pair(key, out, &mut first);
                     out.push_str(&serde_json::to_string(missing).unwrap_or_else(|_| "null".into()));
                 }
@@ -1468,7 +1566,7 @@ fn write_output(
                     if !known {
                         write_pair(k, out, &mut first);
                         if let Some(ca) = catchall {
-                            write_output(plan, *ca, v, out, missing_values);
+                            write_output(plan, *ca, v, out, metadata);
                         } else {
                             append_raw(v, out);
                         }
@@ -1486,7 +1584,7 @@ fn write_output(
                 if i > 0 {
                     out.push(',');
                 }
-                write_output(plan, *element, elem, out, missing_values);
+                write_output(plan, *element, elem, out, metadata);
             }
             out.push(']');
         }
@@ -1503,9 +1601,9 @@ fn write_output(
             for (i, item_id) in items.iter().enumerate() {
                 if let Some(elem) = slice.get(i) {
                     let mut s = String::new();
-                    write_output(plan, *item_id, elem, &mut s, missing_values);
+                    write_output(plan, *item_id, elem, &mut s, metadata);
                     slots.push(Some(s));
-                } else if let Some(missing) = &missing_values[*item_id as usize] {
+                } else if let Some(missing) = metadata.missing(*item_id) {
                     slots.push(Some(
                         serde_json::to_string(missing).unwrap_or_else(|_| "null".into()),
                     ));
@@ -1516,7 +1614,7 @@ fn write_output(
             if let Some(rest_id) = rest {
                 for elem in slice.iter().skip(items.len()) {
                     let mut s = String::new();
-                    write_output(plan, *rest_id, elem, &mut s, missing_values);
+                    write_output(plan, *rest_id, elem, &mut s, metadata);
                     slots.push(Some(s));
                 }
             }
@@ -1555,7 +1653,7 @@ fn write_output(
                     continue; // records never retain __proto__ (see check)
                 }
                 write_pair(k, out, &mut first);
-                write_output(plan, *val, v, out, missing_values);
+                write_output(plan, *val, v, out, metadata);
             }
             out.push('}');
         }
@@ -1587,14 +1685,20 @@ fn write_output(
             inner,
             value: catch_val,
             ..
-        } => {
-            // Emit the caught fallback only when the inner schema would fail.
-            if option_matches(plan, *inner, value) {
-                write_output(plan, *inner, value, out, missing_values);
-            } else {
+        } => match metadata.decision(id, value) {
+            Some(OutputDecision::CatchInner) => {
+                write_output(plan, *inner, value, out, metadata);
+            }
+            Some(OutputDecision::CatchFallback) => {
                 out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
             }
-        }
+            _ if option_matches(plan, *inner, value) => {
+                write_output(plan, *inner, value, out, metadata);
+            }
+            _ => {
+                out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
+            }
+        },
         PlanNode::Optional { inner }
         | PlanNode::ExactOptional { inner }
         | PlanNode::NonOptional { inner }
@@ -1603,48 +1707,62 @@ fn write_output(
         | PlanNode::Promise { inner }
         | PlanNode::Default { inner, .. }
         | PlanNode::Prefault { inner, .. } => {
-            write_output(plan, *inner, value, out, missing_values);
+            write_output(plan, *inner, value, out, metadata);
         }
         PlanNode::Nullable { inner } => {
             if value.is_null() {
                 out.push_str("null");
             } else {
-                write_output(plan, *inner, value, out, missing_values);
+                write_output(plan, *inner, value, out, metadata);
             }
         }
-        PlanNode::Pipe { a, .. } => write_output(plan, *a, value, out, missing_values),
+        PlanNode::Pipe { a, .. } => write_output(plan, *a, value, out, metadata),
         PlanNode::Intersection { left, .. } => {
-            write_output(plan, *left, value, out, missing_values);
+            write_output(plan, *left, value, out, metadata);
         }
         PlanNode::Union { options } => {
-            // Re-select the first passing option for output.
+            if let Some(OutputDecision::Union(selected)) = metadata.decision(id, value)
+                && options.contains(&selected)
+            {
+                return write_output(plan, selected, value, out, metadata);
+            }
             for opt in options {
                 if option_matches(plan, *opt, value) {
-                    return write_output(plan, *opt, value, out, missing_values);
+                    return write_output(plan, *opt, value, out, metadata);
                 }
             }
             append_raw(value, out);
         }
-        PlanNode::DiscUnion { key, .. } => {
-            let target = value
-                .as_object()
-                .and_then(|o| {
-                    let mut disc: Option<&Value> = None;
-                    for (k, v) in o {
-                        if k == key {
-                            disc = Some(v);
+        PlanNode::DiscUnion { key, map } => {
+            let recorded = match metadata.decision(id, value) {
+                Some(OutputDecision::DiscUnion(target))
+                    if map.iter().any(|(_, node)| *node == target) =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            };
+            let target = recorded.or_else(|| {
+                value
+                    .as_object()
+                    .and_then(|o| {
+                        let mut disc: Option<&Value> = None;
+                        for (k, v) in o {
+                            if k == key {
+                                disc = Some(v);
+                            }
                         }
-                    }
-                    disc
-                })
-                .and_then(|v| {
-                    plan.dispatch[id as usize]
-                        .disc_union
-                        .as_ref()
-                        .and_then(|d| d.find_value(v))
-                });
+                        disc
+                    })
+                    .and_then(|v| {
+                        plan.dispatch[id as usize]
+                            .disc_union
+                            .as_ref()
+                            .and_then(|d| d.find_value(v))
+                    })
+            });
             match target {
-                Some(node) => write_output(plan, node, value, out, missing_values),
+                Some(node) => write_output(plan, node, value, out, metadata),
                 None => append_raw(value, out),
             }
         }
@@ -1694,6 +1812,7 @@ fn option_matches(plan: &CompiledPlan, id: NodeId, value: &Value) -> bool {
         catch_count: 0,
         issue_mode: IssueMode::Collect,
         missing_values: vec![None; plan.nodes().len()],
+        decisions: SmallVec::new(),
         hops: ABSENT_MAX_HOPS,
     };
     v.check(id, value);

@@ -126,6 +126,94 @@ fn fuzz_seed24301_case2357() {
     assert!(!out.contains("$weird"), "unknown key retained: {out}");
     assert!(out.contains(r#""tag":450"#), "known key dropped: {out}");
 }
+
+#[test]
+fn repeated_union_node_reuses_the_decision_for_each_value() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"union","options":[2,3]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":" x ","b":1}"#);
+    assert_eq!(v.status, 1, "trim must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":"x","b":1}"#));
+}
+
+#[test]
+fn repeated_catch_node_keeps_inner_and_fallback_decisions_separate() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"catch","inner":2,"value":"caught","dynamic":false},
+          {"k":"string","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":"ok","b":1}"#);
+    assert_eq!(v.status, 1, "catch must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":"ok","b":"caught"}"#));
+}
+
+#[test]
+fn failed_union_branch_does_not_keep_nested_output_decisions() {
+    let plan = compile(
+        r#"[
+          {"k":"union","options":[1,5]},
+          {"k":"object","keys":["x","tag"],"values":[2,4],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"union","options":[3,6]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"literal","values":["rejected"]},
+          {"k":"object","keys":["x","tag"],"values":[2,7],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"number","checks":[]},
+          {"k":"literal","values":["accepted"]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"x":" x ","tag":"accepted"}"#);
+    assert_eq!(v.status, 1, "the selected branch trims x: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"x":"x","tag":"accepted"}"#));
+}
+
+#[test]
+fn dirty_discriminated_union_reuses_its_selected_branch() {
+    let plan = compile(
+        r#"[
+          {"k":"discunion","key":"type","map":[["a",1],["b",5]]},
+          {"k":"object","keys":["type","value"],"values":[2,3],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"literal","values":["a"]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"string","checks":[]},
+          {"k":"object","keys":["type","value"],"values":[6,7],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"literal","values":["b"]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"type":"a","value":" x "}"#);
+    assert_eq!(v.status, 1, "trim must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"type":"a","value":"x"}"#));
+}
+
+#[test]
+fn prefault_temporary_decisions_do_not_replace_present_value_decisions() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["missing","present"],"values":[1,2],"optional":[true,false],"mode":"strip","catchall":null},
+          {"k":"prefault","inner":2,"value":" x ","dynamic":false},
+          {"k":"union","options":[3,4]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"present":1}"#);
+    assert_eq!(v.status, 1, "prefault must materialize missing: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"missing":"x","present":1}"#));
+}
 // ------------------------------------------------------------------------
 // Depth preflight (H6).
 // ------------------------------------------------------------------------
