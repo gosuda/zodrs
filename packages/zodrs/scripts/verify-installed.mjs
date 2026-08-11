@@ -10,10 +10,20 @@ const PLAN =
   '[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"string","checks":[{"c":"min_length","v":3}]}]';
 const INPUT = new TextEncoder().encode('{"a":"abcd"}');
 const DEBUG_WASM = "wasm/zodrs_node.wasm32-wasi.debug.wasm";
+function nativeTriple() {
+  const { platform, arch } = process;
+  if (platform === "linux" && arch === "x64") return "linux-x64-gnu";
+  throw new Error(
+    `unsupported host: platform=${JSON.stringify(platform)} arch=${JSON.stringify(arch)}; no native artifact is shipped for this pair`,
+  );
+}
+
+const NATIVE_TRIPLE = nativeTriple();
+const NATIVE_ENTRY = `native/zodrs_node.${NATIVE_TRIPLE}.node`;
 const TIER_FILES = {
   native: {
-    entry: "native/zodrs_node.linux-x64-gnu.node",
-    files: ["native/zodrs_node.linux-x64-gnu.node"],
+    entry: NATIVE_ENTRY,
+    files: [NATIVE_ENTRY],
   },
   wasm: {
     entry: "wasm/zodrs_node.wasi.cjs",

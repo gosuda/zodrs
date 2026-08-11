@@ -72,9 +72,16 @@ jobs:
           repository=$(node -p "require('./packages/zodrs/package.json').repository.url")
           workspace_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           crate_version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "zodrs") | .version')
-          if [[ "$version" != "$npm_version" || "$version" != "$workspace_version" || "$version" != "$crate_version" ]]; then
-            printf 'release version mismatch: tag=%s npm=%s workspace=%s crate=%s\n' \
-              "$version" "$npm_version" "$workspace_version" "$crate_version" >&2
+          node_package_version=$(node -p "require('./crates/zodrs-node/package.json').version")
+          smoke_package_version=$(node -p "require('./crates/zodrs-node/smoke/package.json').version")
+          native_package_version=$(node -p "require('./packages/zodrs/native/package.json').version")
+          wasm_package_version=$(node -p "require('./packages/zodrs/wasm/package.json').version")
+          if [[ "$version" != "$npm_version" || "$version" != "$workspace_version" || "$version" != "$crate_version" || \
+                "$version" != "$node_package_version" || "$version" != "$smoke_package_version" || \
+                "$version" != "$native_package_version" || "$version" != "$wasm_package_version" ]]; then
+            printf 'release version mismatch: tag=%s npm=%s workspace=%s crate=%s node=%s smoke=%s native=%s wasm=%s\n' \
+              "$version" "$npm_version" "$workspace_version" "$crate_version" \
+              "$node_package_version" "$smoke_package_version" "$native_package_version" "$wasm_package_version" >&2
             exit 1
           fi
           test "$npm_name" = "zod-rs"
@@ -129,7 +136,7 @@ jobs:
               npm publish "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" \
                 --dry-run --json --ignore-scripts --access public > "$RUNNER_TEMP/npm-dry-run.json"
               jq -e --arg name "$NPM_NAME" --arg version "$VERSION" \
-                '.[$name] | select(.name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
+                '(if type == "array" then .[] else . end) | select(.name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
               ;;
             200) echo "$NPM_NAME $VERSION already exists; publish job will verify its exact integrity" ;;
             *) echo "npm registry lookup returned HTTP $status" >&2; exit 1 ;;
@@ -243,6 +250,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          npm install --global npm@12.0.2
+          hash -r
+          test "$(npm --version)" = "12.0.2"
           npm_version=$(npm --version)
           node -e '
             const [major, minor, patch] = process.argv[1].split(".").map(Number);
@@ -390,6 +400,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: |
           set -uo pipefail
+          set +e
           cargo publish --package zodrs --locked --no-verify
           publish_status=$?
           set -e
@@ -418,6 +429,7 @@ jobs:
         run: |
           set -uo pipefail
           tarball="$RUNNER_TEMP/release/$NPM_TARBALL_NAME"
+          set +e
           npm publish "$tarball" --ignore-scripts --access public --provenance
           publish_status=$?
           set -e

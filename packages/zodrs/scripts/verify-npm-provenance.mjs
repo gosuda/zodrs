@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { pathToFileURL } from "node:url";
 
 const REPOSITORY = "https://github.com/metaphorics/zodrs";
-const WORKFLOW = "/.github/workflows/publish.yml";
+const WORKFLOW = ".github/workflows/publish.yml";
 const BUILDER = "https://github.com/actions/runner/github-hosted";
 const PROVENANCE_TYPE = "https://slsa.dev/provenance/v1";
 
@@ -20,7 +20,13 @@ export function expectedAttestationUrl(packageName, version) {
   return `https://registry.npmjs.org/-/npm/v1/attestations/${packageName}@${version}`;
 }
 
-export function verifyProvenance(document, expected) {
+// Matches the decoded in-toto SLSA provenance *statement* against the expected
+// release identity. This does NOT verify the DSSE envelope signature, the Fulcio
+// certificate, or the Rekor log entry — those are authenticated separately by
+// `npm audit signatures` in the verify-public job. The statement itself is
+// falsifiable (npm generates it from build env vars), so callers must rely on
+// the signature audit, not this function, for cryptographic authenticity.
+export function matchProvenanceStatement(document, expected) {
   const attestations = document?.attestations;
   if (!Array.isArray(attestations)) throw new ProvenanceMismatch("attestations is missing");
   const attestation = attestations.find((candidate) => candidate?.predicateType === PROVENANCE_TYPE);
@@ -92,7 +98,7 @@ async function main() {
 
   const text = await response.text();
   if (text.length > 5_000_000) throw new ProvenanceMismatch("attestation response is too large");
-  verifyProvenance(JSON.parse(text), { packageName, version, gitSha, gitRef, integrity });
+  matchProvenanceStatement(JSON.parse(text), { packageName, version, gitSha, gitRef, integrity });
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
