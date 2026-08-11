@@ -11,7 +11,7 @@ import * as v from "valibot";
 import * as z4 from "zod4";
 import { type as ark } from "arktype";
 import { z } from "zodrs";
-import { metabench } from "./metabench.js";
+import { consume, metabench } from "./metabench.js";
 
 // ── Simple 3-field object (matches Zod's bench) ──────────────────────────
 
@@ -159,26 +159,26 @@ z4LargeSchema.safeParse(JSON.parse(largeJson));
 
 const bench = metabench("z.object().parse", {
   zodrs() {
-    for (const d of DATA) zodrsSchema.parse(d);
+    for (const d of DATA) consume(zodrsSchema.parse(d));
   },
   zod4() {
-    for (const d of DATA) z4Schema.parse(d);
+    for (const d of DATA) consume(z4Schema.parse(d));
   },
   arktype() {
-    for (const d of DATA) arkSchema(d);
+    for (const d of DATA) consume(arkSchema(d));
   },
   valibot() {
-    for (const d of DATA) v.parse(valibotSchema, d);
+    for (const d of DATA) consume(v.parse(valibotSchema, d));
   },
 });
 
 // parseJson variant — separate group so it gets its own table
 const benchJson = metabench("object.safeParseJson (4KB payload)", {
   "zodrs.safeParseJson"() {
-    zodrsLargeSchema.safeParseJson(largeBuf);
+    consume(zodrsLargeSchema.safeParseJson(largeBuf));
   },
   "zod4 (JSON.parse + safeParse)"() {
-    z4LargeSchema.safeParse(JSON.parse(largeJson));
+    consume(z4LargeSchema.safeParse(JSON.parse(largeJson)));
   },
 });
 

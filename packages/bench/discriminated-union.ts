@@ -18,16 +18,16 @@ import * as v from "valibot";
 import * as z4 from "zod4";
 import { type as ark } from "arktype";
 import { z } from "zodrs";
-import { metabench } from "./metabench.js";
+import { consume, metabench } from "./metabench.js";
 import { makeData, randomPick, randomString } from "./benchUtil.js";
 
 const types = ["a", "b", "c", "d", "e", "f", "g"] as const;
 
-function makeFields(z: typeof z4) {
+function makeFields(library: typeof z4) {
   return {
-    data1: z.string(),
-    data2: z.string(),
-    data3: z.string(),
+    data1: library.string(),
+    data2: library.string(),
+    data3: library.string(),
   };
 }
 
@@ -86,16 +86,16 @@ arkSchema(DATA[0]);
 
 const bench = metabench("z.discriminatedUnion().parse", {
   zodrs() {
-    for (const item of DATA) zodrsUnion.parse(item);
+    for (const item of DATA) consume(zodrsUnion.parse(item));
   },
   zod4() {
-    for (const item of DATA) z4Union.parse(item);
+    for (const item of DATA) consume(z4Union.parse(item));
   },
   arktype() {
-    for (const item of DATA) arkSchema(item);
+    for (const item of DATA) consume(arkSchema(item));
   },
   valibot() {
-    for (const item of DATA) v.parse(valibotSchema, item);
+    for (const item of DATA) consume(v.parse(valibotSchema, item));
   },
 });
 

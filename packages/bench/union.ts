@@ -9,7 +9,7 @@ import * as v from "valibot";
 import * as z4 from "zod4";
 import { type as ark } from "arktype";
 import { z } from "zodrs";
-import { metabench } from "./metabench.js";
+import { consume, metabench } from "./metabench.js";
 
 const zodrsSchema = z.union([
   z.object({ type: z.literal("a") }),
@@ -41,16 +41,16 @@ arkSchema(DATA);
 
 const bench = metabench("z.union().parse", {
   zodrs() {
-    zodrsSchema.parse(DATA);
+    consume(zodrsSchema.parse(DATA));
   },
   zod4() {
-    z4Schema.parse(DATA);
+    consume(z4Schema.parse(DATA));
   },
   arktype() {
-    arkSchema(DATA);
+    consume(arkSchema(DATA));
   },
   valibot() {
-    v.parse(valibotSchema, DATA);
+    consume(v.parse(valibotSchema, DATA));
   },
 });
 

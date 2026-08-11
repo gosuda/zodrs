@@ -22,3 +22,7 @@ compact_str.workspace = true
 
 [dev-dependencies]
 rstest = "0.25"
+
+[[bench]]
+name = "core"
+harness = false
