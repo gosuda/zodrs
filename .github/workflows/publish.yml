@@ -129,7 +129,7 @@ jobs:
               npm publish "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" \
                 --dry-run --json --ignore-scripts --access public > "$RUNNER_TEMP/npm-dry-run.json"
               jq -e --arg name "$NPM_NAME" --arg version "$VERSION" \
-                'select(.name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
+                '.[$name] | select(.name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
               ;;
             200) echo "$NPM_NAME $VERSION already exists; publish job will verify its exact integrity" ;;
             *) echo "npm registry lookup returned HTTP $status" >&2; exit 1 ;;
