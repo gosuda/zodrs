@@ -113,4 +113,37 @@ describe("tag-only union dispatch", () => {
     expect(schema.parse(input)).toEqual({ type: "b", payload: "ok" });
     expect(reads).toBe(2);
   });
+
+  it("re-reads the discriminator during selected object validation", () => {
+    let reads = 0;
+    const schema = z.discriminatedUnion("type", [
+      z.object({ type: z.literal("a"), s: z.string(), n: z.number() }),
+      z.object({ type: z.literal("c"), s: z.string(), n: z.number(), b: z.boolean() }),
+    ]);
+    const input = Object.defineProperty(
+      { s: "ok", n: 1, b: true },
+      "type",
+      {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads += 1;
+          return reads === 1 ? "a" : "b";
+        },
+      },
+    );
+
+    const result = schema.safeParse(input);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(reads).toBe(2);
+    expect(result.error.issues).toEqual([
+      {
+        code: "invalid_value",
+        values: ["a"],
+        path: ["type"],
+        message: 'Invalid input: expected "a"',
+      },
+    ]);
+  });
 });

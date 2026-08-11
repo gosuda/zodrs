@@ -999,7 +999,193 @@ function composeSteps(steps: ShapeStep[]): ShapeStep {
   }
 }
 
+type RawObjectSlot =
+  | { readonly key: string; readonly kind: "string" | "number" | "boolean"; readonly error: unknown }
+  | { readonly key: string; readonly kind: "literal"; readonly error: unknown; readonly literal: Primitive };
+
+function extractRawObjectSlots(node: SchemaNode & { readonly kind: "object" }): readonly RawObjectSlot[] | null {
+  if (node.mode !== "strip" || node.catchall || node.checks.length !== 0) return null;
+  const entries = Object.entries(node.shape);
+  if (entries.length !== 3 && entries.length !== 4) return null;
+  const slots: RawObjectSlot[] = [];
+  for (const [key, child] of entries) {
+    if (key === "__proto__"
+      || optinOf(child) === "optional"
+      || optoutOf(child) === "optional"
+      || child.checks.length !== 0
+      || ("coerce" in child && child.coerce === true)) return null;
+    if (child.kind === "string" || child.kind === "number" || child.kind === "boolean") {
+      slots.push({ key, kind: child.kind, error: child.error });
+    } else if (child.kind === "literal" && child.values.length === 1 && child.values[0] !== undefined) {
+      slots.push({ key, kind: "literal", error: child.error, literal: child.values[0] });
+    } else {
+      return null;
+    }
+  }
+  return slots;
+}
+
+function compileRawObject3(error: unknown, s0: RawObjectSlot, s1: RawObjectSlot, s2: RawObjectSlot): CNode {
+  const fn: CNode = (input, context, path, key) => {
+    if (!isObject(input)) {
+      nodeIssue(context, error, { expected: "object", code: "invalid_type" }, input, path, key);
+      return FAIL;
+    }
+    if (key !== undefined) path.push(key);
+    const result: Record<string, unknown> = {};
+    let failed = false;
+
+    const v0 = input[s0.key];
+    if (v0 === undefined) hasOwn(input, s0.key);
+    if (s0.kind === "literal") {
+      if (!(v0 === s0.literal || (Number.isNaN(v0) && Number.isNaN(s0.literal)))) {
+        nodeIssue(context, s0.error, { code: "invalid_value", values: [s0.literal] }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (s0.kind === "number") {
+      if (typeof v0 !== "number" || Number.isNaN(v0) || !Number.isFinite(v0)) {
+        const received = typeof v0 === "number" ? (Number.isNaN(v0) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s0.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (typeof v0 !== s0.kind) {
+      nodeIssue(context, s0.error, { expected: s0.kind, code: "invalid_type" }, v0, path, s0.key);
+      failed = true;
+    } else result[s0.key] = v0;
+
+    const v1 = input[s1.key];
+    if (v1 === undefined) hasOwn(input, s1.key);
+    if (s1.kind === "literal") {
+      if (!(v1 === s1.literal || (Number.isNaN(v1) && Number.isNaN(s1.literal)))) {
+        nodeIssue(context, s1.error, { code: "invalid_value", values: [s1.literal] }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (s1.kind === "number") {
+      if (typeof v1 !== "number" || Number.isNaN(v1) || !Number.isFinite(v1)) {
+        const received = typeof v1 === "number" ? (Number.isNaN(v1) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s1.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (typeof v1 !== s1.kind) {
+      nodeIssue(context, s1.error, { expected: s1.kind, code: "invalid_type" }, v1, path, s1.key);
+      failed = true;
+    } else result[s1.key] = v1;
+
+    const v2 = input[s2.key];
+    if (v2 === undefined) hasOwn(input, s2.key);
+    if (s2.kind === "literal") {
+      if (!(v2 === s2.literal || (Number.isNaN(v2) && Number.isNaN(s2.literal)))) {
+        nodeIssue(context, s2.error, { code: "invalid_value", values: [s2.literal] }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (s2.kind === "number") {
+      if (typeof v2 !== "number" || Number.isNaN(v2) || !Number.isFinite(v2)) {
+        const received = typeof v2 === "number" ? (Number.isNaN(v2) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s2.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (typeof v2 !== s2.kind) {
+      nodeIssue(context, s2.error, { expected: s2.kind, code: "invalid_type" }, v2, path, s2.key);
+      failed = true;
+    } else result[s2.key] = v2;
+
+    if (key !== undefined) path.pop();
+    return failed ? FAIL : result;
+  };
+  fn.pushesKeyed = true;
+  fn.pushes = false;
+  return fn;
+}
+
+function compileRawObject4(error: unknown, s0: RawObjectSlot, s1: RawObjectSlot, s2: RawObjectSlot, s3: RawObjectSlot): CNode {
+  const fn: CNode = (input, context, path, key) => {
+    if (!isObject(input)) {
+      nodeIssue(context, error, { expected: "object", code: "invalid_type" }, input, path, key);
+      return FAIL;
+    }
+    if (key !== undefined) path.push(key);
+    const result: Record<string, unknown> = {};
+    let failed = false;
+
+    const v0 = input[s0.key];
+    if (v0 === undefined) hasOwn(input, s0.key);
+    if (s0.kind === "literal") {
+      if (!(v0 === s0.literal || (Number.isNaN(v0) && Number.isNaN(s0.literal)))) {
+        nodeIssue(context, s0.error, { code: "invalid_value", values: [s0.literal] }, v0, path, s0.key); failed = true;
+      } else result[s0.key] = v0;
+    } else if (s0.kind === "number") {
+      if (typeof v0 !== "number" || Number.isNaN(v0) || !Number.isFinite(v0)) {
+        const received = typeof v0 === "number" ? (Number.isNaN(v0) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s0.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v0, path, s0.key); failed = true;
+      } else result[s0.key] = v0;
+    } else if (typeof v0 !== s0.kind) {
+      nodeIssue(context, s0.error, { expected: s0.kind, code: "invalid_type" }, v0, path, s0.key); failed = true;
+    } else result[s0.key] = v0;
+
+    const v1 = input[s1.key];
+    if (v1 === undefined) hasOwn(input, s1.key);
+    if (s1.kind === "literal") {
+      if (!(v1 === s1.literal || (Number.isNaN(v1) && Number.isNaN(s1.literal)))) {
+        nodeIssue(context, s1.error, { code: "invalid_value", values: [s1.literal] }, v1, path, s1.key); failed = true;
+      } else result[s1.key] = v1;
+    } else if (s1.kind === "number") {
+      if (typeof v1 !== "number" || Number.isNaN(v1) || !Number.isFinite(v1)) {
+        const received = typeof v1 === "number" ? (Number.isNaN(v1) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s1.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v1, path, s1.key); failed = true;
+      } else result[s1.key] = v1;
+    } else if (typeof v1 !== s1.kind) {
+      nodeIssue(context, s1.error, { expected: s1.kind, code: "invalid_type" }, v1, path, s1.key); failed = true;
+    } else result[s1.key] = v1;
+
+    const v2 = input[s2.key];
+    if (v2 === undefined) hasOwn(input, s2.key);
+    if (s2.kind === "literal") {
+      if (!(v2 === s2.literal || (Number.isNaN(v2) && Number.isNaN(s2.literal)))) {
+        nodeIssue(context, s2.error, { code: "invalid_value", values: [s2.literal] }, v2, path, s2.key); failed = true;
+      } else result[s2.key] = v2;
+    } else if (s2.kind === "number") {
+      if (typeof v2 !== "number" || Number.isNaN(v2) || !Number.isFinite(v2)) {
+        const received = typeof v2 === "number" ? (Number.isNaN(v2) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s2.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v2, path, s2.key); failed = true;
+      } else result[s2.key] = v2;
+    } else if (typeof v2 !== s2.kind) {
+      nodeIssue(context, s2.error, { expected: s2.kind, code: "invalid_type" }, v2, path, s2.key); failed = true;
+    } else result[s2.key] = v2;
+
+    const v3 = input[s3.key];
+    if (v3 === undefined) hasOwn(input, s3.key);
+    if (s3.kind === "literal") {
+      if (!(v3 === s3.literal || (Number.isNaN(v3) && Number.isNaN(s3.literal)))) {
+        nodeIssue(context, s3.error, { code: "invalid_value", values: [s3.literal] }, v3, path, s3.key); failed = true;
+      } else result[s3.key] = v3;
+    } else if (s3.kind === "number") {
+      if (typeof v3 !== "number" || Number.isNaN(v3) || !Number.isFinite(v3)) {
+        const received = typeof v3 === "number" ? (Number.isNaN(v3) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s3.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v3, path, s3.key); failed = true;
+      } else result[s3.key] = v3;
+    } else if (typeof v3 !== s3.kind) {
+      nodeIssue(context, s3.error, { expected: s3.kind, code: "invalid_type" }, v3, path, s3.key); failed = true;
+    } else result[s3.key] = v3;
+
+    if (key !== undefined) path.pop();
+    return failed ? FAIL : result;
+  };
+  fn.pushesKeyed = true;
+  fn.pushes = false;
+  return fn;
+}
+
+function compileRawObject(node: SchemaNode & { readonly kind: "object" }): CNode | null {
+  const slots = extractRawObjectSlots(node);
+  if (!slots) return null;
+  return slots.length === 3
+    ? compileRawObject3(node.error, slots[0] as RawObjectSlot, slots[1] as RawObjectSlot, slots[2] as RawObjectSlot)
+    : compileRawObject4(node.error, slots[0] as RawObjectSlot, slots[1] as RawObjectSlot, slots[2] as RawObjectSlot, slots[3] as RawObjectSlot);
+}
+
 function compileObject(node: SchemaNode & { readonly kind: "object" }, compile: (child: SchemaNode) => CNode): CNode {
+  const raw = compileRawObject(node);
+  if (raw) return raw;
   const error = node.error;
   const checks = compileChecks(node);
   const entries = Object.entries(node.shape).map(([key, child]) => ({

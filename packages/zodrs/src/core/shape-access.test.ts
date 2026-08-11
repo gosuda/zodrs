@@ -174,3 +174,130 @@ describe.each([["codegen", false],["interpreter", true]] as const)("__proto__ re
     assertProto(result, undefined);
   });
 });
+
+describe("whole-object specialization guards", () => {
+  it("reads each field once in shape order, strips extras, and returns a fresh object", () => {
+    const S = z.object({ a: z.string(), n: z.number(), b: z.boolean() });
+    const log: string[] = [];
+    const input = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(input, "a", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("a");
+        return "ok";
+      },
+    });
+    Object.defineProperty(input, "n", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("n");
+        return 1;
+      },
+    });
+    Object.defineProperty(input, "b", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("b");
+        return true;
+      },
+    });
+    Object.defineProperty(input, "extra", {
+      value: "ignored",
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
+    const result = S.safeParse(input);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ a: "ok", n: 1, b: true });
+    expect(Object.is(result.data, input)).toBe(false);
+    expect(Object.keys(result.data)).toEqual(["a", "n", "b"]);
+    expect(log).toEqual(["a", "n", "b"]);
+  });
+
+  it("executes every slot after earlier failures and preserves child messages and NaN received", () => {
+    const S = z.object({
+      s: z.string({ message: "s must be a string" }),
+      b: z.boolean({ message: "b must be a boolean" }),
+      n: z.number(),
+    });
+    const log: string[] = [];
+    const input = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(input, "s", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("s");
+        return 123;
+      },
+    });
+    Object.defineProperty(input, "b", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("b");
+        return "not bool";
+      },
+    });
+    Object.defineProperty(input, "n", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("n");
+        return NaN;
+      },
+    });
+
+    const result = S.safeParse(input);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(log).toEqual(["s", "b", "n"]);
+    expect(result.error.issues).toEqual([
+      {
+        code: "invalid_type",
+        expected: "string",
+        path: ["s"],
+        message: "s must be a string",
+      },
+      {
+        code: "invalid_type",
+        expected: "boolean",
+        path: ["b"],
+        message: "b must be a boolean",
+      },
+      {
+        code: "invalid_type",
+        expected: "number",
+        received: "NaN",
+        path: ["n"],
+        message: "Invalid input: expected number, received NaN",
+      },
+    ]);
+  });
+
+  it("preserves the undefined-only own-property probe", () => {
+    const S = z.object({ a: z.string(), n: z.number(), b: z.boolean() });
+    const events: string[] = [];
+    const input = new Proxy(
+      { a: undefined, n: 1, b: true },
+      {
+        get(target, key, receiver) {
+          events.push(`get:${String(key)}`);
+          return Reflect.get(target, key, receiver);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          events.push(`own:${String(key)}`);
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      },
+    );
+
+    expect(S.safeParse(input).success).toBe(false);
+    expect(events).toEqual(["get:a", "own:a", "get:n", "get:b"]);
+  });
+});
