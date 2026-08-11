@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -54,4 +54,27 @@ test("evaluateGate rejects malformed benchmark output", () => {
   writeFileSync(join(directories[1], COMPARISONS[0].file), '{"results":{}}\n');
 
   assert.throws(() => evaluateGate(directories), /avgOpsPerSec/);
+});
+
+test("evaluateGate rejects a repeated result directory", () => {
+  const run = writeRun("repeat-1", 100, 90);
+  const other = writeRun("repeat-2", 100, 90);
+
+  assert.throws(() => evaluateGate([run, run, other]), /distinct/);
+});
+
+test("evaluateGate rejects a filesystem alias that resolves to the same directory", () => {
+  const real = writeRun("alias-real", 100, 90);
+  const alias = join(root, "alias-link");
+  symlinkSync(real, alias, "dir");
+  const other = writeRun("alias-other", 100, 90);
+
+  assert.throws(() => evaluateGate([real, alias, other]), /distinct/);
+});
+
+test("evaluateGate fails closed for a missing result directory", () => {
+  const a = writeRun("missing-a", 100, 90);
+  const b = writeRun("missing-b", 100, 90);
+
+  assert.throws(() => evaluateGate([a, b, join(root, "does-not-exist")]), /ENOENT|distinct/);
 });

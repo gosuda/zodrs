@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -45,9 +45,14 @@ export function evaluateGate(directories) {
     throw new Error(`expected three result directories, got ${directories.length}`);
   }
 
+  const canonical = directories.map((directory) => realpathSync(directory));
+  if (new Set(canonical).size !== 3) {
+    throw new Error("expected three distinct result directories");
+  }
+
   return COMPARISONS.map((comparison) => {
-    const zodrs = medianOfThree(directories.map((directory) => readOps(directory, comparison, comparison.zodrs)));
-    const zod4 = medianOfThree(directories.map((directory) => readOps(directory, comparison, comparison.zod4)));
+    const zodrs = medianOfThree(canonical.map((directory) => readOps(directory, comparison, comparison.zodrs)));
+    const zod4 = medianOfThree(canonical.map((directory) => readOps(directory, comparison, comparison.zod4)));
     return {
       suite: basename(comparison.file, ".json"),
       zodrs,
