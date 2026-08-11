@@ -2,6 +2,11 @@
   "name": "zodrs",
   "version": "0.1.1",
   "description": "TypeScript-first schema validation with static type inference, backed by a Rust core. Drop-in replacement for zod v4.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/metaphorics/zodrs.git",
+    "directory": "packages/zodrs"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./dist-cjs/classic/index.js",
