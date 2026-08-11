@@ -24,6 +24,26 @@ describe("direct scalar parse", () => {
     expect(() => z.number().parse(Number.NEGATIVE_INFINITY)).toThrow();
   });
 
+  it("bare string returns the value directly without entering the full parser", () => {
+    const schema = z.string();
+    expect(schema.parse("hello")).toBe("hello");
+    expect(schema.parse("")).toBe("");
+  });
+
+  it("bare number returns the value directly without entering the full parser", () => {
+    const schema = z.number();
+    expect(schema.parse(42)).toBe(42);
+    expect(schema.parse(0)).toBe(0);
+    expect(schema.parse(-1.5)).toBe(-1.5);
+  });
+
+  it("supplying a ParseContext routes to the full parser even for bare scalars", () => {
+    const schema = z.string();
+    // With params, the direct-return guard is bypassed and the full parser
+    // runs, applying the supplied error map to invalid input.
+    expect(() => schema.parse(123, { error: () => "custom error" })).toThrow("custom error");
+  });
+
   it("keeps reflective prototype access lazy", () => {
     const descriptor = Object.getOwnPropertyDescriptor(z.ZodType.prototype, "parse");
     expect(typeof z.ZodType.prototype.parse).toBe("function");

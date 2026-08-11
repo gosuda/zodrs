@@ -146,4 +146,40 @@ describe("tag-only union dispatch", () => {
       },
     ]);
   });
+
+  it("dispatches via the accepted set and spreads all values in the failure issue", () => {
+    const schema = z.union([
+      z.object({ type: z.literal(["a", "b"]) }),
+      z.object({ type: z.literal("c") }),
+    ]);
+
+    // Each accepted value hits the Set-based dispatch.
+    expect(schema.parse({ type: "a" })).toEqual({ type: "a" });
+    expect(schema.parse({ type: "b" })).toEqual({ type: "b" });
+    expect(schema.parse({ type: "c" })).toEqual({ type: "c" });
+
+    // A value matching no branch spreads every literal value into the issue.
+    const result = schema.safeParse({ type: "d" });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const issue = result.error.issues[0];
+    expect(issue?.code).toBe("invalid_union");
+    if (issue?.code !== "invalid_union") return;
+    expect(issue.errors[0]).toEqual([
+      {
+        code: "invalid_value",
+        values: ["a", "b"],
+        path: ["type"],
+        message: 'Invalid option: expected one of "a"|"b"',
+      },
+    ]);
+    expect(issue.errors[1]).toEqual([
+      {
+        code: "invalid_value",
+        values: ["c"],
+        path: ["type"],
+        message: 'Invalid input: expected "c"',
+      },
+    ]);
+  });
 });

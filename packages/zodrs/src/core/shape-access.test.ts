@@ -300,4 +300,135 @@ describe("whole-object specialization guards", () => {
     expect(S.safeParse(input).success).toBe(false);
     expect(events).toEqual(["get:a", "own:a", "get:n", "get:b"]);
   });
+
+  it("valid 3-slot specialization returns a fresh stripped object", () => {
+    const S = z.object({ a: z.string(), n: z.number(), b: z.boolean() });
+    const input = { a: "ok", n: 1, b: true, extra: "ignored" };
+    const result = S.safeParse(input);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ a: "ok", n: 1, b: true });
+    expect(Object.is(result.data, input)).toBe(false);
+    expect(Object.keys(result.data)).toEqual(["a", "n", "b"]);
+  });
+
+  it("valid 4-slot specialization reads each field once in shape order and strips extras", () => {
+    const S = z.object({ a: z.string(), n: z.number(), b: z.boolean(), s: z.string() });
+    const log: string[] = [];
+    const input = Object.create(null) as Record<string, unknown>;
+    for (const [key, val] of [["a", "ok"], ["n", 1], ["b", true], ["s", "x"]] as const) {
+      Object.defineProperty(input, key, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          log.push(key);
+          return val;
+        },
+      });
+    }
+    Object.defineProperty(input, "extra", {
+      value: "ignored",
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
+    const result = S.safeParse(input);
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({ a: "ok", n: 1, b: true, s: "x" });
+    expect(Object.is(result.data, input)).toBe(false);
+    expect(Object.keys(result.data)).toEqual(["a", "n", "b", "s"]);
+    expect(log).toEqual(["a", "n", "b", "s"]);
+  });
+
+  it("4-slot specialization executes every slot after earlier failures and reports Infinity received", () => {
+    const S = z.object({
+      a: z.string({ message: "a must be a string" }),
+      n: z.number(),
+      b: z.boolean({ message: "b must be a boolean" }),
+      m: z.number(),
+    });
+    const log: string[] = [];
+    const input = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(input, "a", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("a");
+        return 123;
+      },
+    });
+    Object.defineProperty(input, "n", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("n");
+        return Number.POSITIVE_INFINITY;
+      },
+    });
+    Object.defineProperty(input, "b", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("b");
+        return "not bool";
+      },
+    });
+    Object.defineProperty(input, "m", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push("m");
+        return 42;
+      },
+    });
+
+    const result = S.safeParse(input);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(log).toEqual(["a", "n", "b", "m"]);
+    expect(result.error.issues).toEqual([
+      {
+        code: "invalid_type",
+        expected: "string",
+        path: ["a"],
+        message: "a must be a string",
+      },
+      {
+        code: "invalid_type",
+        expected: "number",
+        received: "Infinity",
+        path: ["n"],
+        message: "Invalid input: expected number, received number",
+      },
+      {
+        code: "invalid_type",
+        expected: "boolean",
+        path: ["b"],
+        message: "b must be a boolean",
+      },
+    ]);
+  });
+
+  it("4-slot specialization preserves the undefined-only own-property probe", () => {
+    const S = z.object({ a: z.string(), n: z.number(), b: z.boolean(), s: z.string() });
+    const events: string[] = [];
+    const input = new Proxy(
+      { a: undefined, n: 1, b: true, s: "x" },
+      {
+        get(target, key, receiver) {
+          events.push(`get:${String(key)}`);
+          return Reflect.get(target, key, receiver);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          events.push(`own:${String(key)}`);
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      },
+    );
+
+    expect(S.safeParse(input).success).toBe(false);
+    expect(events).toEqual(["get:a", "own:a", "get:n", "get:b", "get:s"]);
+  });
 });
