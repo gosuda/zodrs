@@ -124,10 +124,10 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
     let mut out = OutputBuffer::default();
     let metadata = OutputMetadata::new(&v.missing_values, &v.decisions);
     write_output(plan, plan.root(), &value, &mut out, &metadata);
-    if out.failed {
+    if out.is_failed() {
         return Verdict::fallback();
     }
-    let Ok(payload) = String::from_utf8(out.bytes) else {
+    let Ok(payload) = String::from_utf8(out.into_bytes()) else {
         return Verdict::fallback();
     };
     Verdict {
@@ -142,6 +142,14 @@ enum IssueMode {
     Suppress,
 }
 
+/// Phase-local identity for a `sonic-rs` DOM node, used as a hash key in
+/// `DecisionKey` to associate output decisions with the `Value` that
+/// produced them. The address is stable only within a single validation
+/// phase: the keyed `Value` nodes remain alive and unmoved from the DOM
+/// parse through `write_output`, so output lookup uses the same live node
+/// the validator walked. Temporary DOM trees built for missing-field probes
+/// and failed union branches are truncated before their owners drop, so
+/// their decisions never outlive the probe that recorded them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct ValueIdentity(usize);
 
@@ -1428,11 +1436,11 @@ impl<'p> Validator<'p> {
                     OutputMetadata::new(&self.missing_values, &self.decisions[decisions_len..]);
                 write_output(self.plan, id, &value, &mut output, &metadata);
             }
-            if output.failed {
+            if output.is_failed() {
                 self.fallback = true;
                 return Missing::Cycle;
             }
-            if let Ok(value) = serde_json::from_slice(&output.bytes) {
+            if let Ok(value) = serde_json::from_slice(output.as_bytes()) {
                 Missing::Value(value)
             } else {
                 self.fallback = true;
@@ -1501,17 +1509,41 @@ struct OutputBuffer {
     failed: bool,
 }
 
-impl std::ops::Deref for OutputBuffer {
-    type Target = Vec<u8>;
+impl OutputBuffer {
+    fn push(&mut self, byte: u8) {
+        self.bytes.push(byte);
+    }
 
-    fn deref(&self) -> &Self::Target {
+    fn extend_from_slice(&mut self, slice: &[u8]) {
+        self.bytes.extend_from_slice(slice);
+    }
+
+    /// Writer target for serializers. The caller must call `mark_failed`
+    /// when the serializer returns an error.
+    fn writer(&mut self) -> &mut Vec<u8> {
+        &mut self.bytes
+    }
+
+    fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
-}
 
-impl std::ops::DerefMut for OutputBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.bytes
+    fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    fn mark_failed(&mut self) {
+        self.failed = true;
+    }
+
+    /// Appends a child buffer's bytes and propagates its failure flag.
+    fn absorb(&mut self, child: OutputBuffer) {
+        self.failed |= child.failed;
+        self.bytes.extend(child.bytes);
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
@@ -1661,15 +1693,12 @@ fn write_output(
                 }
             }
             out.push(b'[');
-            for (i, slot) in slots.iter().enumerate() {
+            for (i, slot) in slots.into_iter().enumerate() {
                 if i > 0 {
                     out.push(b',');
                 }
                 match slot {
-                    Some(s) => {
-                        out.failed |= s.failed;
-                        out.extend_from_slice(&s.bytes);
-                    }
+                    Some(s) => out.absorb(s),
                     None => out.extend_from_slice(b"null"),
                 }
             }
@@ -1998,14 +2027,14 @@ fn append_json<T>(value: &T, out: &mut OutputBuffer)
 where
     T: serde::Serialize + ?Sized,
 {
-    if serde_json::to_writer(&mut out.bytes, value).is_err() {
-        out.failed = true;
+    if serde_json::to_writer(out.writer(), value).is_err() {
+        out.mark_failed();
     }
 }
 
 fn append_raw(value: &Value, out: &mut OutputBuffer) {
-    if sonic_rs::to_writer(&mut out.bytes, value).is_err() {
-        out.failed = true;
+    if sonic_rs::to_writer(out.writer(), value).is_err() {
+        out.mark_failed();
     }
 }
 

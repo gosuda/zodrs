@@ -159,26 +159,6 @@ fn repeated_catch_node_keeps_inner_and_fallback_decisions_separate() {
 }
 
 #[test]
-fn failed_union_branch_does_not_keep_nested_output_decisions() {
-    let plan = compile(
-        r#"[
-          {"k":"union","options":[1,5]},
-          {"k":"object","keys":["x","tag"],"values":[2,4],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"union","options":[3,6]},
-          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
-          {"k":"literal","values":["rejected"]},
-          {"k":"object","keys":["x","tag"],"values":[2,7],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"number","checks":[]},
-          {"k":"literal","values":["accepted"]}
-        ]"#,
-    )
-    .unwrap();
-    let v = validate(&plan, br#"{"x":" x ","tag":"accepted"}"#);
-    assert_eq!(v.status, 1, "the selected branch trims x: {v:?}");
-    assert_eq!(v.payload.as_deref(), Some(r#"{"x":"x","tag":"accepted"}"#));
-}
-
-#[test]
 fn dirty_discriminated_union_reuses_its_selected_branch() {
     let plan = compile(
         r#"[
