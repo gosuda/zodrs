@@ -1162,13 +1162,70 @@ function compileArray(node: SchemaNode & { readonly kind: "array" }, compile: (c
   return fn;
 }
 
+type TagUnionBranch = {
+  readonly values: readonly Primitive[];
+  readonly accepted: ReadonlySet<unknown>;
+  readonly error: unknown;
+};
+
+type TagUnionPlan = {
+  readonly key: string;
+  readonly branches: readonly TagUnionBranch[];
+};
+
+function compileTagUnion(nodes: readonly SchemaNode[]): TagUnionPlan | null {
+  let key: string | undefined;
+  const branches: TagUnionBranch[] = [];
+  for (const option of nodes) {
+    if (option.kind !== "object" || option.mode !== "strip" || option.catchall !== null || option.checks.length !== 0) return null;
+    const keys = Object.keys(option.shape);
+    if (keys.length !== 1 || keys[0] === "__proto__") return null;
+    const optionKey = keys[0] as string;
+    if (key !== undefined && optionKey !== key) return null;
+    const child = option.shape[optionKey];
+    if (!child || child.kind !== "literal" || child.checks.length !== 0 || child.values.includes(undefined)) return null;
+    key = optionKey;
+    branches.push({ values: child.values, accepted: new Set<unknown>(child.values), error: child.error });
+  }
+  return key === undefined ? null : { key, branches };
+}
+
 function compileUnion(node: SchemaNode & { readonly kind: "union" }, compile: (child: SchemaNode) => CNode): CNode {
   if (node.inclusive === false) return fallback(node);
   const error = node.error;
   const checks = compileChecks(node);
   const options = node.options.map(compile);
+  const tagUnion = compileTagUnion(node.options);
   const fn: CNode = (input, context, path, key) => {
     if (key !== undefined) path.push(key);
+
+    // Tag-only object unions can preserve the exact ordered property reads
+    // without allocating discarded branch outputs and issue arrays.
+    if (tagUnion && isObject(input)) {
+      const errors: $ZodRawIssue[][] = [];
+      for (const branch of tagUnion.branches) {
+        const value = input[tagUnion.key];
+        const present = value !== undefined || hasOwn(input, tagUnion.key);
+        if (present && branch.accepted.has(value)) {
+          const parsed: Record<string, unknown> = {};
+          parsed[tagUnion.key] = value;
+          const output = checks ? checks(parsed, context, path, undefined) : parsed;
+          if (key !== undefined) path.pop();
+          return output;
+        }
+        errors.push([{
+          code: "invalid_value",
+          values: [...branch.values],
+          input: value,
+          path: [tagUnion.key],
+          inst: { error: branch.error },
+        } as $ZodRawIssue]);
+      }
+      nodeIssue(context, error, { code: "invalid_union", errors }, input, path, undefined);
+      if (key !== undefined) path.pop();
+      return FAIL;
+    }
+
     const relative: Path = [];
     let branches: { readonly value: unknown; readonly issues: $ZodRawIssue[] }[] | null = null;
     let output: unknown;
