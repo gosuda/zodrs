@@ -800,6 +800,7 @@ impl<'a> Scanner<'a> {
         self.i += 1;
         self.ws();
         let mut seen: u128 = 0;
+        let mut next: usize = 0;
         let mut last_schema_i: Option<usize> = None;
         let mut seen_catchall = false;
         let mut ok = true;
@@ -825,7 +826,20 @@ impl<'a> Scanner<'a> {
                 }
                 self.i += 1;
                 self.ws();
-                if let Some(schema_i) = obj_dispatch.as_ref().and_then(|o| o.find_bytes(k)) {
+                // Fast path: the next expected canonical key matches the
+                // raw key bytes without a dispatch lookup. Any mismatch falls
+                // through to the existing ObjectDispatch search.
+                let mut schema_i: Option<usize> = None;
+                if let Some(expected) = keys.get(next)
+                    && expected.as_bytes() == k
+                {
+                    schema_i = Some(next);
+                    next += 1;
+                }
+                if schema_i.is_none() {
+                    schema_i = obj_dispatch.as_ref().and_then(|o| o.find_bytes(k));
+                }
+                if let Some(schema_i) = schema_i {
                     // Duplicates and out-of-order keys are reordered or
                     // collapsed on rewrite: the object validates dirty.
                     if last_schema_i.is_some_and(|l| schema_i <= l) {
@@ -884,6 +898,11 @@ impl<'a> Scanner<'a> {
         self.depth -= 1;
         if !ok {
             return false;
+        }
+        // Full canonical coverage: no missing-key walk is needed when every
+        // schema key has been seen. `count_ones` avoids `1u128 << 128`.
+        if seen.count_ones() as usize == keys.len() {
+            return true;
         }
         // Absent schema keys: a default/prefault/catch value materializes on
         // rewrite (validates dirty); anything else is a hard missing-input

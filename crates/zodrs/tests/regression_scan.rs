@@ -304,3 +304,54 @@ fn preflight_rejects_mismatched_closer() {
     assert_eq!(validate(&plan, b"[}").status, 3);
     assert_eq!(validate(&plan, b"]").status, 3);
 }
+
+/// Canonical object keys in schema order validate clean (status 0).
+#[test]
+fn canonical_object_keys_status_0() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"b":2}"#);
+    assert_eq!(v.status, 0, "in-order keys must be clean: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+/// Out-of-order keys require a canonical rewrite (status 1).
+#[test]
+fn out_of_order_object_keys_rewrite() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"b":2,"a":1}"#);
+    assert_eq!(v.status, 1, "out-of-order keys must rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":1,"b":2}"#));
+}
+
+/// Duplicate object keys collapse to the last value on rewrite (status 1).
+#[test]
+fn duplicate_object_key_last_wins() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"a":2}"#);
+    assert_eq!(
+        v.status, 1,
+        "duplicate keys must rewrite to last-wins: {v:?}"
+    );
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":2}"#));
+}
+
+/// Strip mode drops an unknown key between known keys on rewrite (status 1).
+#[test]
+fn strip_unknown_key_between_known_rewrites() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"x":9,"b":2}"#);
+    assert_eq!(v.status, 1, "unknown key must be stripped: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":1,"b":2}"#));
+}
