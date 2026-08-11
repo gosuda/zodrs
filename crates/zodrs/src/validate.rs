@@ -121,12 +121,18 @@ pub fn validate(plan: &CompiledPlan, input: &[u8]) -> Verdict {
     if v.nonfinite || contains_negative_zero(input) {
         return Verdict::fallback();
     }
-    let mut out = String::new();
+    let mut out = OutputBuffer::default();
     let metadata = OutputMetadata::new(&v.missing_values, &v.decisions);
     write_output(plan, plan.root(), &value, &mut out, &metadata);
+    if out.failed {
+        return Verdict::fallback();
+    }
+    let Ok(payload) = String::from_utf8(out.bytes) else {
+        return Verdict::fallback();
+    };
     Verdict {
         status: 1,
-        payload: Some(out),
+        payload: Some(payload),
     }
 }
 
@@ -1416,13 +1422,17 @@ impl<'p> Validator<'p> {
             if self.fail_count != before {
                 return Missing::Fail;
             }
-            let mut output = String::new();
+            let mut output = OutputBuffer::default();
             {
                 let metadata =
                     OutputMetadata::new(&self.missing_values, &self.decisions[decisions_len..]);
                 write_output(self.plan, id, &value, &mut output, &metadata);
             }
-            if let Ok(value) = serde_json::from_str(&output) {
+            if output.failed {
+                self.fallback = true;
+                return Missing::Cycle;
+            }
+            if let Ok(value) = serde_json::from_slice(&output.bytes) {
                 Missing::Value(value)
             } else {
                 self.fallback = true;
@@ -1485,6 +1495,26 @@ impl<'p> Validator<'p> {
 // Canonical output emission (only when a valid parse went dirty).
 // ------------------------------------------------------------------------
 
+#[derive(Default)]
+struct OutputBuffer {
+    bytes: Vec<u8>,
+    failed: bool,
+}
+
+impl std::ops::Deref for OutputBuffer {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl std::ops::DerefMut for OutputBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
+    }
+}
+
 struct OutputMetadata<'a> {
     missing_values: &'a [Option<Json>],
     decisions: HashMap<DecisionKey, OutputDecision>,
@@ -1528,7 +1558,7 @@ fn write_output(
     plan: &CompiledPlan,
     id: NodeId,
     value: &Value,
-    out: &mut String,
+    out: &mut OutputBuffer,
     metadata: &OutputMetadata<'_>,
 ) {
     match &plan.nodes()[id as usize] {
@@ -1543,7 +1573,7 @@ fn write_output(
                 return append_raw(value, out);
             };
             let (entries, lookup) = collapse_object(obj);
-            out.push('{');
+            out.push(b'{');
             let mut first = true;
             let disp = plan.dispatch[id as usize].object.as_ref();
             // Canonical schema key order.
@@ -1553,7 +1583,7 @@ fn write_output(
                     write_output(plan, values[schema_i], child, out, metadata);
                 } else if let Some(missing) = metadata.missing(values[schema_i]) {
                     write_pair(key, out, &mut first);
-                    out.push_str(&serde_json::to_string(missing).unwrap_or_else(|_| "null".into()));
+                    append_json(missing, out);
                 }
             }
             // Retained unknowns (passthrough / catchall), __proto__ excluded.
@@ -1573,20 +1603,20 @@ fn write_output(
                     }
                 }
             }
-            out.push('}');
+            out.push(b'}');
         }
         PlanNode::Array { element, .. } => {
             let Some(arr) = value.as_array() else {
                 return append_raw(value, out);
             };
-            out.push('[');
+            out.push(b'[');
             for (i, elem) in arr.as_slice().iter().enumerate() {
                 if i > 0 {
-                    out.push(',');
+                    out.push(b',');
                 }
                 write_output(plan, *element, elem, out, metadata);
             }
-            out.push(']');
+            out.push(b']');
         }
         PlanNode::Tuple { items, rest } => {
             let Some(arr) = value.as_array() else {
@@ -1597,23 +1627,24 @@ fn write_output(
             // default/catch value or an `undefined` slot, and the canonical
             // trailing truncation then drops trailing absent optional-output
             // slots (the array analog of an absent optional object key).
-            let mut slots: Vec<Option<String>> = Vec::with_capacity(items.len().max(slice.len()));
+            let mut slots: Vec<Option<OutputBuffer>> =
+                Vec::with_capacity(items.len().max(slice.len()));
             for (i, item_id) in items.iter().enumerate() {
                 if let Some(elem) = slice.get(i) {
-                    let mut s = String::new();
+                    let mut s = OutputBuffer::default();
                     write_output(plan, *item_id, elem, &mut s, metadata);
                     slots.push(Some(s));
                 } else if let Some(missing) = metadata.missing(*item_id) {
-                    slots.push(Some(
-                        serde_json::to_string(missing).unwrap_or_else(|_| "null".into()),
-                    ));
+                    let mut s = OutputBuffer::default();
+                    append_json(missing, &mut s);
+                    slots.push(Some(s));
                 } else {
                     slots.push(None);
                 }
             }
             if let Some(rest_id) = rest {
                 for elem in slice.iter().skip(items.len()) {
-                    let mut s = String::new();
+                    let mut s = OutputBuffer::default();
                     write_output(plan, *rest_id, elem, &mut s, metadata);
                     slots.push(Some(s));
                 }
@@ -1629,23 +1660,26 @@ fn write_output(
                     break;
                 }
             }
-            out.push('[');
+            out.push(b'[');
             for (i, slot) in slots.iter().enumerate() {
                 if i > 0 {
-                    out.push(',');
+                    out.push(b',');
                 }
                 match slot {
-                    Some(s) => out.push_str(s),
-                    None => out.push_str("null"),
+                    Some(s) => {
+                        out.failed |= s.failed;
+                        out.extend_from_slice(&s.bytes);
+                    }
+                    None => out.extend_from_slice(b"null"),
                 }
             }
-            out.push(']');
+            out.push(b']');
         }
         PlanNode::Record { value: val, .. } => {
             let Some(obj) = value.as_object() else {
                 return append_raw(value, out);
             };
-            out.push('{');
+            out.push(b'{');
             let mut first = true;
             let (entries, _) = collapse_object(obj);
             for (k, v) in entries {
@@ -1655,7 +1689,7 @@ fn write_output(
                 write_pair(k, out, &mut first);
                 write_output(plan, *val, v, out, metadata);
             }
-            out.push('}');
+            out.push(b'}');
         }
         PlanNode::String { checks, coerce } => {
             let mut cur = if let Some(s) = value.as_str() {
@@ -1670,13 +1704,13 @@ fn write_output(
                     cur = apply_overwrite(&cur, *op, form.as_deref());
                 }
             }
-            out.push_str(&json_string(&cur));
+            append_json(&cur, out);
         }
         PlanNode::Number { coerce, .. } => {
             if value.is_number() {
                 append_raw(value, out);
             } else if *coerce {
-                out.push_str(&num_json(coerce_to_number(value)).to_string());
+                append_json(&num_json(coerce_to_number(value)), out);
             } else {
                 append_raw(value, out);
             }
@@ -1690,13 +1724,13 @@ fn write_output(
                 write_output(plan, *inner, value, out, metadata);
             }
             Some(OutputDecision::CatchFallback) => {
-                out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
+                append_json(catch_val, out);
             }
             _ if option_matches(plan, *inner, value) => {
                 write_output(plan, *inner, value, out, metadata);
             }
             _ => {
-                out.push_str(&serde_json::to_string(catch_val).unwrap_or_else(|_| "null".into()));
+                append_json(catch_val, out);
             }
         },
         PlanNode::Optional { inner }
@@ -1711,7 +1745,7 @@ fn write_output(
         }
         PlanNode::Nullable { inner } => {
             if value.is_null() {
-                out.push_str("null");
+                out.extend_from_slice(b"null");
             } else {
                 write_output(plan, *inner, value, out, metadata);
             }
@@ -1770,10 +1804,10 @@ fn write_output(
             if value.is_boolean() {
                 append_raw(value, out);
             } else if *coerce {
-                out.push_str(if coerce_to_boolean(value) {
-                    "true"
+                out.extend_from_slice(if coerce_to_boolean(value) {
+                    b"true"
                 } else {
-                    "false"
+                    b"false"
                 });
             } else {
                 append_raw(value, out);
@@ -1951,19 +1985,27 @@ pub(crate) fn has_default(plan: &CompiledPlan, id: NodeId) -> bool {
     matches!(absent_result(plan, id), Absent::Value(..))
 }
 
-fn write_pair(key: &str, out: &mut String, first: &mut bool) {
+fn write_pair(key: &str, out: &mut OutputBuffer, first: &mut bool) {
     if !*first {
-        out.push(',');
+        out.push(b',');
     }
     *first = false;
-    out.push_str(&json_string(key));
-    out.push(':');
+    append_json(key, out);
+    out.push(b':');
 }
 
-fn append_raw(value: &Value, out: &mut String) {
-    match sonic_rs::to_string(value) {
-        Ok(s) => out.push_str(&s),
-        Err(_) => out.push_str("null"),
+fn append_json<T>(value: &T, out: &mut OutputBuffer)
+where
+    T: serde::Serialize + ?Sized,
+{
+    if serde_json::to_writer(&mut out.bytes, value).is_err() {
+        out.failed = true;
+    }
+}
+
+fn append_raw(value: &Value, out: &mut OutputBuffer) {
+    if sonic_rs::to_writer(&mut out.bytes, value).is_err() {
+        out.failed = true;
     }
 }
 
