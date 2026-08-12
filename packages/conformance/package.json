@@ -8,7 +8,7 @@
   },
   "devDependencies": {
     "@seriousme/openapi-schema-validator": "2.9.1",
-    "recheck": "4.6.0-beta.3",
+    "recheck": "4.5.0",
     "zodrs": "workspace:*"
   }
 }
