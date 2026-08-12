@@ -269,8 +269,11 @@ side finalizes them:
 
 1. Rust `validate.rs` walks a `sonic-rs` DOM against the compiled plan arena,
    constructing `Issue` structs with ordered `(field, value)` pairs and a
-   `Path` (`issue.rs:69–79`). Fields are pushed in insertion order; `path` is
-   serialized last (`Issue::to_json`, `issue.rs:122–130`).
+   `Path` (`issue.rs`). Fields are pushed in insertion order; the `IssueWire`
+   serializer writes them in that order and collapses duplicates to their
+   first position with their last value. A `path` field in the payload is
+   never trusted: the real `Path` is written at that key's position, or
+   appended last when the payload carries no `path`.
 2. Issues serialize as a JSON array string (`issues_to_json`) in the
    `Verdict.payload` (`validate.rs:36–43`).
 3. TS `parse.ts:parseRawIssues` (line 183) parses the payload into

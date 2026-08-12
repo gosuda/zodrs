@@ -5,8 +5,8 @@ use std::env;
 use std::hint::black_box;
 use std::process::ExitCode;
 
-use serde_json::Value as Json;
 use smallvec::smallvec;
+use sonic_rs::Value as Json;
 
 use zodrs::issue::{Issue, PathSegRef, issues_to_value};
 use zodrs::{compile, issues_to_json, validate};

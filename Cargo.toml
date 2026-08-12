@@ -25,7 +25,6 @@ panic = "warn"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sonic-rs = "0.5.8"
 regex = "1.13.1"
 jiff = "0.2.35"

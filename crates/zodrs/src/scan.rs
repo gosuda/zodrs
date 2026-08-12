@@ -12,8 +12,8 @@
 //! token `JSON.parse` would reject (e.g. a raw control byte in a string)
 //! surfaces the identical `SyntaxError` on either path.
 
-use serde_json::Value as Json;
 use smallvec::SmallVec;
+use sonic_rs::{JsonNumberTrait, JsonValueTrait, Value as Json, ValueRef};
 
 use crate::compile::{CompiledCheck, CompiledPlan, NodeDispatch};
 use crate::plan::{Check, NodeId, PlanNode};
@@ -599,23 +599,22 @@ impl<'a> Scanner<'a> {
     /// Matches the value at the cursor against one of the allowed literals.
     fn literal(&mut self, values: &[Json]) -> bool {
         for lit in values {
-            match lit {
-                Json::Null => {
+            match lit.as_ref() {
+                ValueRef::Null => {
                     if self.eat(b"null") {
                         return true;
                     }
                 }
-                Json::Bool(true) => {
-                    if self.eat(b"true") {
+                ValueRef::Bool(b) => {
+                    if self.eat(if b {
+                        b"true".as_slice()
+                    } else {
+                        b"false".as_slice()
+                    }) {
                         return true;
                     }
                 }
-                Json::Bool(false) => {
-                    if self.eat(b"false") {
-                        return true;
-                    }
-                }
-                Json::Number(n) => {
+                ValueRef::Number(n) => {
                     let mark = self.i;
                     if let Some(v) = self.number_token()
                         && n.as_f64() == Some(v)
@@ -624,16 +623,16 @@ impl<'a> Scanner<'a> {
                     }
                     self.i = mark;
                 }
-                Json::String(s) => {
+                ValueRef::String(s) => {
                     let mark = self.i;
                     if let Some(v) = self.string_token()
-                        && v == s.as_str()
+                        && v == s
                     {
                         return true;
                     }
                     self.i = mark;
                 }
-                _ => {}
+                ValueRef::Array(_) | ValueRef::Object(_) => {}
             }
         }
         false

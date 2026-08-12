@@ -13,6 +13,7 @@ pub mod plan;
 #[doc(hidden)]
 pub mod scan;
 pub mod validate;
+mod wire;
 
 pub use compile::{CompileError, CompiledPlan, compile};
 pub use issue::{Issue, Path, PathSeg, issues_to_json};

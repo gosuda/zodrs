@@ -269,7 +269,7 @@ fn preflight_ignores_brackets_and_escapes_in_strings() {
     let plan = compile(r#"[{"k":"string","checks":[{"c":"overwrite","op":"trim"}]}]"#).unwrap();
     // The string value contains literal brackets, an escaped quote, and an
     // escaped backslash. The scanner defers on escapes, so the preflight runs.
-    let input = serde_json::to_vec(&"[ { ] } \" \\").unwrap();
+    let input = sonic_rs::to_vec(&"[ { ] } \" \\").unwrap();
     let v = validate(&plan, &input);
     assert_eq!(
         v.status, 0,

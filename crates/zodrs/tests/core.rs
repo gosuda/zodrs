@@ -11,19 +11,19 @@
 //! Every `#[case]` is a row in a `rstest` table: valid (asserting the status),
 //! invalid (asserting the exact issue object: code, fields, and path), and the
 //! dirty-flag cases (strip / default / trim / key reorder). Column data
-//! re-serializes with `serde_json` only to express multi-digit numbers.
+//! re-serializes with `sonic-rs` only to express multi-digit numbers.
 
 use rstest::rstest;
-use serde_json::{Value as Json, json};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value as Json, json};
 use zodrs::{compile, validate};
 
 fn plan(plan_json: &Json) -> zodrs::CompiledPlan {
-    let s = serde_json::to_string(plan_json).unwrap();
+    let s = sonic_rs::to_string(plan_json).unwrap();
     compile(&s).expect("plan compiles")
 }
 
 fn issues(payload: &Option<String>) -> Vec<Json> {
-    serde_json::from_str(payload.as_deref().expect("issue payload")).expect("issues parse")
+    sonic_rs::from_str(payload.as_deref().expect("issue payload")).expect("issues parse")
 }
 
 fn assert_issue(verdict: &zodrs::Verdict, expected: &Json) {
@@ -34,7 +34,7 @@ fn assert_issue(verdict: &zodrs::Verdict, expected: &Json) {
 
 fn output(verdict: &zodrs::Verdict) -> Json {
     assert_eq!(verdict.status, 1, "expected rewritten verdict");
-    serde_json::from_str(verdict.payload.as_deref().unwrap()).unwrap()
+    sonic_rs::from_str(verdict.payload.as_deref().unwrap()).unwrap()
 }
 
 // ------------------------------------------------------------------------
@@ -66,7 +66,7 @@ fn round_trip_object_string_min_array_int() {
 #[case(json!({"k":"number","checks":[]}), json!(36), 0)]
 #[case(json!({"k":"number","checks":[{"c":"gt","v":10,"inclusive":false}]}), json!(36), 0)]
 #[case(json!({"k":"boolean"}), json!(true), 0)]
-#[case(json!({"k":"null"}), Json::Null, 0)]
+#[case(json!({"k":"null"}), Json::default(), 0)]
 #[case(json!({"k":"any"}), json!([1,2,3]), 0)]
 #[case(json!({"k":"unknown"}), json!({"x":1}), 0)]
 #[case(json!({"k":"literal","values":["red",1,true,null]}), json!("red"), 0)]
@@ -75,7 +75,7 @@ fn round_trip_object_string_min_array_int() {
 #[case(json!({"k":"string","checks":[{"c":"length","v":3}]}), json!("abc"), 0)]
 fn scalar_valid(#[case] node: Json, #[case] input: Json, #[case] status: u8) {
     let compiled = plan(&json!([node]));
-    let bytes = serde_json::to_vec(&input).unwrap();
+    let bytes = sonic_rs::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     assert_eq!(verdict.status, status, "{verdict:?}");
 }
@@ -153,7 +153,7 @@ fn scalar_valid(#[case] node: Json, #[case] input: Json, #[case] status: u8) {
 )]
 fn scalar_invalid(#[case] node: Json, #[case] input: Json, #[case] expected: Json) {
     let compiled = plan(&json!([node]));
-    let bytes = serde_json::to_vec(&input).unwrap();
+    let bytes = sonic_rs::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     assert_issue(&verdict, &expected);
 }
@@ -218,7 +218,7 @@ fn scalar_invalid(#[case] node: Json, #[case] input: Json, #[case] expected: Jso
 fn format_checks(#[case] format: &str, #[case] input: Json, #[case] ok: bool) {
     let node = json!({"k":"string","checks":[{"c":"format","v":format}]});
     let compiled = plan(&json!([node]));
-    let bytes = serde_json::to_vec(&input).unwrap();
+    let bytes = sonic_rs::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     if ok {
         assert_eq!(
@@ -253,7 +253,7 @@ fn string_keywords(
 ) {
     let node = json!({"k":"string","checks":[{"c":c,"v":needle}]});
     let compiled = plan(&json!([node]));
-    let bytes = serde_json::to_vec(&json!(input)).unwrap();
+    let bytes = sonic_rs::to_vec(&json!(input)).unwrap();
     let verdict = validate(&compiled, &bytes);
     assert_eq!(verdict.status, if ok { 0 } else { 2 });
     if !ok {
@@ -409,7 +409,7 @@ fn proto_key_is_ordinary_data() {
 )]
 fn containers_valid(#[case] p: Json, #[case] input: Json, #[case] status: u8) {
     let compiled = plan(&p);
-    let bytes = serde_json::to_vec(&input).unwrap();
+    let bytes = sonic_rs::to_vec(&input).unwrap();
     assert_eq!(validate(&compiled, &bytes).status, status);
 }
 
@@ -434,7 +434,7 @@ fn containers_valid(#[case] p: Json, #[case] input: Json, #[case] status: u8) {
 )]
 fn containers_invalid(#[case] p: Json, #[case] input: Json, #[case] expected: Json) {
     let compiled = plan(&p);
-    let bytes = serde_json::to_vec(&input).unwrap();
+    let bytes = sonic_rs::to_vec(&input).unwrap();
     let verdict = validate(&compiled, &bytes);
     assert_issue(&verdict, &expected);
 }
@@ -854,7 +854,7 @@ fn tuple_long_input_reports_too_big_and_validates_items() {
     assert_eq!(v.status, 2);
     let got = issues(&v.payload);
     assert_eq!(
-        Json::Array(got),
+        got,
         json!([
             {"code":"too_big","origin":"array","maximum":1,"inclusive":true,"path":[]},
             {"code":"too_small","origin":"string","minimum":3,"inclusive":true,"path":[0]}
@@ -953,7 +953,7 @@ fn object_issues_follow_schema_key_order() {
     assert_eq!(v.status, 2);
     let got = issues(&v.payload);
     assert_eq!(
-        Json::Array(got),
+        got,
         json!([
             {"code":"invalid_type","expected":"string","path":["a"]},
             {"code":"invalid_type","expected":"number","path":["b"]}
@@ -965,7 +965,7 @@ fn object_issues_follow_schema_key_order() {
     let v = validate(&obj, br#"{"b":"x"}"#);
     let got = issues(&v.payload);
     assert_eq!(
-        Json::Array(got),
+        got,
         json!([
             {"code":"invalid_type","expected":"string","path":["a"]},
             {"code":"invalid_type","expected":"number","path":["b"]}
@@ -1114,7 +1114,7 @@ fn format_issue_includes_pattern_and_key_order() {
     assert_eq!(iss.len(), 1);
     let obj = iss[0].as_object().unwrap();
     // Key order: code, origin, format, pattern, path
-    let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
+    let keys: Vec<&str> = obj.iter().map(|(k, _)| k).collect();
     assert_eq!(
         keys,
         vec!["code", "origin", "format", "pattern", "path"],
@@ -1123,7 +1123,7 @@ fn format_issue_includes_pattern_and_key_order() {
     assert_eq!(obj["code"], "invalid_format");
     assert_eq!(obj["origin"], "string");
     assert_eq!(obj["format"], "uuid");
-    assert!(obj["pattern"].is_string(), "pattern should be present");
+    assert!(obj["pattern"].is_str(), "pattern should be present");
 }
 
 // ------------------------------------------------------------------------
@@ -1146,7 +1146,7 @@ fn discunion_note_field_and_key_order() {
     assert_eq!(iss.len(), 1);
     let obj = iss[0].as_object().unwrap();
     // Key order: code, errors, note, discriminator, options, path
-    let keys: Vec<&str> = obj.keys().map(std::string::String::as_str).collect();
+    let keys: Vec<&str> = obj.iter().map(|(k, _)| k).collect();
     assert_eq!(
         keys,
         vec!["code", "errors", "note", "discriminator", "options", "path"],

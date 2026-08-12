@@ -24,8 +24,7 @@ The default is the latest stable release. The N-API rows form one older stable g
 | Crate | Selected version | Current stable | Released | Decision | Source |
 |---|---:|---:|---:|---|---|
 | serde | 1 / 1.0.229 | 1.0.229 | 2026-07-18 | Latest stable. | [crates.io](https://crates.io/api/v1/crates/serde) |
-| serde_json | 1.0.151 | 1.0.151 | 2026-07-20 | Keep as the ordered public value model and compatibility serializer. | [crates.io](https://crates.io/api/v1/crates/serde_json) |
-| sonic-rs | 0.5.8 | 0.5.8 | 2026-03-25 | Latest stable SIMD parser and writer. | [crates.io](https://crates.io/api/v1/crates/sonic-rs) |
+| sonic-rs | 0.5.8 | 0.5.8 | 2026-03-25 | Latest stable SIMD parser, writer, and value model. | [crates.io](https://crates.io/api/v1/crates/sonic-rs) |
 | regex | 1.13.1 | 1.13.1 | 2026-07-15 | Latest stable. | [crates.io](https://crates.io/api/v1/crates/regex) |
 | jiff | 0.2.35 | 0.2.35 | 2026-07-25 | Latest stable. | [crates.io](https://crates.io/api/v1/crates/jiff) |
 | memchr | 2.8.3 | 2.8.3 | 2026-07-08 | Latest stable. | [crates.io](https://crates.io/api/v1/crates/memchr) |
@@ -65,6 +64,18 @@ The default is the latest stable release. The N-API rows form one older stable g
 
 `sonic-rs` 0.5.8 already parses deferred raw input and writes raw values. `simd-json` 0.17.3 parses through a mutable-byte API, which would force a copy at the immutable `&[u8]` zodrs boundary: [simd-json `from_slice`](https://docs.rs/simd-json/0.17.3/simd_json/fn.from_slice.html).
 
-The remaining broad `serde_json` writer replacement was measured and rejected. It reduced status-1 throughput and status-0 throughput. A full Sonic value-model replacement was also rejected because constructed Sonic objects do not preserve the issue wire's insertion order.
+`sonic-rs` is now the only JSON dependency. It provides the parser, the writer, and the value model. `cargo-deny` bans the removed crate in `deny.toml`, so it cannot return.
 
-The selected boundary streams issue arrays through Sonic without constructing a second `serde_json::Value` tree. It preserves the old ordered-map behavior, including duplicate field replacement and `path` shadowing. The issue-heavy Rust probe improved from 77.15 ms to 22.6 ms, or 3.414x. The three-run public release gate still passes all ten suites. `serde_json` remains the ordered plan and issue value model; the hot raw-input parser remains Sonic.
+Object ordering controls the design. In `sonic-rs` 0.5.8 a constructed `sonic_rs::Object` is an `AHashMap`. Mutation does not preserve insertion order. A parsed sonic value preserves document order. The DOM stores it as a flat pair slice. The code therefore never builds ordered objects by mutation. The ordered `Serialize` writers (`IssueWire` and `IssueList` in `crates/zodrs/src/issue.rs`) produce the issue wire in field order. When a value tree is needed, the code parses that ordered serialized form back into a `sonic_rs::Value`.
+
+`sonic_rs::Value` also cannot deserialize through serde's internally-tagged
+buffer. In `sonic-rs` 0.5.8 its `Deserialize` requests a private newtype token
+that sonic's own deserializer answers and serde's buffered content
+deserializer does not. `PlanNode` and `Check` are internally tagged, so serde
+buffers each node into `Content` before it reads the `k` or `c` tag, and a bare
+`Value` field fails there. `crates/zodrs/src/wire.rs` writes the buffered value
+back out as JSON text in visit order and parses it once. That solves the
+ordering constraint above at the same time. `crates/zodrs/tests/plan_wire.rs`
+pins both properties.
+
+The streaming boundary measured real gains. The issue-heavy Rust probe improved from 77.15 ms to 22.6 ms, or 3.414x. The boundary preserves the old ordered-map behavior. This includes duplicate field replacement and `path` shadowing.

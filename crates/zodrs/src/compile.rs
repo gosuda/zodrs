@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 use regex::{Regex, RegexBuilder};
-use serde_json::Value as Json;
+use sonic_rs::{JsonNumberTrait, JsonValueTrait, Value as Json, ValueRef};
 
 use crate::formats::{self, FormatValidator};
 use crate::plan::{Check, NodeId, PlanNode, RawPlan};
@@ -74,8 +74,7 @@ impl DiscUnionDispatch {
     }
 
     /// Look up the option for a parsed discriminant value.
-    pub fn find_value(&self, v: &sonic_rs::Value) -> Option<NodeId> {
-        use sonic_rs::JsonValueTrait;
+    pub fn find_value(&self, v: &Json) -> Option<NodeId> {
         if let Some(s) = v.as_str() {
             return self.strings.get(s).copied();
         }
@@ -214,12 +213,12 @@ fn number_key(n: f64) -> u64 {
 
 impl LiteralValue {
     pub fn from_json(v: &Json) -> Option<LiteralValue> {
-        match v {
-            Json::String(s) => Some(LiteralValue::String(s.clone())),
-            Json::Number(n) => n.as_f64().map(|n| LiteralValue::Number(number_key(n))),
-            Json::Bool(b) => Some(LiteralValue::Bool(*b)),
-            Json::Null => Some(LiteralValue::Null),
-            _ => None,
+        match v.as_ref() {
+            ValueRef::String(s) => Some(LiteralValue::String(s.to_string())),
+            ValueRef::Number(n) => n.as_f64().map(|n| LiteralValue::Number(number_key(n))),
+            ValueRef::Bool(b) => Some(LiteralValue::Bool(b)),
+            ValueRef::Null => Some(LiteralValue::Null),
+            ValueRef::Array(_) | ValueRef::Object(_) => None,
         }
     }
 }
@@ -246,8 +245,8 @@ impl Display for CompileError {
 
 impl Error for CompileError {}
 
-impl From<serde_json::Error> for CompileError {
-    fn from(value: serde_json::Error) -> Self {
+impl From<sonic_rs::Error> for CompileError {
+    fn from(value: sonic_rs::Error) -> Self {
         CompileError::new(format!("invalid plan JSON: {value}"))
     }
 }

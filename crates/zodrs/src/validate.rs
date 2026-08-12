@@ -14,9 +14,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use serde_json::Value as Json;
 use smallvec::{SmallVec, smallvec};
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Object, Value};
+use sonic_rs::{
+    JsonContainerTrait, JsonNumberTrait, JsonValueTrait, Object, Value, Value as Json, ValueRef,
+};
 
 use crate::compile::{CompiledCheck, CompiledPlan, NodeDispatch};
 use crate::formats::FormatValidator;
@@ -285,7 +286,7 @@ impl<'p> Validator<'p> {
         self.emit(|p| Issue::new("invalid_type", p).with("expected", Json::from(expected)));
     }
     fn invalid_value(&mut self, values: Vec<Json>) {
-        self.emit(|p| Issue::new("invalid_value", p).with("values", Json::Array(values)));
+        self.emit(|p| Issue::new("invalid_value", p).with("values", Json::from(values)));
     }
 
     /// Validate `value` against node `id`, appending issues on failure.
@@ -603,7 +604,7 @@ impl<'p> Validator<'p> {
                     self.emit(|p| {
                         Issue::new("invalid_format", p)
                             .with("format", Json::from("template_literal"))
-                            .with("pattern", Json::from(pattern))
+                            .with("pattern", Json::from(pattern.as_str()))
                     });
                 }
             }
@@ -637,7 +638,7 @@ impl<'p> Validator<'p> {
                 self.emit(|p| {
                     Issue::new("invalid_format", p)
                         .with("format", Json::from("template_literal"))
-                        .with("pattern", Json::from(pattern))
+                        .with("pattern", Json::from(pattern.as_str()))
                 });
             }
             PlanNode::Number { .. } => self.invalid_type("number"),
@@ -695,7 +696,7 @@ impl<'p> Validator<'p> {
                     }
                 }
                 self.emit(|p| {
-                    Issue::new("invalid_union", p).with("errors", Json::Array(branch_errors))
+                    Issue::new("invalid_union", p).with("errors", Json::from(branch_errors))
                 });
             }
             PlanNode::Unsupported => self.fallback = true,
@@ -796,7 +797,7 @@ impl<'p> Validator<'p> {
                             Issue::new_check("invalid_format", p)
                                 .with("origin", Json::from("string"))
                                 .with("format", Json::from("regex"))
-                                .with("pattern", Json::from(format!("/{src}/{flags}")))
+                                .with("pattern", Json::from(format!("/{src}/{flags}").as_str()))
                         });
                     }
                 }
@@ -1105,7 +1106,12 @@ impl<'p> Validator<'p> {
                     self.emit(|p| {
                         Issue::new("unrecognized_keys", p).with(
                             "keys",
-                            Json::Array(unknowns.iter().map(|(k, _)| Json::from(*k)).collect()),
+                            Json::from(
+                                unknowns
+                                    .iter()
+                                    .map(|(k, _)| Json::from(*k))
+                                    .collect::<Vec<_>>(),
+                            ),
                         )
                     });
                 }
@@ -1197,7 +1203,7 @@ impl<'p> Validator<'p> {
             .map(|issues| issues_to_value(issues))
             .collect();
         self.push(
-            Issue::new("invalid_union", &union_path).with("errors", Json::Array(branch_errors)),
+            Issue::new("invalid_union", &union_path).with("errors", Json::from(branch_errors)),
         );
     }
 
@@ -1232,10 +1238,10 @@ impl<'p> Validator<'p> {
         self.path.push(PathSegRef::Key(Cow::Borrowed(disc_key)));
         self.emit(|p| {
             Issue::new("invalid_union", p)
-                .with("errors", Json::Array(Vec::new()))
+                .with("errors", Json::from(Vec::<Json>::new()))
                 .with("note", Json::from("No matching discriminator"))
                 .with("discriminator", Json::from(disc_key))
-                .with("options", Json::Array(options))
+                .with("options", Json::from(options))
         });
         self.path.pop();
     }
@@ -1335,7 +1341,7 @@ impl<'p> Validator<'p> {
                     } else {
                         self.emit(|path| {
                             Issue::new("invalid_union", path)
-                                .with("errors", Json::Array(branch_errors))
+                                .with("errors", Json::from(branch_errors))
                         });
                         Missing::Fail
                     }
@@ -1349,9 +1355,10 @@ impl<'p> Validator<'p> {
                         (Missing::Undefined, Missing::Undefined) => Missing::Undefined,
                         (Missing::Value(value), Missing::Undefined)
                         | (Missing::Undefined, Missing::Value(value)) => Missing::Value(value),
-                        (Missing::Value(Json::Object(mut a)), Missing::Value(Json::Object(b))) => {
-                            a.extend(b);
-                            Missing::Value(Json::Object(a))
+                        (Missing::Value(a), Missing::Value(b))
+                            if a.is_object() && b.is_object() =>
+                        {
+                            merge_objects(&a, &b).map_or(Missing::Cycle, Missing::Value)
                         }
                         (Missing::Value(a), Missing::Value(b)) if a == b => Missing::Value(a),
                         (Missing::Fail, _)
@@ -1411,19 +1418,15 @@ impl<'p> Validator<'p> {
         result
     }
 
+    /// Runs a node against a concrete plan value (a default or catch payload).
+    /// The plan value is already a parsed document, so `check` and
+    /// `write_output` share it directly: both must observe the same node
+    /// addresses for the decision log to line up.
     fn eval_concrete(&mut self, id: NodeId, input: &Json) -> Missing {
         let decisions_len = self.decisions.len();
         let result = (|| {
-            let Ok(bytes) = serde_json::to_vec(input) else {
-                self.fallback = true;
-                return Missing::Cycle;
-            };
-            let Ok(value) = sonic_rs::from_slice::<Value>(&bytes) else {
-                self.fallback = true;
-                return Missing::Cycle;
-            };
             let before = self.fail_count;
-            self.check(id, &value);
+            self.check(id, input);
             if self.fallback {
                 return Missing::Cycle;
             }
@@ -1434,13 +1437,13 @@ impl<'p> Validator<'p> {
             {
                 let metadata =
                     OutputMetadata::new(&self.missing_values, &self.decisions[decisions_len..]);
-                write_output(self.plan, id, &value, &mut output, &metadata);
+                write_output(self.plan, id, input, &mut output, &metadata);
             }
             if output.is_failed() {
                 self.fallback = true;
                 return Missing::Cycle;
             }
-            if let Ok(value) = serde_json::from_slice(output.as_bytes()) {
+            if let Ok(value) = sonic_rs::from_slice(output.as_bytes()) {
                 Missing::Value(value)
             } else {
                 self.fallback = true;
@@ -1490,10 +1493,10 @@ impl<'p> Validator<'p> {
             if let Some(pat) = &f.pattern {
                 Issue::new_check("invalid_format", p)
                     .with("origin", Json::from("string"))
-                    .with("format", Json::from(f.id.clone()))
-                    .with("pattern", Json::from(pat.clone()))
+                    .with("format", Json::from(f.id.as_str()))
+                    .with("pattern", Json::from(pat.as_str()))
             } else {
-                Issue::new_check("invalid_format", p).with("format", Json::from(f.id.clone()))
+                Issue::new_check("invalid_format", p).with("format", Json::from(f.id.as_str()))
             }
         });
     }
@@ -1964,15 +1967,13 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
                 (Absent::Value(v, f), Absent::Undefined)
                 | (Absent::Undefined, Absent::Value(v, f)) => Absent::Value(v, f),
                 (Absent::Value(a, fa), Absent::Value(b, fb)) => {
-                    match (a.into_owned(), b.into_owned()) {
-                        (Json::Object(mut x), Json::Object(y)) => {
-                            x.extend(y);
-                            Absent::Value(Cow::Owned(Json::Object(x)), fa || fb)
-                        }
+                    if !a.is_object() || !b.is_object() {
                         // Non-mergeable undefined intersections do not arise
                         // in JSON-eligible schemas; treat as failure.
-                        _ => Absent::Fail,
+                        return Absent::Fail;
                     }
+                    merge_objects(&a, &b)
+                        .map_or(Absent::Cycle, |m| Absent::Value(Cow::Owned(m), fa || fb))
                 }
             }
         }
@@ -2026,11 +2027,45 @@ fn append_json<T>(value: &T, out: &mut OutputBuffer)
 where
     T: serde::Serialize + ?Sized,
 {
-    out.serialize_with(|w| serde_json::to_writer(w, value));
+    out.serialize_with(|w| sonic_rs::to_writer(w, value));
 }
 
 fn append_raw(value: &Value, out: &mut OutputBuffer) {
-    out.serialize_with(|w| sonic_rs::to_writer(w, value));
+    append_json(value, out);
+}
+
+/// Merges two JSON objects, keeping the left object's key order and letting
+/// the right object's values win on shared keys. Duplicate keys collapse the
+/// ECMA way first: first position, last value.
+///
+/// A mutable `sonic_rs::Object` is hash-backed, so merging by insertion would
+/// scramble the key order the canonical output depends on. Writing the merged
+/// form and parsing it back keeps document order. This runs only on the cold
+/// intersection-default path.
+fn merge_objects(left: &Json, right: &Json) -> Option<Json> {
+    let (a_entries, a_last) = collapse_object(left.as_object()?);
+    let (b_entries, b_last) = collapse_object(right.as_object()?);
+
+    let mut text = String::from("{");
+    let mut write = |key: &str, value: &Value| -> Option<()> {
+        if text.len() > 1 {
+            text.push(',');
+        }
+        text.push_str(&sonic_rs::to_string(key).ok()?);
+        text.push(':');
+        text.push_str(&sonic_rs::to_string(value).ok()?);
+        Some(())
+    };
+    for (key, value) in &a_entries {
+        write(key, b_last.get(key).copied().unwrap_or(value))?;
+    }
+    for (key, value) in &b_entries {
+        if !a_last.contains_key(key) {
+            write(key, value)?;
+        }
+    }
+    text.push('}');
+    sonic_rs::from_str(&text).ok()
 }
 
 // ------------------------------------------------------------------------
@@ -2136,15 +2171,15 @@ fn number_of(value: &Value) -> Option<f64> {
 }
 
 fn json_eq(value: &Value, lit: &Json) -> bool {
-    match lit {
-        Json::Null => value.is_null(),
-        Json::Bool(b) => value.as_bool() == Some(*b),
-        Json::Number(n) => match (value.as_f64(), n.as_f64()) {
+    match lit.as_ref() {
+        ValueRef::Null => value.is_null(),
+        ValueRef::Bool(b) => value.as_bool() == Some(b),
+        ValueRef::Number(n) => match (value.as_f64(), n.as_f64()) {
             (Some(a), Some(b)) => a == b,
             _ => false,
         },
-        Json::String(s) => value.as_str() == Some(s.as_str()),
-        _ => false,
+        ValueRef::String(s) => value.as_str() == Some(s),
+        ValueRef::Array(_) | ValueRef::Object(_) => false,
     }
 }
 
@@ -2233,8 +2268,8 @@ fn within_dom_depth(input: &[u8]) -> bool {
     true
 }
 
-/// Builds a `serde_json` number from an `f64`, integral when possible so `36`
-/// stays `36`.
+/// Builds a JSON number from an `f64`, integral when possible so `36` stays
+/// `36`.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "the branch guard confines the value to the exact i64 range"
@@ -2243,12 +2278,12 @@ fn num_json(n: f64) -> Json {
     if n.fract() == 0.0 && n.is_finite() && n.abs() < 9.007_199_254_740_992e15 {
         Json::from(n as i64)
     } else {
-        serde_json::Number::from_f64(n).map_or(Json::Null, Json::Number)
+        Json::new_f64(n).unwrap_or_default()
     }
 }
 
 fn json_string(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+    sonic_rs::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
 fn coerce_to_string(value: &Value) -> String {
@@ -2486,6 +2521,7 @@ pub(crate) fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::OutputBuffer;
 
@@ -2515,7 +2551,7 @@ mod tests {
     fn serialize_with_records_sticky_failure_and_keeps_partial_bytes() {
         let mut out = OutputBuffer::default();
         out.push(b'{'); // bytes preceding the failed serializer survive too
-        out.serialize_with(|w| serde_json::to_writer(w, &PartialThenFail));
+        out.serialize_with(|w| sonic_rs::to_writer(w, &PartialThenFail));
 
         assert!(out.is_failed(), "serializer error must mark failure");
         assert_eq!(
@@ -2536,5 +2572,40 @@ mod tests {
         super::append_json("ok", &mut out);
         assert!(!out.is_failed());
         assert_eq!(out.as_bytes(), b"\"ok\"");
+    }
+
+    fn parse(text: &str) -> super::Json {
+        sonic_rs::from_str(text).expect("fixture parses")
+    }
+
+    /// Intersection defaults merge two plan objects. The result is written
+    /// verbatim into canonical output, so key order is part of the contract:
+    /// left order wins, right values win, and duplicate keys collapse to
+    /// first position with the last value.
+    #[test]
+    fn merge_objects_keeps_left_order_and_right_values() {
+        let cases = [
+            (r#"{"z":1,"a":2}"#, r#"{"m":3}"#, r#"{"z":1,"a":2,"m":3}"#),
+            (r#"{"z":1,"a":2}"#, r#"{"a":9}"#, r#"{"z":1,"a":9}"#),
+            (r#"{"z":1,"z":2}"#, r#"{"y":3}"#, r#"{"z":2,"y":3}"#),
+            (r#"{"z":1}"#, r#"{"y":3,"y":4}"#, r#"{"z":1,"y":4}"#),
+            (r"{}", r#"{"a":1}"#, r#"{"a":1}"#),
+            (r#"{"a":1}"#, r"{}", r#"{"a":1}"#),
+            (r"{}", r"{}", r"{}"),
+        ];
+        for (left, right, expected) in cases {
+            let merged = super::merge_objects(&parse(left), &parse(right)).expect("objects merge");
+            assert_eq!(
+                sonic_rs::to_string(&merged).unwrap_or_default(),
+                expected,
+                "{left} + {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_objects_rejects_non_objects() {
+        assert!(super::merge_objects(&parse("[1]"), &parse(r#"{"a":1}"#)).is_none());
+        assert!(super::merge_objects(&parse(r#"{"a":1}"#), &parse("3")).is_none());
     }
 }

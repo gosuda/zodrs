@@ -6,7 +6,9 @@
 //! ordinary back-edges without reference-counted nodes.
 
 use serde::Deserialize;
-use serde_json::Value as Json;
+use sonic_rs::Value as Json;
+
+use crate::wire;
 
 /// Index into a plan's flat node arena.
 pub type NodeId = u32;
@@ -29,9 +31,9 @@ impl RawPlan {
     ///
     /// # Errors
     ///
-    /// Returns a [`serde_json::Error`] when the JSON is malformed or does not
+    /// Returns a [`sonic_rs::Error`] when the JSON is malformed or does not
     /// conform to the plan IR.
-    pub fn from_json(s: &str) -> Result<RawPlan, serde_json::Error> {
+    pub fn from_json(s: &str) -> Result<RawPlan, sonic_rs::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Wire {
@@ -42,7 +44,7 @@ impl RawPlan {
             },
             Bare(Vec<PlanNode>),
         }
-        Ok(match serde_json::from_str::<Wire>(s)? {
+        Ok(match sonic_rs::from_str::<Wire>(s)? {
             Wire::Wrapped { nodes, root } => RawPlan { nodes, root },
             Wire::Bare(nodes) => RawPlan { nodes, root: 0 },
         })
@@ -149,12 +151,14 @@ pub enum PlanNode {
     #[serde(rename = "literal")]
     Literal {
         /// Allowed string, number, boolean, or null values.
+        #[serde(deserialize_with = "wire::json_vec")]
         values: Vec<Json>,
     },
     /// Accepts one of a fixed set of string or number enum values.
     #[serde(rename = "enum")]
     Enum {
         /// Allowed enum values.
+        #[serde(deserialize_with = "wire::json_vec")]
         values: Vec<Json>,
     },
 
@@ -203,6 +207,7 @@ pub enum PlanNode {
         /// Object property used as the discriminant.
         key: String,
         /// Mapping from discriminant literals to option schemas.
+        #[serde(deserialize_with = "wire::json_pairs")]
         map: Vec<(Json, NodeId)>,
     },
     /// Requires both child schemas to succeed.
@@ -292,7 +297,7 @@ pub enum PlanNode {
         /// Schema applied to present values.
         inner: NodeId,
         /// Static JSON default; null when dynamic.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "wire::json")]
         value: Json,
         /// Whether the default comes from a host closure.
         #[serde(default)]
@@ -304,7 +309,7 @@ pub enum PlanNode {
         /// Schema applied after inserting the prefault.
         inner: NodeId,
         /// Static JSON prefault; null when dynamic.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "wire::json")]
         value: Json,
         /// Whether the prefault comes from a host closure.
         #[serde(default)]
@@ -316,7 +321,7 @@ pub enum PlanNode {
         /// Schema attempted before using the fallback.
         inner: NodeId,
         /// Static JSON fallback; null when dynamic.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "wire::json")]
         value: Json,
         /// Whether the fallback comes from a host closure.
         #[serde(default)]
@@ -397,6 +402,7 @@ pub enum Check {
     #[serde(rename = "gt")]
     Gt {
         /// Number, decimal bigint string, or date-millisecond bound.
+        #[serde(deserialize_with = "wire::json")]
         v: Json,
         /// Whether equality with the bound is accepted.
         inclusive: bool,
@@ -408,6 +414,7 @@ pub enum Check {
     #[serde(rename = "lt")]
     Lt {
         /// Number, decimal bigint string, or date-millisecond bound.
+        #[serde(deserialize_with = "wire::json")]
         v: Json,
         /// Whether equality with the bound is accepted.
         inclusive: bool,
@@ -419,6 +426,7 @@ pub enum Check {
     #[serde(rename = "multiple_of")]
     MultipleOf {
         /// Numeric divisor or decimal bigint string.
+        #[serde(deserialize_with = "wire::json")]
         v: Json,
     },
 
@@ -441,7 +449,7 @@ pub enum Check {
         /// Format identifier, such as `email` or `uuid`.
         v: String,
         /// Format-specific options such as datetime precision.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "wire::json_opt")]
         params: Option<Json>,
     },
     /// Validates a string with a caller-provided regular expression.

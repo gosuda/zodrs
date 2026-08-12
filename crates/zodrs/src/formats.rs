@@ -13,7 +13,7 @@
 //! month-length rules, so this only ever agrees).
 
 use regex::Regex;
-use serde_json::Value as Json;
+use sonic_rs::{JsonValueTrait, Value as Json};
 
 /// A compiled format validator plus the canonical format id used in the
 /// `format` field of an `invalid_format` issue.
