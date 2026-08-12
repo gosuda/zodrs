@@ -21,7 +21,7 @@ function restoreHost() {
 }
 
 const modulePromise = (async () => {
-  spoofHost("darwin", "arm64");
+  spoofHost("win32", "arm64");
   try {
     return await import("./verify-installed.mjs");
   } finally {
