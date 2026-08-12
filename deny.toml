@@ -1,0 +1,44 @@
+# cargo-deny configuration, schema version 2 (targeting cargo-deny >= 0.16).
+# The project standardized on sonic-rs for all JSON parsing, serialization,
+# and the value model; serde_json is permanently banned from the graph.
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+# Empirically determined from `cargo deny list` against the current lockfile:
+# every license expression in the graph is satisfiable with these four. ISC is
+# required standalone (libloading); Unicode-3.0 is required standalone
+# (unicode-ident uses an AND expression). Unlicense, BSD-2-Clause, Zlib,
+# LGPL-2.1-or-later, and Apache-2.0 WITH LLVM-exception only appear behind OR
+# branches already covered here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Warn, not deny: duplicate transitive versions are surfaced for hygiene but
+# do not block the build, while wildcards stay visible without rejecting
+# wildcard dependencies that some upstream crates legitimately use.
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = [
+    { name = "serde_json", reason = "zodrs standardized on sonic-rs for all JSON parsing, serialization, and the value model; serde_json must not re-enter the dependency graph" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

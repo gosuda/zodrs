@@ -7,6 +7,8 @@ pre-commit:
       run: cargo clippy --workspace --all-targets -- -D warnings
     cargo-test:
       run: cargo nextest run --workspace
+    cargo-deny:
+      run: cargo deny check bans
     tsc:
       run: pnpm -C packages/zodrs build
     zodrs-test:
