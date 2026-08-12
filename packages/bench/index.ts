@@ -4,7 +4,7 @@
  * Usage:  pnpm -C packages/bench run run object,string,number,...
  *
  * Each argument is a comma-separated list of suite names. Each suite is a
- * sibling .ts file that registers mitata benchmarks and calls `bench.run()`.
+ * sibling .ts file that registers Tinybench tasks and calls `bench.run()`.
  */
 import { pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
