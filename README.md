@@ -2,7 +2,7 @@
 
 # zodrs
 
-**Drop-in replacement for Zod v4.4.3 with a Rust validation core.**
+**Drop-in blazingly-fast replacement for Zod with a Rust validation core.**
 
 [![npm](https://img.shields.io/npm/v/zod-rs.svg)](https://www.npmjs.com/package/zod-rs)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
