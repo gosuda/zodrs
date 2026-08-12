@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TOOL = "zodrs-verify-installed";
 const DEFAULT_EXPECTED_PACKAGE_DIR = realpathSync(fileURLToPath(new URL("..", import.meta.url)));
@@ -18,18 +18,18 @@ function nativeTriple() {
   );
 }
 
-const NATIVE_TRIPLE = nativeTriple();
-const NATIVE_ENTRY = `native/zodrs_node.${NATIVE_TRIPLE}.node`;
 const TIER_FILES = {
-  native: {
-    entry: NATIVE_ENTRY,
-    files: [NATIVE_ENTRY],
-  },
   wasm: {
     entry: "wasm/zodrs_node.wasi.cjs",
     files: ["wasm/zodrs_node.wasi.cjs", "wasm/zodrs_node.wasm32-wasi.wasm"],
   },
 };
+
+export function resolveTierFiles(tier) {
+  if (tier === "wasm") return TIER_FILES.wasm;
+  const entry = `native/zodrs_node.${nativeTriple()}.node`;
+  return { entry, files: [entry] };
+}
 
 function readManifest(packageDir) {
   return JSON.parse(readFileSync(resolve(packageDir, "package.json"), "utf8"));
@@ -102,7 +102,7 @@ function verify(packageArg, tier, expectedPackageArg = DEFAULT_EXPECTED_PACKAGE_
     requireAbsent(packageDir, DEBUG_WASM);
   }
 
-  const tierFiles = TIER_FILES[tier];
+  const tierFiles = resolveTierFiles(tier);
   const artifacts = tierFiles.files.map((relativePath) => {
     const expected = regularFile(expectedPackageDir, relativePath);
     const installed = regularFile(packageDir, relativePath);
@@ -143,15 +143,18 @@ function verify(packageArg, tier, expectedPackageArg = DEFAULT_EXPECTED_PACKAGE_
   };
 }
 
-const packageArg = process.argv[2];
-const tier = process.argv[3];
-const expectedPackageArg = process.argv[4];
-if (packageArg === undefined || (tier !== "native" && tier !== "wasm")) {
-  process.stderr.write(
-    `${JSON.stringify({ tool: TOOL, ok: false, error: "usage: verify-installed <package-directory> <native|wasm> [expected-package-directory]" })}\n`,
-  );
-  process.exitCode = 2;
-} else {
+export function main() {
+  const packageArg = process.argv[2];
+  const tier = process.argv[3];
+  const expectedPackageArg = process.argv[4];
+  if (packageArg === undefined || (tier !== "native" && tier !== "wasm")) {
+    process.stderr.write(
+      `${JSON.stringify({ tool: TOOL, ok: false, error: "usage: verify-installed <package-directory> <native|wasm> [expected-package-directory]" })}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
   delete process.env.NAPI_RS_NATIVE_LIBRARY_PATH;
   if (tier === "wasm") {
     process.env.NAPI_RS_FORCE_WASI = "error";
@@ -167,4 +170,8 @@ if (packageArg === undefined || (tier !== "native" && tier !== "wasm")) {
     process.stderr.write(`${JSON.stringify({ tool: TOOL, tier, ok: false, error: errorMessage(error) })}\n`);
     process.exitCode = 1;
   }
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }

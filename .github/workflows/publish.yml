@@ -126,7 +126,8 @@ jobs:
         run: |
           set -euo pipefail
           response="$RUNNER_TEMP/npm-version.json"
-          if ! status=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+          if ! status=$(curl --silent --show-error --connect-timeout 10 --max-time 60 \
+            --output "$response" --write-out '%{http_code}' \
             "https://registry.npmjs.org/$NPM_NAME/$VERSION"); then
             echo "npm registry lookup failed" >&2
             exit 1
@@ -136,7 +137,7 @@ jobs:
               npm publish "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" \
                 --dry-run --json --ignore-scripts --access public > "$RUNNER_TEMP/npm-dry-run.json"
               jq -e --arg name "$NPM_NAME" --arg version "$VERSION" \
-                '(if type == "array" then .[] else . end) | select(.name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
+                'select(type == "object" and .name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
               ;;
             200) echo "$NPM_NAME $VERSION already exists; publish job will verify its exact integrity" ;;
             *) echo "npm registry lookup returned HTTP $status" >&2; exit 1 ;;
@@ -312,7 +313,8 @@ jobs:
           set -euo pipefail
           lookup() {
             local url=$1 output=$2 status
-            if ! status=$(curl --silent --show-error --location --output "$output" --write-out '%{http_code}' \
+            if ! status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$output" --write-out '%{http_code}' \
               -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' "$url"); then
               printf '000'
               return
@@ -406,7 +408,8 @@ jobs:
           set -e
           for attempt in $(seq 1 18); do
             response="$RUNNER_TEMP/crate-published.json"
-            if status=$(curl --silent --show-error --location --output "$response" --write-out '%{http_code}' \
+            if status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$response" --write-out '%{http_code}' \
               -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' \
               "https://crates.io/api/v1/crates/zodrs/$VERSION") && [[ "$status" = 200 ]]; then
               remote_checksum=$(jq -er '.version.checksum' "$response" 2>/dev/null || true)
@@ -435,7 +438,8 @@ jobs:
           set -e
           for attempt in $(seq 1 18); do
             response="$RUNNER_TEMP/npm-published.json"
-            if status=$(curl --silent --show-error --location --output "$response" --write-out '%{http_code}' \
+            if status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$response" --write-out '%{http_code}' \
               "https://registry.npmjs.org/$NPM_NAME/$VERSION") && [[ "$status" = 200 ]]; then
               remote_integrity=$(jq -er '.dist.integrity' "$response" 2>/dev/null || true)
               if [[ "$remote_integrity" != "$NPM_INTEGRITY" ]]; then
@@ -452,7 +456,11 @@ jobs:
                 set -e
                 case "$provenance_status" in
                   0) exit 0 ;;
+                  4) ;; # attestation not exposed yet; retry until the loop budget is spent
+                  2) echo "npm provenance verifier usage error" >&2; exit 1 ;;
                   65) echo "npm provenance identity does not match" >&2; exit 1 ;;
+                  70) echo "npm provenance lookup failed" >&2; exit 1 ;;
+                  *) echo "npm provenance verifier returned unexpected status $provenance_status" >&2; exit 1 ;;
                 esac
               fi
             fi
@@ -564,7 +572,7 @@ jobs:
           ' "$audit" > /dev/null
 
           response="$RUNNER_TEMP/npm-public-version.json"
-          curl --fail --silent --show-error --location \
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
             "https://registry.npmjs.org/$NPM_NAME/$VERSION" > "$response"
           test "$(jq -er '.dist.integrity' "$response")" = "$NPM_INTEGRITY"
           attestation_url=$(jq -er '.dist.attestations.url' "$response")
