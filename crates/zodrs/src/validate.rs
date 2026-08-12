@@ -1518,10 +1518,13 @@ impl OutputBuffer {
         self.bytes.extend_from_slice(slice);
     }
 
-    /// Writer target for serializers. The caller must call `mark_failed`
-    /// when the serializer returns an error.
-    fn writer(&mut self) -> &mut Vec<u8> {
-        &mut self.bytes
+    /// Runs a serializer against the output bytes and records failure if it
+    /// returns an error. Bytes written before the error are retained, and
+    /// failure is sticky: no later successful serialization can clear it.
+    fn serialize_with<E>(&mut self, write: impl FnOnce(&mut Vec<u8>) -> Result<(), E>) {
+        if write(&mut self.bytes).is_err() {
+            self.failed = true;
+        }
     }
 
     fn as_bytes(&self) -> &[u8] {
@@ -1530,10 +1533,6 @@ impl OutputBuffer {
 
     fn is_failed(&self) -> bool {
         self.failed
-    }
-
-    fn mark_failed(&mut self) {
-        self.failed = true;
     }
 
     /// Appends a child buffer's bytes and propagates its failure flag.
@@ -2027,15 +2026,11 @@ fn append_json<T>(value: &T, out: &mut OutputBuffer)
 where
     T: serde::Serialize + ?Sized,
 {
-    if serde_json::to_writer(out.writer(), value).is_err() {
-        out.mark_failed();
-    }
+    out.serialize_with(|w| serde_json::to_writer(w, value));
 }
 
 fn append_raw(value: &Value, out: &mut OutputBuffer) {
-    if sonic_rs::to_writer(out.writer(), value).is_err() {
-        out.mark_failed();
-    }
+    out.serialize_with(|w| sonic_rs::to_writer(w, value));
 }
 
 // ------------------------------------------------------------------------
@@ -2487,5 +2482,59 @@ pub(crate) fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
         NumberFormat::Float32 => (-3.402_823_466_385_288_6e38, 3.402_823_466_385_288_6e38),
         NumberFormat::Float64 => (f64::MIN, f64::MAX),
         NumberFormat::Safeint => (-MAX_SAFE_INT, MAX_SAFE_INT),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutputBuffer;
+
+    /// Serializes `{"a":1,"b":…}` but fails while writing the second value,
+    /// leaving the opening bytes already flushed to the writer.
+    struct PartialThenFail;
+
+    impl serde::Serialize for PartialThenFail {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("a", &1)?;
+            map.serialize_entry("b", &FailValue)?;
+            map.end()
+        }
+    }
+
+    struct FailValue;
+
+    impl serde::Serialize for FailValue {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("boom"))
+        }
+    }
+
+    #[test]
+    fn serialize_with_records_sticky_failure_and_keeps_partial_bytes() {
+        let mut out = OutputBuffer::default();
+        out.push(b'{'); // bytes preceding the failed serializer survive too
+        out.serialize_with(|w| serde_json::to_writer(w, &PartialThenFail));
+
+        assert!(out.is_failed(), "serializer error must mark failure");
+        assert_eq!(
+            out.as_bytes(),
+            b"{{\"a\":1,\"b\":",
+            "bytes written before the serializer error are retained"
+        );
+
+        // Failure is sticky: a later successful serialization cannot clear it.
+        super::append_json("ok", &mut out);
+        assert!(out.is_failed(), "failure must survive later success");
+        assert_eq!(out.as_bytes(), b"{{\"a\":1,\"b\":\"ok\"");
+    }
+
+    #[test]
+    fn serialize_with_success_keeps_buffer_clean() {
+        let mut out = OutputBuffer::default();
+        super::append_json("ok", &mut out);
+        assert!(!out.is_failed());
+        assert_eq!(out.as_bytes(), b"\"ok\"");
     }
 }
