@@ -20,9 +20,9 @@
 
 `zodrs` keeps the Zod v4 TypeScript surface and replaces the validation engine.
 Schemas compile to a flat plan arena that a Rust core walks over raw JSON bytes
-in one pass. The backends are designed to agree, and the conformance suite runs
-four of them against the same corpus to prove it, so the engine underneath is
-an implementation detail you can switch off.
+in one pass. The backends are designed to agree, and the conformance suite
+runs four of them against the same corpus, so the engine underneath is an
+implementation detail you can switch off.
 
 Correctness is measured against Zod's own v4.4.3 test corpus, vendored into
 `packages/conformance`. Every departure is recorded in
@@ -37,7 +37,8 @@ npm install zod-rs
 
 Requires Node 20.17 or later. The package embeds a prebuilt Linux x64 GNU
 N-API addon and a `wasm32-wasip1-threads` addon. On any other platform the
-loader skips the native tier and uses the embedded WASM addon.
+loader skips the native tier and uses the embedded WASM addon; if that is
+unavailable too, validation falls back to the TypeScript validator.
 
 ## Quickstart
 
@@ -83,7 +84,8 @@ Zod's v3 surface is not shipped.
 ## Backends
 
 Two independent switches select how validation runs. Both exist so the
-conformance suite can prove the tiers agree; neither is needed in normal use.
+conformance suite can pin each tier against the corpus; neither is needed in
+normal use.
 
 | Variable | Values | Effect |
 |---|---|---|

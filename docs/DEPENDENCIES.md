@@ -64,14 +64,14 @@ The default is the latest stable release. The N-API rows form one older stable g
 
 `sonic-rs` 0.5.8 already parses deferred raw input and writes raw values. `simd-json` 0.17.3 parses through a mutable-byte API, which would force a copy at the immutable `&[u8]` zodrs boundary: [simd-json `from_slice`](https://docs.rs/simd-json/0.17.3/simd_json/fn.from_slice.html).
 
-`sonic-rs` is now the only JSON dependency. It provides the parser, the writer, and the value model. `cargo-deny` bans the removed crate in `deny.toml`, so it cannot return.
+`sonic-rs` is now the only JSON dependency. It provides the parser, the writer, and the value model. `cargo-deny` denies `serde_json` anywhere in the graph (`deny.toml`), so it cannot return.
 
-Object ordering controls the design. In `sonic-rs` 0.5.8 a constructed `sonic_rs::Object` is an `AHashMap`. Mutation does not preserve insertion order. A parsed sonic value preserves document order. The DOM stores it as a flat pair slice. The code therefore never builds ordered objects by mutation. The ordered `Serialize` writers (`IssueWire` and `IssueList` in `crates/zodrs/src/issue.rs`) produce the issue wire in field order. When a value tree is needed, the code parses that ordered serialized form back into a `sonic_rs::Value`.
+Object ordering controls the design. In `sonic-rs` 0.5.8 a constructed `sonic_rs::Object` is an `AHashMap`. Mutation does not preserve insertion order. A parsed Sonic value preserves document order. The DOM stores it as a flat pair slice. The code therefore never builds ordered objects by mutation. The ordered `Serialize` writers (`IssueWire` and `IssueList` in `crates/zodrs/src/issue.rs`) produce the issue wire in field order. When a value tree is needed, the code parses that ordered serialized form back into a `sonic_rs::Value`.
 
-`sonic_rs::Value` also cannot deserialize through serde's internally-tagged
+`sonic_rs::Value` also cannot deserialize through Serde's internally-tagged
 buffer. In `sonic-rs` 0.5.8 its `Deserialize` requests a private newtype token
-that sonic's own deserializer answers and serde's buffered content
-deserializer does not. `PlanNode` and `Check` are internally tagged, so serde
+that Sonic's own deserializer answers and Serde's buffered content
+deserializer does not. `PlanNode` and `Check` are internally tagged, so Serde
 buffers each node into `Content` before it reads the `k` or `c` tag, and a bare
 `Value` field fails there. `crates/zodrs/src/wire.rs` writes the buffered value
 back out as JSON text in visit order and parses it once. That solves the
