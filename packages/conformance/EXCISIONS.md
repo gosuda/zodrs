@@ -61,9 +61,9 @@ deprecated.
 ## Noted: deprecated `message` parameter alias (not excised)
 
 Many tests use `{ message: "..." }` as a check/schema parameter. In Zod v4
-this is a deprecated alias for `{ error: "..." }`. zodrs cuts deprecated
-parameter aliases, so these tests will fail until either zodrs provides the
-alias or the tests are updated to use `error`.
+this is a deprecated alias for `{ error: "..." }`. zodrs supports the alias;
+supplying both `message` and `error` in one call throws. These tests are
+expected to pass.
 
 This is not an excision — the tests pin current v4 validation behavior and
 error message content. Only the parameter name used to set the custom
@@ -164,7 +164,7 @@ no conformance evidence for that behavior.
 | Files excised | 1 (`core/tests/index.test.ts`) |
 | Test cases excised | 0 |
 | Compat-only symbols noted (not excised) | 4 files (`ZodIssueCode` ×2, `setErrorMap` ×2) |
-| Deprecated `message` parameter alias noted | ~6+ files (not excised) |
+| Deprecated `message` parameter alias noted | ~6+ files (alias supported; tests pass) |
 | Deprecated type aliases noted | 1 (`ZodErrorMap`) |
 | Internal module names noted | 5 names across 8 files |
 | Inert upstream tests noted (not excised) | 2 (`lazy.test.ts`, `coalesce.test.ts`) |
