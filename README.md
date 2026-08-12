@@ -8,6 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Node](https://img.shields.io/badge/node-%3E%3D20.17-informational.svg)](https://nodejs.org)
 
+[Benchmarks](#benchmarks) &bull;
 [Behavior contract](docs/CONTRACT.md) &bull;
 [Divergences](docs/DIVERGENCE.md) &bull;
 [Dependency rationale](docs/DEPENDENCIES.md)
@@ -95,6 +96,47 @@ normal use.
 | `ZODRS_BACKEND` | `interpreter` | Forces the tree-walking interpreter over compiled codegen |
 
 The suite runs all four lanes. Each passes 5,679 tests across 435 files.
+
+## Benchmarks
+
+Measured against Zod v4.4.3 on the native tier, with valid inputs. Each figure
+is the median of three full runs. The harness lives in `packages/bench`; the
+comparison set is fixed in `packages/bench/gate.mjs`.
+
+| Suite | Workload per op | zodrs (ops/s) | zod4 (ops/s) | Ratio |
+|---|---|---:|---:|---:|
+| `z.string().parse` | 10,000 strings | 34,252 | 1,875 | 18.27x |
+| `z.number().parse` | 10,000 numbers | 8,116 | 1,570 | 5.17x |
+| `z.array().parse` | 1,000 arrays of 3 strings | 12,217 | 4,188 | 2.92x |
+| `z.union().parse` | 1 value, 3-member union | 3,438,230 | 1,495,908 | 2.30x |
+| `z.discriminatedUnion().parse` | 100 objects | 87,666 | 39,411 | 2.22x |
+| `z.object().safeParse` | 1,000 3-field objects | 15,740 | 7,251 | 2.17x |
+| `z.string().datetime().parse` | 10,000 ISO strings | 820 | 441 | 1.86x |
+| `z.object()` initialization | build 1,000 schemas | 12 | 7 | 1.71x |
+| `z.object().parse` | 1,000 3-field objects | 19,812 | 17,871 | 1.11x |
+| `safeParseJson` | one 4 KB nested payload | 21,433 | 21,699 | 0.99x |
+
+An op is a whole suite workload, not one value, and the workloads differ. Read
+each row across its two engine columns; do not compare rows to each other.
+
+The `safeParseJson` row measures `zodrs.safeParseJson(buffer)` against
+`zod4.safeParse(JSON.parse(json))`. At 0.99x it is a tie, and it is the one
+cell of the release gate that did not pass on this run: the gate requires
+every comparison to reach at least 1.00x.
+
+Reproduce the full gate with three runs into distinct directories, then the
+median-of-three comparison:
+
+```bash
+SUITES=object,object-safe,string,number,datetime,union,discriminated-union,array,init
+for i in 1 2 3; do
+  BENCH_RESULTS_DIR=/tmp/bench$i pnpm -C packages/bench run run "$SUITES"
+done
+node packages/bench/gate.mjs /tmp/bench1 /tmp/bench2 /tmp/bench3
+```
+
+Numbers above: Node 24.18.0, Linux x64, Xeon Gold 6138, Tinybench 6.1.3.
+Absolute throughput depends on the machine; rerun the gate on yours.
 
 ## Repository layout
 
