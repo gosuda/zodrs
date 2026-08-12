@@ -36,9 +36,13 @@ anything failing that was not excised is a bug.
 npm install zod-rs
 ```
 
-Requires Node 20.17 or later. The package embeds a prebuilt Linux x64 GNU
-N-API addon and a `wasm32-wasip1-threads` addon. On any other platform the
-loader skips the native tier and uses the embedded WASM addon; if that is
+Requires Node 20.17 or later. Prebuilt N-API addons cover Linux GNU
+(x64/arm64), Linux musl (x64/arm64), macOS (x64/arm64), and Windows MSVC
+(x64/arm64) as optional platform packages. The main package embeds the build
+host's native addon directly so it works without optional dependencies on that
+system, while optional platform packages provide native-by-default support on
+other listed systems. On any platform without a matching native addon, the
+loader uses the embedded `wasm32-wasip1-threads` WASM addon; if that is
 unavailable too, validation falls back to the TypeScript validator.
 
 ## Quickstart
@@ -94,6 +98,19 @@ normal use.
 | | `wasm` | WASM addon only |
 | | `none` | No Rust backend; TypeScript validator only |
 | `ZODRS_BACKEND` | `interpreter` | Forces the tree-walking interpreter over compiled codegen |
+
+Native platform packages (installed automatically as optional dependencies):
+
+| Platform | Package |
+|---|---|
+| Linux x64 (GNU) | `zod-rs-node-linux-x64-gnu` |
+| Linux arm64 (GNU) | `zod-rs-node-linux-arm64-gnu` |
+| Linux x64 (musl) | `zod-rs-node-linux-x64-musl` |
+| Linux arm64 (musl) | `zod-rs-node-linux-arm64-musl` |
+| macOS x64 | `zod-rs-node-darwin-x64` |
+| macOS arm64 | `zod-rs-node-darwin-arm64` |
+| Windows x64 (MSVC) | `zod-rs-node-win32-x64-msvc` |
+| Windows arm64 (MSVC) | `zod-rs-node-win32-arm64-msvc` |
 
 The suite runs all four lanes. Each passes 5,679 tests across 435 files.
 
