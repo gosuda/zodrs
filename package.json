@@ -7,8 +7,8 @@
     "node": ">=20.17"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.8.5",
-    "@emnapi/runtime": "2.0.0-alpha.3",
+    "@napi-rs/cli": "3.7.4",
+    "@emnapi/runtime": "1.11.3",
     "oxlint": "1.78.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
