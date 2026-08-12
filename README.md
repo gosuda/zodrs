@@ -127,11 +127,6 @@ Pre-commit hooks run through lefthook. Install them once:
 pnpm exec lefthook install
 ```
 
-`sonic-rs` is the only JSON dependency: parser, writer, and value model.
-`cargo-deny` bans `serde_json` from the graph. See
-[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) for why.
-
 ## License
 
-MIT, as declared by `packages/zodrs/package.json` and the workspace
-`Cargo.toml`. The repository carries no `LICENSE` file yet.
+MIT
