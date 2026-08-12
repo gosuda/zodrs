@@ -1,18 +1,21 @@
 /**
- * Benchmark runner abstraction built on mitata 1.0.34.
+ * Benchmark runner abstraction built on Tinybench 6.1.3.
  *
  * Mirrors the shape of Zod's own metabench.ts: a `metabench(name, benchmarks)`
- * factory that registers named functions in a mitata group. Isolated runs add
- * their filter and forced backend to the result filename so they cannot
+ * factory that registers named functions in one benchmark suite. Isolated runs
+ * add their filter and forced backend to the result filename so they cannot
  * overwrite the full-matrix baseline.
  */
-import { bench, do_not_optimize, group, run as mitataRun } from "mitata";
+import { Bench } from "tinybench";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Prevents V8 from eliminating measured work whose result the caller ignores. */
-export const consume: (value: unknown) => void = do_not_optimize;
+/** V8 must observe benchmark results so it cannot eliminate measured work. */
+export let benchmarkResultSink: unknown;
+export function consume(value: unknown): void {
+  benchmarkResultSink = value;
+}
 export type Benchmarks = Record<string, () => void>;
 
 export type SuiteResults = Record<string, { avgOpsPerSec: number }>;
@@ -78,28 +81,22 @@ export class Metabench {
     if (entries.length === 0) return;
     filterMatched = true;
 
-    // Register all benchmarks inside a mitata group so they share a header.
-    group(this.name, () => {
-      for (const [name, fn] of entries) {
-        bench(name, fn);
-      }
-    });
+    const benchmark = new Bench({ name: this.name, throws: true });
+    for (const [name, fn] of entries) benchmark.add(name, fn);
 
-    // `run` returns { context, benchmarks: trial[] }. Each trial has `runs[]`
-    // where each run carries `stats.avg` in nanoseconds per iteration.
-    // ops/sec = 1e9 / avg.
-    const result = await mitataRun({ format: "mitata" });
+    const tasks = await benchmark.run();
+    console.table(benchmark.table());
 
     const results: SuiteResults = {};
-    for (const trial of result.benchmarks) {
-      for (const runEntry of trial.runs) {
-        if (runEntry.stats && runEntry.stats.avg > 0) {
-          const opsPerSec = Math.round(1e9 / runEntry.stats.avg);
-          results[runEntry.name] = { avgOpsPerSec: opsPerSec };
-        } else {
-          results[runEntry.name] = { avgOpsPerSec: 0 };
-        }
+    for (const task of tasks) {
+      if (task.result.state !== "completed") {
+        throw new Error(`benchmark ${JSON.stringify(task.name)} ended in state ${task.result.state}`);
       }
+      const latencyMs = task.result.latency.mean;
+      const opsPerSec = latencyMs > 0 ? 1000 / latencyMs : 0;
+      results[task.name] = {
+        avgOpsPerSec: Number.isFinite(opsPerSec) ? Math.round(opsPerSec) : 0,
+      };
     }
 
     const suiteSlug = slug(this.name);

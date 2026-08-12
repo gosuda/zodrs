@@ -2,13 +2,15 @@
   "name": "zodrs-workspace",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.20.0",
+  "packageManager": "pnpm@11.21.0",
   "engines": {
     "node": ">=20.17"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.8.2",
-    "oxlint": "1.77.0",
+    "@napi-rs/cli": "3.8.6",
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
+    "oxlint": "1.78.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
   }

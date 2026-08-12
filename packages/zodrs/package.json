@@ -88,7 +88,7 @@
     "build:esm": "tsc -p tsconfig.build.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\n')\"",
     "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --target x86_64-unknown-linux-gnu --output-dir ../../packages/zodrs/native",
-    "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm && cd ../../packages/zodrs && node -e \"require('fs').rmSync('wasm/zodrs_node.wasm32-wasi.debug.wasm',{force:true})\"",
+    "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm && cd ../../packages/zodrs && node -e \"const fs=require('fs');fs.rmSync('wasm/zodrs_node.wasm32-wasi.debug.wasm',{force:true});fs.copyFileSync('wasm/index.d.ts','wasm/zodrs_node.wasi.d.cts')\"",
     "selftest:native": "ZODRS_LOADER=native node dist/core/loader.selftest.js",
     "selftest:wasm": "ZODRS_LOADER=wasm node dist/core/loader.selftest.js",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
@@ -100,14 +100,14 @@
     "node": ">=20.17"
   },
   "dependencies": {
-    "@emnapi/core": "2.0.0-alpha.3",
-    "@emnapi/runtime": "2.0.0-alpha.3",
-    "@napi-rs/wasm-runtime": "1.2.2"
+    "@emnapi/core": "1.11.3",
+    "@emnapi/runtime": "1.11.3",
+    "@napi-rs/wasm-runtime": "1.1.6"
   },
   "publishConfig": {
     "name": "zod-rs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.8.2"
+    "@napi-rs/cli": "3.8.6"
   }
 }

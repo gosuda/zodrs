@@ -33,9 +33,9 @@ memchr = "2.8.3"
 smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
 compact_str = "0.10.0"
 slab = "0.4"
-napi = { version = "3.12", default-features = false, features = ["napi9"] }
-napi-derive = "3.6"
-napi-build = "2.4"
+napi = { version = "=3.11.0", default-features = false, features = ["napi9"] }
+napi-derive = "=3.5.10"
+napi-build = "=2.3.2"
 
 [profile.release]
 lto = "fat"

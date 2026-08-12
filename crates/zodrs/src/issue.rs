@@ -11,6 +11,7 @@
 
 use std::borrow::Cow;
 
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::{Map, Value as Json};
 use smallvec::SmallVec;
 
@@ -133,12 +134,148 @@ impl Issue {
 /// Serializes a slice of issues as a JSON array string.
 #[must_use]
 pub fn issues_to_json(issues: &[Issue]) -> String {
-    let arr: Vec<Json> = issues.iter().map(Issue::to_json).collect();
-    serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into())
+    sonic_rs::to_string(&IssueList(issues)).unwrap_or_else(|_| "[]".into())
+}
+
+/// Wrapper that writes a batch of issues as a JSON array without building
+/// an intermediate `serde_json::Value` tree.
+struct IssueList<'a>(&'a [Issue]);
+
+impl Serialize for IssueList<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for issue in self.0 {
+            seq.serialize_element(&IssueWire(issue))?;
+        }
+        seq.end()
+    }
+}
+
+/// Wrapper that writes one issue as a JSON object with fields in the order
+/// they were pushed, followed by `path`.
+struct IssueWire<'a>(&'a Issue);
+
+impl Serialize for IssueWire<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let fields = &self.0.fields;
+        let unique_fields = fields
+            .iter()
+            .enumerate()
+            .filter(|(i, (key, _))| !fields[..*i].iter().any(|(prior, _)| prior == key))
+            .count();
+        let has_path = fields.iter().any(|(key, _)| *key == "path");
+        let mut map = serializer.serialize_map(Some(unique_fields + usize::from(!has_path)))?;
+
+        for (i, (key, value)) in fields.iter().enumerate() {
+            if fields[..i].iter().any(|(prior, _)| prior == key) {
+                continue;
+            }
+            if *key == "path" {
+                map.serialize_entry("path", &PathWire(&self.0.path))?;
+                continue;
+            }
+            let value = fields[i + 1..]
+                .iter()
+                .rev()
+                .find_map(|(candidate, value)| (candidate == key).then_some(value))
+                .unwrap_or(value);
+            map.serialize_entry(*key, value)?;
+        }
+        if !has_path {
+            map.serialize_entry("path", &PathWire(&self.0.path))?;
+        }
+        map.end()
+    }
+}
+
+/// Wrapper that writes an issue path as a JSON array of strings/indices.
+struct PathWire<'a>(&'a Path);
+
+impl Serialize for PathWire<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for seg in self.0 {
+            seq.serialize_element(seg)?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for PathSeg {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PathSeg::Key(k) => serializer.serialize_str(k),
+            PathSeg::Index(i) => serializer.serialize_u32(*i),
+        }
+    }
 }
 
 /// Serializes a slice of issues as a `serde_json::Value` array.
 #[must_use]
 pub fn issues_to_value(issues: &[Issue]) -> Json {
     Json::Array(issues.iter().map(Issue::to_json).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use serde_json::Value as Json;
+    use smallvec::smallvec;
+
+    use super::{Issue, PathSegRef, issues_to_json, issues_to_value};
+
+    fn path_ref(s: &str) -> super::PathRef<'_> {
+        smallvec![PathSegRef::Key(Cow::Borrowed(s))]
+    }
+
+    #[test]
+    fn json_parity_simple() {
+        let issues = vec![
+            Issue::new("invalid_type", &path_ref("a")).with("expected", Json::from("number")),
+            Issue::new_check("too_small", &path_ref("b"))
+                .with("origin", Json::from("array"))
+                .with("minimum", Json::from(3_i64))
+                .with("inclusive", Json::from(true)),
+        ];
+        let expected = serde_json::to_string(&issues_to_value(&issues)).unwrap_or_default();
+        assert_eq!(issues_to_json(&issues), expected);
+    }
+
+    #[test]
+    fn json_parity_complex() {
+        let nested =
+            vec![Issue::new("invalid_type", &path_ref("c")).with("expected", Json::from("string"))];
+        let parent = Issue::new("invalid_key", &path_ref("root"))
+            .with("origin", Json::from("record"))
+            .with("issues", issues_to_value(&nested));
+        let issues = vec![parent];
+        let expected = serde_json::to_string(&issues_to_value(&issues)).unwrap_or_default();
+        assert_eq!(issues_to_json(&issues), expected);
+    }
+
+    #[test]
+    fn json_parity_numbers_and_path() {
+        let mut p = path_ref("items");
+        p.push(PathSegRef::Index(2));
+        let issue = Issue::new_check("too_big", &p)
+            .with("origin", Json::from("array"))
+            .with("maximum", Json::from(5.5_f64))
+            .with("inclusive", Json::from(false));
+        let issues = vec![issue];
+        let expected = serde_json::to_string(&issues_to_value(&issues)).unwrap_or_default();
+        assert_eq!(issues_to_json(&issues), expected);
+    }
+
+    #[test]
+    fn json_parity_duplicate_and_shadowed_path_fields() {
+        let issue = Issue::new("invalid_type", &path_ref("actual"))
+            .with("origin", Json::from("first"))
+            .with("code", Json::from("custom"))
+            .with("path", Json::from(["spoofed"]))
+            .with("origin", Json::from("last"));
+        let issues = vec![issue];
+        let expected = serde_json::to_string(&issues_to_value(&issues)).unwrap_or_default();
+        assert_eq!(issues_to_json(&issues), expected);
+    }
 }

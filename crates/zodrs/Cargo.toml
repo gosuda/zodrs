@@ -21,7 +21,7 @@ smallvec.workspace = true
 compact_str.workspace = true
 
 [dev-dependencies]
-rstest = "0.25"
+rstest = "0.26.1"
 
 [[bench]]
 name = "core"

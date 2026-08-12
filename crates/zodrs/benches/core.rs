@@ -1,10 +1,15 @@
 //! Process-isolated probes for the pure Rust validation core.
 
+use std::borrow::Cow;
 use std::env;
 use std::hint::black_box;
 use std::process::ExitCode;
 
-use zodrs::{compile, validate};
+use serde_json::Value as Json;
+use smallvec::smallvec;
+
+use zodrs::issue::{Issue, PathSegRef, issues_to_value};
+use zodrs::{compile, issues_to_json, validate};
 
 const ORDINARY_PLAN: &str = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]}]"#;
 const ORDINARY_INPUT: &[u8] = br#"{"a":"hello","b":5}"#;
@@ -13,6 +18,7 @@ const SIG1_PLAN: &str = include_str!("../tests/testdata/sig1-plan.json");
 const SIG1_INPUT: &str = include_str!("../tests/testdata/sig1-input.json");
 
 const COMPILE_DEFAULT: usize = 1000;
+const SERIALIZE_ISSUES_DEFAULT: usize = 1000;
 const VALIDATE_DEFAULT: usize = 10000;
 
 const EXPECTED_STATUS_0: u8 = 0;
@@ -48,6 +54,7 @@ struct Summary {
 fn default_iterations(mode: &str) -> usize {
     match mode {
         "compile" => COMPILE_DEFAULT,
+        "serialize-issues" => SERIALIZE_ISSUES_DEFAULT,
         "validate-status0" | "validate-status1" => VALIDATE_DEFAULT,
         _ => 0,
     }
@@ -72,6 +79,7 @@ fn run() -> Result<Summary, Error> {
 
     match mode.as_str() {
         "compile" => run_compile(iterations),
+        "serialize-issues" => Ok(run_serialize_issues(iterations)),
         "validate-status0" => {
             run_validate(ORDINARY_PLAN, ORDINARY_INPUT, EXPECTED_STATUS_0, iterations)
         }
@@ -99,6 +107,60 @@ fn run_compile(iterations: usize) -> Result<Summary, Error> {
         iterations,
         checksum,
     })
+}
+
+fn run_serialize_issues(iterations: usize) -> Summary {
+    fn path(s: &str) -> zodrs::issue::PathRef<'_> {
+        smallvec![PathSegRef::Key(Cow::Borrowed(s))]
+    }
+
+    fn index_path(s: &str, i: u32) -> zodrs::issue::PathRef<'_> {
+        let mut p = smallvec![PathSegRef::Key(Cow::Borrowed(s))];
+        p.push(PathSegRef::Index(i));
+        p
+    }
+
+    let mut issues = Vec::with_capacity(50);
+    for i in 0..50_u32 {
+        let p = if i % 2 == 0 {
+            path("root")
+        } else {
+            index_path("items", i)
+        };
+
+        let issue = if i % 3 == 0 {
+            let nested = vec![
+                Issue::new("invalid_type", &path("inner")).with("expected", Json::from("string")),
+            ];
+            Issue::new("invalid_key", &p)
+                .with("origin", Json::from("record"))
+                .with("issues", issues_to_value(&nested))
+        } else if i % 3 == 1 {
+            Issue::new_check("too_small", &p)
+                .with("origin", Json::from("array"))
+                .with("minimum", Json::from(i64::from(i)))
+                .with("inclusive", Json::from(true))
+        } else {
+            Issue::new("invalid_type", &p)
+                .with("expected", Json::from("number"))
+                .with("received", Json::from("NaN"))
+        };
+        issues.push(issue);
+    }
+
+    let mut checksum: u64 = 0;
+
+    for _ in 0..iterations {
+        let json = black_box(issues_to_json(black_box(&issues)));
+        checksum = black_box(checksum.wrapping_add(json.len() as u64));
+        drop(black_box(json));
+    }
+
+    Summary {
+        mode: "serialize-issues",
+        iterations,
+        checksum,
+    }
 }
 
 fn run_validate(
@@ -154,7 +216,7 @@ fn main() -> ExitCode {
         Err(err) => {
             match &err {
                 Error::Usage => eprintln!(
-                    "usage: core <compile|validate-status0|validate-status1> [iterations]"
+                    "usage: core <compile|validate-status0|validate-status1|serialize-issues> [iterations]"
                 ),
                 Error::Failure(msg) => eprintln!("error: {msg}"),
             }

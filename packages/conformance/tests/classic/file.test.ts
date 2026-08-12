@@ -1,6 +1,4 @@
-import { File as WebFile } from "@web-std/file";
-
-import { afterEach, beforeEach, expect, expectTypeOf, test } from "vitest";
+import { expect, expectTypeOf, test } from "vitest";
 
 import * as z from "zodrs";
 
@@ -8,15 +6,6 @@ const minCheck = z.file().min(5);
 const maxCheck = z.file().max(8);
 const mimeCheck = z.file().mime(["text/plain", "application/json"]);
 
-const originalFile = global.File;
-beforeEach(async () => {
-  if (!globalThis.File) globalThis.File = WebFile;
-});
-afterEach(() => {
-  if (globalThis.File !== originalFile) {
-    globalThis.File = originalFile;
-  }
-});
 
 test("passing validations", () => {
   minCheck.safeParse(new File(["12345"], "test.txt"));
