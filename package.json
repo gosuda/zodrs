@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=20.17"
   },
+  "scripts": {
+    "release": "bash scripts/release.sh"
+  },
   "devDependencies": {
     "@napi-rs/cli": "3.8.6",
     "@emnapi/core": "1.11.3",

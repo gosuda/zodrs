@@ -1,6 +1,6 @@
 {
   "name": "zodrs-node-smoke",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "napi": {
     "binaryName": "zodrs_node",
     "targets": ["x86_64-unknown-linux-gnu"]
