@@ -999,7 +999,215 @@ function composeSteps(steps: ShapeStep[]): ShapeStep {
   }
 }
 
+type RawObjectSlot =
+  | { readonly key: string; readonly kind: "string" | "number" | "boolean"; readonly error: unknown }
+  | { readonly key: string; readonly kind: "literal"; readonly error: unknown; readonly literal: Primitive };
+
+function extractRawObjectSlots(node: SchemaNode & { readonly kind: "object" }): readonly RawObjectSlot[] | null {
+  if (node.mode !== "strip" || node.catchall || node.checks.length !== 0) return null;
+  const entries = Object.entries(node.shape);
+  if (entries.length !== 3 && entries.length !== 4) return null;
+  const slots: RawObjectSlot[] = [];
+  for (const [key, child] of entries) {
+    if (key === "__proto__"
+      || optinOf(child) === "optional"
+      || optoutOf(child) === "optional"
+      || child.checks.length !== 0
+      || ("coerce" in child && child.coerce === true)) return null;
+    if (child.kind === "string" || child.kind === "number" || child.kind === "boolean") {
+      slots.push({ key, kind: child.kind, error: child.error });
+    } else if (child.kind === "literal" && child.values.length === 1 && child.values[0] !== undefined) {
+      slots.push({ key, kind: "literal", error: child.error, literal: child.values[0] });
+    } else {
+      return null;
+    }
+  }
+  return slots;
+}
+
+// Keep these slot bodies unrolled and structurally identical. A shared
+// per-slot call reduced object-parse throughput by about 3× in the release
+// benchmark gate because V8 did not inline the call boundary.
+function compileRawObject3(error: unknown, s0: RawObjectSlot, s1: RawObjectSlot, s2: RawObjectSlot): CNode {
+  const fn: CNode = (input, context, path, key) => {
+    if (!isObject(input)) {
+      nodeIssue(context, error, { expected: "object", code: "invalid_type" }, input, path, key);
+      return FAIL;
+    }
+    if (key !== undefined) path.push(key);
+    const result: Record<string, unknown> = {};
+    let failed = false;
+
+    const v0 = input[s0.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v0 === undefined) hasOwn(input, s0.key);
+    if (s0.kind === "literal") {
+      if (!(v0 === s0.literal || (Number.isNaN(v0) && Number.isNaN(s0.literal)))) {
+        nodeIssue(context, s0.error, { code: "invalid_value", values: [s0.literal] }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (s0.kind === "number") {
+      if (typeof v0 !== "number" || Number.isNaN(v0) || !Number.isFinite(v0)) {
+        const received = typeof v0 === "number" ? (Number.isNaN(v0) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s0.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (typeof v0 !== s0.kind) {
+      nodeIssue(context, s0.error, { expected: s0.kind, code: "invalid_type" }, v0, path, s0.key);
+      failed = true;
+    } else result[s0.key] = v0;
+
+    const v1 = input[s1.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v1 === undefined) hasOwn(input, s1.key);
+    if (s1.kind === "literal") {
+      if (!(v1 === s1.literal || (Number.isNaN(v1) && Number.isNaN(s1.literal)))) {
+        nodeIssue(context, s1.error, { code: "invalid_value", values: [s1.literal] }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (s1.kind === "number") {
+      if (typeof v1 !== "number" || Number.isNaN(v1) || !Number.isFinite(v1)) {
+        const received = typeof v1 === "number" ? (Number.isNaN(v1) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s1.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (typeof v1 !== s1.kind) {
+      nodeIssue(context, s1.error, { expected: s1.kind, code: "invalid_type" }, v1, path, s1.key);
+      failed = true;
+    } else result[s1.key] = v1;
+
+    const v2 = input[s2.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v2 === undefined) hasOwn(input, s2.key);
+    if (s2.kind === "literal") {
+      if (!(v2 === s2.literal || (Number.isNaN(v2) && Number.isNaN(s2.literal)))) {
+        nodeIssue(context, s2.error, { code: "invalid_value", values: [s2.literal] }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (s2.kind === "number") {
+      if (typeof v2 !== "number" || Number.isNaN(v2) || !Number.isFinite(v2)) {
+        const received = typeof v2 === "number" ? (Number.isNaN(v2) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s2.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (typeof v2 !== s2.kind) {
+      nodeIssue(context, s2.error, { expected: s2.kind, code: "invalid_type" }, v2, path, s2.key);
+      failed = true;
+    } else result[s2.key] = v2;
+
+    if (key !== undefined) path.pop();
+    return failed ? FAIL : result;
+  };
+  fn.pushesKeyed = true;
+  fn.pushes = false;
+  return fn;
+}
+
+function compileRawObject4(error: unknown, s0: RawObjectSlot, s1: RawObjectSlot, s2: RawObjectSlot, s3: RawObjectSlot): CNode {
+  const fn: CNode = (input, context, path, key) => {
+    if (!isObject(input)) {
+      nodeIssue(context, error, { expected: "object", code: "invalid_type" }, input, path, key);
+      return FAIL;
+    }
+    if (key !== undefined) path.push(key);
+    const result: Record<string, unknown> = {};
+    let failed = false;
+
+    const v0 = input[s0.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v0 === undefined) hasOwn(input, s0.key);
+    if (s0.kind === "literal") {
+      if (!(v0 === s0.literal || (Number.isNaN(v0) && Number.isNaN(s0.literal)))) {
+        nodeIssue(context, s0.error, { code: "invalid_value", values: [s0.literal] }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (s0.kind === "number") {
+      if (typeof v0 !== "number" || Number.isNaN(v0) || !Number.isFinite(v0)) {
+        const received = typeof v0 === "number" ? (Number.isNaN(v0) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s0.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v0, path, s0.key);
+        failed = true;
+      } else result[s0.key] = v0;
+    } else if (typeof v0 !== s0.kind) {
+      nodeIssue(context, s0.error, { expected: s0.kind, code: "invalid_type" }, v0, path, s0.key);
+      failed = true;
+    } else result[s0.key] = v0;
+
+    const v1 = input[s1.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v1 === undefined) hasOwn(input, s1.key);
+    if (s1.kind === "literal") {
+      if (!(v1 === s1.literal || (Number.isNaN(v1) && Number.isNaN(s1.literal)))) {
+        nodeIssue(context, s1.error, { code: "invalid_value", values: [s1.literal] }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (s1.kind === "number") {
+      if (typeof v1 !== "number" || Number.isNaN(v1) || !Number.isFinite(v1)) {
+        const received = typeof v1 === "number" ? (Number.isNaN(v1) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s1.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v1, path, s1.key);
+        failed = true;
+      } else result[s1.key] = v1;
+    } else if (typeof v1 !== s1.kind) {
+      nodeIssue(context, s1.error, { expected: s1.kind, code: "invalid_type" }, v1, path, s1.key);
+      failed = true;
+    } else result[s1.key] = v1;
+
+    const v2 = input[s2.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v2 === undefined) hasOwn(input, s2.key);
+    if (s2.kind === "literal") {
+      if (!(v2 === s2.literal || (Number.isNaN(v2) && Number.isNaN(s2.literal)))) {
+        nodeIssue(context, s2.error, { code: "invalid_value", values: [s2.literal] }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (s2.kind === "number") {
+      if (typeof v2 !== "number" || Number.isNaN(v2) || !Number.isFinite(v2)) {
+        const received = typeof v2 === "number" ? (Number.isNaN(v2) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s2.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v2, path, s2.key);
+        failed = true;
+      } else result[s2.key] = v2;
+    } else if (typeof v2 !== s2.kind) {
+      nodeIssue(context, s2.error, { expected: s2.kind, code: "invalid_type" }, v2, path, s2.key);
+      failed = true;
+    } else result[s2.key] = v2;
+
+    const v3 = input[s3.key];
+    // Preserve makeStep's getOwnPropertyDescriptor proxy trap for absent keys.
+    if (v3 === undefined) hasOwn(input, s3.key);
+    if (s3.kind === "literal") {
+      if (!(v3 === s3.literal || (Number.isNaN(v3) && Number.isNaN(s3.literal)))) {
+        nodeIssue(context, s3.error, { code: "invalid_value", values: [s3.literal] }, v3, path, s3.key);
+        failed = true;
+      } else result[s3.key] = v3;
+    } else if (s3.kind === "number") {
+      if (typeof v3 !== "number" || Number.isNaN(v3) || !Number.isFinite(v3)) {
+        const received = typeof v3 === "number" ? (Number.isNaN(v3) ? "NaN" : "Infinity") : undefined;
+        nodeIssue(context, s3.error, received ? { expected: "number", code: "invalid_type", received } : { expected: "number", code: "invalid_type" }, v3, path, s3.key);
+        failed = true;
+      } else result[s3.key] = v3;
+    } else if (typeof v3 !== s3.kind) {
+      nodeIssue(context, s3.error, { expected: s3.kind, code: "invalid_type" }, v3, path, s3.key);
+      failed = true;
+    } else result[s3.key] = v3;
+
+    if (key !== undefined) path.pop();
+    return failed ? FAIL : result;
+  };
+  fn.pushesKeyed = true;
+  fn.pushes = false;
+  return fn;
+}
+
+function compileRawObject(node: SchemaNode & { readonly kind: "object" }): CNode | null {
+  const slots = extractRawObjectSlots(node);
+  if (!slots) return null;
+  return slots.length === 3
+    ? compileRawObject3(node.error, slots[0] as RawObjectSlot, slots[1] as RawObjectSlot, slots[2] as RawObjectSlot)
+    : compileRawObject4(node.error, slots[0] as RawObjectSlot, slots[1] as RawObjectSlot, slots[2] as RawObjectSlot, slots[3] as RawObjectSlot);
+}
+
 function compileObject(node: SchemaNode & { readonly kind: "object" }, compile: (child: SchemaNode) => CNode): CNode {
+  const raw = compileRawObject(node);
+  if (raw) return raw;
   const error = node.error;
   const checks = compileChecks(node);
   const entries = Object.entries(node.shape).map(([key, child]) => ({
@@ -1010,9 +1218,8 @@ function compileObject(node: SchemaNode & { readonly kind: "object" }, compile: 
   }));
   const known: Record<string, true> = Object.create(null) as Record<string, true>;
   for (const { key } of entries) known[key] = true;
-  const dangerous = (key: string): boolean => key === "__proto__";
   const runShape = composeSteps(entries.map(({ key, fn, optIn, optOut }) =>
-    fn.stepInto?.(key, optIn, optOut, dangerous(key)) ?? makeStep(key, fn, optIn, optOut, dangerous(key))));
+    fn.stepInto?.(key, optIn, optOut, key === "__proto__") ?? makeStep(key, fn, optIn, optOut, key === "__proto__")));
   const mode = node.mode;
   const catchall = node.catchall ? compile(node.catchall) : null;
 
@@ -1162,13 +1369,70 @@ function compileArray(node: SchemaNode & { readonly kind: "array" }, compile: (c
   return fn;
 }
 
+type TagUnionBranch = {
+  readonly values: readonly Primitive[];
+  readonly accepted: ReadonlySet<unknown>;
+  readonly error: unknown;
+};
+
+type TagUnionPlan = {
+  readonly key: string;
+  readonly branches: readonly TagUnionBranch[];
+};
+
+function compileTagUnion(nodes: readonly SchemaNode[]): TagUnionPlan | null {
+  let key: string | undefined;
+  const branches: TagUnionBranch[] = [];
+  for (const option of nodes) {
+    if (option.kind !== "object" || option.mode !== "strip" || option.catchall !== null || option.checks.length !== 0) return null;
+    const keys = Object.keys(option.shape);
+    if (keys.length !== 1 || keys[0] === "__proto__") return null;
+    const optionKey = keys[0] as string;
+    if (key !== undefined && optionKey !== key) return null;
+    const child = option.shape[optionKey];
+    if (!child || child.kind !== "literal" || child.checks.length !== 0 || child.values.includes(undefined)) return null;
+    key = optionKey;
+    branches.push({ values: child.values, accepted: new Set<unknown>(child.values), error: child.error });
+  }
+  return key === undefined ? null : { key, branches };
+}
+
 function compileUnion(node: SchemaNode & { readonly kind: "union" }, compile: (child: SchemaNode) => CNode): CNode {
   if (node.inclusive === false) return fallback(node);
   const error = node.error;
   const checks = compileChecks(node);
   const options = node.options.map(compile);
+  const tagUnion = compileTagUnion(node.options);
   const fn: CNode = (input, context, path, key) => {
     if (key !== undefined) path.push(key);
+
+    // Tag-only object unions can preserve the exact ordered property reads
+    // without allocating discarded branch outputs and issue arrays.
+    if (tagUnion && isObject(input)) {
+      const errors: $ZodRawIssue[][] = [];
+      for (const branch of tagUnion.branches) {
+        const value = input[tagUnion.key];
+        const present = value !== undefined || hasOwn(input, tagUnion.key);
+        if (present && branch.accepted.has(value)) {
+          const parsed: Record<string, unknown> = {};
+          parsed[tagUnion.key] = value;
+          const output = checks ? checks(parsed, context, path, undefined) : parsed;
+          if (key !== undefined) path.pop();
+          return output;
+        }
+        errors.push([{
+          code: "invalid_value",
+          values: [...branch.values],
+          input: value,
+          path: [tagUnion.key],
+          inst: { error: branch.error },
+        } as $ZodRawIssue]);
+      }
+      nodeIssue(context, error, { code: "invalid_union", errors }, input, path, undefined);
+      if (key !== undefined) path.pop();
+      return FAIL;
+    }
+
     const relative: Path = [];
     let branches: { readonly value: unknown; readonly issues: $ZodRawIssue[] }[] | null = null;
     let output: unknown;

@@ -23,9 +23,14 @@ test("error creation", () => {
   err3.message;
 });
 
-// EXCISED: "do not allow error and message together" — tested the deprecated
-// `params.message` alias interaction with `error`. zodrs cuts deprecated
-// parameter aliases; see EXCISIONS.md.
+test("do not allow error and message together", () => {
+  expect(() =>
+    z.string().refine((_) => true, {
+      message: "override",
+      error: (iss) => (iss.input === undefined ? "asdf" : null),
+    })
+  ).toThrow();
+});
 
 const errorMap: z.ZodErrorMap = (issue) => {
   if (issue.code === "invalid_type") {

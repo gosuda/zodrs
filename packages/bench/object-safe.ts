@@ -8,7 +8,7 @@ import * as v from "valibot";
 import * as z4 from "zod4";
 import { type as ark } from "arktype";
 import { z } from "zodrs";
-import { metabench } from "./metabench.js";
+import { consume, metabench } from "./metabench.js";
 
 const zodrsSchema = z.object({
   string: z.string(),
@@ -50,16 +50,16 @@ arkSchema(DATA[0]);
 
 const bench = metabench("z.object().safeParse", {
   zodrs() {
-    for (const d of DATA) zodrsSchema.safeParse(d);
+    for (const d of DATA) consume(zodrsSchema.safeParse(d));
   },
   zod4() {
-    for (const d of DATA) z4Schema.safeParse(d);
+    for (const d of DATA) consume(z4Schema.safeParse(d));
   },
   arktype() {
-    for (const d of DATA) arkSchema(d);
+    for (const d of DATA) consume(arkSchema(d));
   },
   valibot() {
-    for (const d of DATA) v.safeParse(valibotSchema, d);
+    for (const d of DATA) consume(v.safeParse(valibotSchema, d));
   },
 });
 

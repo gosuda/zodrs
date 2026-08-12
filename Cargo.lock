@@ -1010,7 +1010,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zodrs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "compact_str",
  "jiff",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "zodrs-node"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "napi",
  "napi-build",

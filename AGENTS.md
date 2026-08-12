@@ -18,6 +18,10 @@ pnpm exec oxlint --config .oxlintrc.json packages/
 ## Publishing
 
 - Keep the workspace package name as `zodrs`; use `publishConfig.name: zod-rs` to publish to npm under the `zod-rs` name.
+- After installing the packed tarball with lifecycle scripts disabled, run
+  `pnpm -C packages/zodrs verify:installed <package-directory> native` and
+  `pnpm -C packages/zodrs verify:installed <package-directory> wasm`.
+  These checks load the installed raw addons directly, so TypeScript fallback cannot hide a missing release artifact.
 
 Pre-commit hooks are managed by lefthook (`lefthook.yml`); install once with
 `pnpm exec lefthook install`.

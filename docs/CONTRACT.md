@@ -71,7 +71,7 @@ Highest to lowest (docs: `error-customization.mdx` "Error precedence"; tests: `e
 4. **Global `localeError`** — set via `z.config(z.locales.en())`-style locale modules; locale modules are factories returning `{ localeError }`.
 5. **Default** — the built-in English messages (§2).
 
-Params style: `error` accepts a string, a function `(issue) => string | undefined | { message }`, or an object `{ error: ... }` (the unified `error` param; the deprecated v3 `message`/`invalid_type_error`/`required_error` aliases are **cut**).
+Params style: `error` accepts a string, a function `(issue) => string | undefined | { message }`, or an object `{ error: ... }`. The deprecated `message` alias is accepted, but supplying both `message` and `error` throws. The deprecated v3 `invalid_type_error` and `required_error` aliases are cut.
 
 ---
 
@@ -353,7 +353,7 @@ then produce normal issues. Verified conversions (`coerce.test.ts`):
 | `z.globalRegistry` | Default registry backing `.meta()`/`.describe()`. |
 | `z.registry<T>()` | New `$ZodRegistry`: `.add(schema, meta)`, `.get(schema)`, `.remove`, `.has`; keyed by schema identity (WeakMap semantics). |
 | `z.config({customError?, localeError?})` | Sets global error maps (precedence §3); called with a locale module factory result (`z.config(z.locales.en())`). |
-| `z.locales.*` | 53 locale modules, each a factory returning `{ localeError }`. |
+| `z.locales.*` | 52 locale modules, each a factory returning `{ localeError }`. |
 | `z.toJSONSchema(schema, opts?)` | Emits JSON Schema (draft 2020-12). `io: "input"\|"output"` chooses the side for directional schemas; cycles → `$ref`; `unrepresentable: "throw"\|"any"` policy for non-representable schemas; `default`/`prefault` surface as `default` (incl. falsy values); reused schemas → `$defs`. zodrs: emitted by the Rust core from the compiled plan. |
 
 ## 20. Standard Schema

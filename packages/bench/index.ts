@@ -1,7 +1,7 @@
 /**
  * Bench CLI — mirrors Zod's own bench/index.ts.
  *
- * Usage:  pnpm -C packages/bench run object,string,number,...
+ * Usage:  pnpm -C packages/bench run run object,string,number,...
  *
  * Each argument is a comma-separated list of suite names. Each suite is a
  * sibling .ts file that registers mitata benchmarks and calls `bench.run()`.
@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const arg = process.argv[2];
   if (!arg) {
     process.stderr.write(
-      "Usage: pnpm -C packages/bench run <suite1>,<suite2>,...\n" +
+      "Usage: pnpm -C packages/bench run run <suite1>,<suite2>,...\n" +
         "Suites: object object-safe string number datetime union discriminated-union array init\n",
     );
     process.exit(1);

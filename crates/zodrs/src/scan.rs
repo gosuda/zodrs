@@ -48,6 +48,8 @@ pub fn scan(plan: &CompiledPlan, input: &[u8]) -> Scan {
         depth: 0,
         dirty_hint: false,
         hops: 256,
+        #[cfg(test)]
+        fast_path_hits: 0,
     };
     s.ws();
     if s.value(plan.root()) {
@@ -57,6 +59,21 @@ pub fn scan(plan: &CompiledPlan, input: &[u8]) -> Scan {
         }
     }
     Scan::Defer
+}
+#[cfg(test)]
+fn scan_fast_path_hits(plan: &CompiledPlan, input: &[u8]) -> usize {
+    let mut s = Scanner {
+        plan,
+        b: input,
+        i: 0,
+        depth: 0,
+        dirty_hint: false,
+        hops: 256,
+        fast_path_hits: 0,
+    };
+    s.ws();
+    s.value(plan.root());
+    s.fast_path_hits
 }
 
 struct Scanner<'a> {
@@ -75,7 +92,21 @@ struct Scanner<'a> {
     /// every further check short-circuits.
     dirty_hint: bool,
     hops: usize,
+    /// Test-only counter for direct canonical-key matches that bypass the
+    /// `ObjectDispatch` lookup.
+    #[cfg(test)]
+    fast_path_hits: usize,
 }
+
+#[cfg(test)]
+#[inline]
+fn record_fast_path_hit(scanner: &mut Scanner<'_>) {
+    scanner.fast_path_hits += 1;
+}
+
+#[cfg(not(test))]
+#[inline]
+fn record_fast_path_hit(_: &mut Scanner<'_>) {}
 
 /// SWAR constants for the inline string scanner.
 const SWAR_LO: u64 = u64::from_ne_bytes([1; 8]);
@@ -800,6 +831,7 @@ impl<'a> Scanner<'a> {
         self.i += 1;
         self.ws();
         let mut seen: u128 = 0;
+        let mut next: usize = 0;
         let mut last_schema_i: Option<usize> = None;
         let mut seen_catchall = false;
         let mut ok = true;
@@ -825,7 +857,28 @@ impl<'a> Scanner<'a> {
                 }
                 self.i += 1;
                 self.ws();
-                if let Some(schema_i) = obj_dispatch.as_ref().and_then(|o| o.find_bytes(k)) {
+                // Fast path: the next expected canonical key matches the
+                // raw key bytes without a dispatch lookup. Any mismatch falls
+                // through to the existing ObjectDispatch search.
+                let mut schema_i: Option<usize> = None;
+                if let Some(expected) = keys.get(next)
+                    && expected.as_bytes() == k
+                {
+                    schema_i = Some(next);
+                    next += 1;
+                    record_fast_path_hit(self);
+                }
+                if schema_i.is_none() {
+                    schema_i = obj_dispatch.as_ref().and_then(|o| o.find_bytes(k));
+                    // Advance the fast-path cursor past the resolved index so
+                    // an absent canonical key (gap) does not permanently
+                    // disable the direct-comparison path. `max` guarantees we
+                    // never retreat the cursor.
+                    if let Some(si) = schema_i {
+                        next = next.max(si + 1);
+                    }
+                }
+                if let Some(schema_i) = schema_i {
                     // Duplicates and out-of-order keys are reordered or
                     // collapsed on rewrite: the object validates dirty.
                     if last_schema_i.is_some_and(|l| schema_i <= l) {
@@ -884,6 +937,11 @@ impl<'a> Scanner<'a> {
         self.depth -= 1;
         if !ok {
             return false;
+        }
+        // Full canonical coverage: no missing-key walk is needed when every
+        // schema key has been seen. `count_ones` avoids `1u128 << 128`.
+        if seen.count_ones() as usize == keys.len() {
+            return true;
         }
         // Absent schema keys: a default/prefault/catch value materializes on
         // rewrite (validates dirty); anything else is a hard missing-input
@@ -1257,4 +1315,29 @@ fn number_format_scan(fmt: crate::plan::NumberFormat, n: f64) -> bool {
     }
     let (min, max) = number_format_range(fmt);
     n >= min && n <= max
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_fast_path_hits;
+    use crate::compile;
+
+    #[test]
+    fn fast_path_recovers_after_absent_key_gap() -> Result<(), crate::CompileError> {
+        let plan = r#"[
+            {"k":"object","keys":["a","b","c","d"],"values":[1,2,3,4],"optional":[false,true,false,false],"mode":"passthrough","catchall":null},
+            {"k":"string","checks":[]},
+            {"k":"string","checks":[]},
+            {"k":"string","checks":[]},
+            {"k":"string","checks":[]}
+        ]"#;
+        let compiled = compile(plan)?;
+
+        assert_eq!(
+            scan_fast_path_hits(&compiled, br#"{"a":"x","c":"z","d":"w"}"#),
+            2,
+            "the direct key comparison must recover after the optional `b` gap"
+        );
+        Ok(())
+    }
 }

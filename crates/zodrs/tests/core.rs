@@ -278,6 +278,10 @@ fn user_plan() -> zodrs::CompiledPlan {
 fn object_valid_clean() {
     let v = validate(&user_plan(), br#"{"name":"Ada","age":36}"#);
     assert_eq!(v.status, 0, "{v:?}");
+    assert!(
+        v.payload.is_none(),
+        "clean verdict must not allocate output"
+    );
 }
 
 #[test]
@@ -457,8 +461,12 @@ fn union_first_match() {
         {"k":"string","checks":[]},
         {"k":"number","checks":[]}
     ]));
-    assert_eq!(validate(&compiled, br#""x""#).status, 0);
-    assert_eq!(validate(&compiled, b"5").status, 0);
+    let string = validate(&compiled, br#""x""#);
+    assert_eq!(string.status, 0);
+    assert!(string.payload.is_none());
+    let number = validate(&compiled, b"5");
+    assert_eq!(number.status, 0);
+    assert!(number.payload.is_none());
     let v = validate(&compiled, b"true");
     assert_eq!(v.status, 2);
     assert_eq!(issues(&v.payload)[0]["code"], json!("invalid_union"));
@@ -606,6 +614,10 @@ fn k4_catch_fires_on_failure() {
     // catch on success passes the inner value through unchanged.
     let ok = validate(&compiled, br#""hello""#);
     assert_eq!(ok.status, 0, "clean success: {ok:?}");
+    assert!(
+        ok.payload.is_none(),
+        "clean verdict must not allocate output"
+    );
 }
 
 // K5: regex issue carries the JS `pattern` source and `origin: "string"`,

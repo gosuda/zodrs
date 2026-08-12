@@ -12,7 +12,7 @@ import * as v from "valibot";
 import * as z4 from "zod4";
 import { type as ark, type Ark } from "arktype";
 import { z } from "zodrs";
-import { metabench } from "./metabench.js";
+import { consume, metabench } from "./metabench.js";
 
 const SAMPLE = Object.freeze({
   number: 1,
@@ -49,7 +49,8 @@ const bench = metabench("z.object() schema initialization (1000 schemas)", {
         }),
       );
     }
-    schemas[999].parse(SAMPLE);
+    consume(schemas);
+    consume(schemas[999].parse(SAMPLE));
   },
   zod4() {
     const schemas: ReturnType<typeof z4.strictObject>[] = [];
@@ -70,13 +71,15 @@ const bench = metabench("z.object() schema initialization (1000 schemas)", {
         }),
       );
     }
-    schemas[999].parse(SAMPLE);
+    consume(schemas);
+    consume(schemas[999].parse(SAMPLE));
   },
   arktype() {
     const schemas: Ark[] = [];
     for (let i = 0; i < 1000; i++) {
       schemas.push(
         ark({
+          "+": "reject",
           number: "number",
           negNumber: "number",
           maxNumber: "number",
@@ -84,14 +87,16 @@ const bench = metabench("z.object() schema initialization (1000 schemas)", {
           longString: "string",
           boolean: "boolean",
           deeplyNested: ark({
+            "+": "reject",
             foo: "string",
             num: "number",
             bool: "boolean",
           }),
-        }).exact,
+        }),
       );
     }
-    schemas[999](SAMPLE);
+    consume(schemas);
+    consume(schemas[999](SAMPLE));
   },
   valibot() {
     const schemas: Parameters<typeof v.parse>[0][] = [];
@@ -112,7 +117,8 @@ const bench = metabench("z.object() schema initialization (1000 schemas)", {
         }),
       );
     }
-    v.parse(schemas[999], SAMPLE);
+    consume(schemas);
+    consume(v.parse(schemas[999], SAMPLE));
   },
 });
 

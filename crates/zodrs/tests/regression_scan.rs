@@ -126,6 +126,74 @@ fn fuzz_seed24301_case2357() {
     assert!(!out.contains("$weird"), "unknown key retained: {out}");
     assert!(out.contains(r#""tag":450"#), "known key dropped: {out}");
 }
+
+#[test]
+fn repeated_union_node_reuses_the_decision_for_each_value() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"union","options":[2,3]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":" x ","b":1}"#);
+    assert_eq!(v.status, 1, "trim must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":"x","b":1}"#));
+}
+
+#[test]
+fn repeated_catch_node_keeps_inner_and_fallback_decisions_separate() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"catch","inner":2,"value":"caught","dynamic":false},
+          {"k":"string","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":"ok","b":1}"#);
+    assert_eq!(v.status, 1, "catch must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":"ok","b":"caught"}"#));
+}
+
+#[test]
+fn dirty_discriminated_union_reuses_its_selected_branch() {
+    let plan = compile(
+        r#"[
+          {"k":"discunion","key":"type","map":[["a",1],["b",5]]},
+          {"k":"object","keys":["type","value"],"values":[2,3],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"literal","values":["a"]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"string","checks":[]},
+          {"k":"object","keys":["type","value"],"values":[6,7],"optional":[false,false],"mode":"strip","catchall":null},
+          {"k":"literal","values":["b"]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"type":"a","value":" x "}"#);
+    assert_eq!(v.status, 1, "trim must force a rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"type":"a","value":"x"}"#));
+}
+
+#[test]
+fn prefault_temporary_decisions_do_not_replace_present_value_decisions() {
+    let plan = compile(
+        r#"[
+          {"k":"object","keys":["missing","present"],"values":[1,2],"optional":[true,false],"mode":"strip","catchall":null},
+          {"k":"prefault","inner":2,"value":" x ","dynamic":false},
+          {"k":"union","options":[3,4]},
+          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
+          {"k":"number","checks":[]}
+        ]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"present":1}"#);
+    assert_eq!(v.status, 1, "prefault must materialize missing: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"missing":"x","present":1}"#));
+}
 // ------------------------------------------------------------------------
 // Depth preflight (H6).
 // ------------------------------------------------------------------------
@@ -215,4 +283,55 @@ fn preflight_rejects_mismatched_closer() {
     let plan = compile(r#"[{"k":"any"}]"#).unwrap();
     assert_eq!(validate(&plan, b"[}").status, 3);
     assert_eq!(validate(&plan, b"]").status, 3);
+}
+
+/// Canonical object keys in schema order validate clean (status 0).
+#[test]
+fn canonical_object_keys_status_0() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"b":2}"#);
+    assert_eq!(v.status, 0, "in-order keys must be clean: {v:?}");
+    assert!(v.payload.is_none());
+}
+
+/// Out-of-order keys require a canonical rewrite (status 1).
+#[test]
+fn out_of_order_object_keys_rewrite() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"b":2,"a":1}"#);
+    assert_eq!(v.status, 1, "out-of-order keys must rewrite: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":1,"b":2}"#));
+}
+
+/// Duplicate object keys collapse to the last value on rewrite (status 1).
+#[test]
+fn duplicate_object_key_last_wins() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"a":2}"#);
+    assert_eq!(
+        v.status, 1,
+        "duplicate keys must rewrite to last-wins: {v:?}"
+    );
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":2}"#));
+}
+
+/// Strip mode drops an unknown key between known keys on rewrite (status 1).
+#[test]
+fn strip_unknown_key_between_known_rewrites() {
+    let plan = compile(
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+    )
+    .unwrap();
+    let v = validate(&plan, br#"{"a":1,"x":9,"b":2}"#);
+    assert_eq!(v.status, 1, "unknown key must be stripped: {v:?}");
+    assert_eq!(v.payload.as_deref(), Some(r#"{"a":1,"b":2}"#));
 }

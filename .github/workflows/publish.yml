@@ -1,0 +1,614 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: zodrs-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Registry configuration must bind metaphorics/zodrs, publish.yml, and the
+# release environment. Protect refs/tags/v* before enabling either publisher.
+jobs:
+  verify:
+    if: github.repository == 'metaphorics/zodrs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact tag SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install pinned JavaScript tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2
+          hash -r
+          test "$(npm --version)" = "12.0.2"
+          corepack enable pnpm
+          corepack install --global "$(node -p "require('./package.json').packageManager")"
+          expected="pnpm@$(node -p "require('./package.json').packageManager" | cut -d@ -f2)"
+          test "pnpm@$(pnpm --version)" = "$expected"
+
+      - name: Install pinned Rust tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+          rustup target add --toolchain 1.97.1 wasm32-wasip1-threads
+          cargo install cargo-nextest --version 0.9.143 --locked
+          test "$(rustc --version)" = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+          test "$(cargo nextest --version | cut -d' ' -f2)" = "0.9.143"
+
+      - name: Verify immutable release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF_TYPE" = "tag"
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != "v$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must have the form vX.Y.Z, got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          npm_version=$(node -p "require('./packages/zodrs/package.json').version")
+          npm_name=$(node -p "require('./packages/zodrs/package.json').publishConfig.name")
+          repository=$(node -p "require('./packages/zodrs/package.json').repository.url")
+          workspace_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          crate_version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "zodrs") | .version')
+          node_package_version=$(node -p "require('./crates/zodrs-node/package.json').version")
+          smoke_package_version=$(node -p "require('./crates/zodrs-node/smoke/package.json').version")
+          native_package_version=$(node -p "require('./packages/zodrs/native/package.json').version")
+          wasm_package_version=$(node -p "require('./packages/zodrs/wasm/package.json').version")
+          if [[ "$version" != "$npm_version" || "$version" != "$workspace_version" || "$version" != "$crate_version" || \
+                "$version" != "$node_package_version" || "$version" != "$smoke_package_version" || \
+                "$version" != "$native_package_version" || "$version" != "$wasm_package_version" ]]; then
+            printf 'release version mismatch: tag=%s npm=%s workspace=%s crate=%s node=%s smoke=%s native=%s wasm=%s\n' \
+              "$version" "$npm_version" "$workspace_version" "$crate_version" \
+              "$node_package_version" "$smoke_package_version" "$native_package_version" "$wasm_package_version" >&2
+            exit 1
+          fi
+          test "$npm_name" = "zod-rs"
+          test "$repository" = "git+https://github.com/metaphorics/zodrs.git"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "NPM_NAME=$npm_name" >> "$GITHUB_ENV"
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Pack and prove the npm artifact
+        # pnpm, unlike npm pack, applies publishConfig.name to the packed manifest.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          pack_output=$(pnpm -C packages/zodrs pack --pack-destination "$RUNNER_TEMP/release")
+          tarball=$(printf '%s\n' "$pack_output" | awk 'NF {last=$0} END {print last}')
+          expected_tarball="$RUNNER_TEMP/release/$NPM_NAME-$VERSION.tgz"
+          test "$tarball" = "$expected_tarball"
+          test -f "$tarball"
+          tar -xOf "$tarball" package/package.json | jq -e \
+            --arg name "$NPM_NAME" --arg version "$VERSION" \
+            'select(.name == $name and .version == $version and .repository.url == "git+https://github.com/metaphorics/zodrs.git")' \
+            > /dev/null
+
+          npm_integrity="sha512-$(node -p "require('crypto').createHash('sha512').update(require('fs').readFileSync(process.argv[1])).digest('base64')" "$tarball")"
+          npm_sha512=$(sha512sum "$tarball" | cut -d' ' -f1)
+          echo "NPM_TARBALL_NAME=$(basename "$tarball")" >> "$GITHUB_ENV"
+          echo "NPM_TARBALL_SHA512=$npm_sha512" >> "$GITHUB_ENV"
+          echo "NPM_INTEGRITY=$npm_integrity" >> "$GITHUB_ENV"
+
+          native_root="$RUNNER_TEMP/install-native"
+          wasm_root="$RUNNER_TEMP/install-wasm"
+          npm install --prefix "$native_root" --ignore-scripts --no-audit --no-fund "$tarball"
+          node packages/zodrs/scripts/verify-installed.mjs "$native_root/node_modules/$NPM_NAME" native
+          npm install --prefix "$wasm_root" --ignore-scripts --no-audit --no-fund "$tarball"
+          node packages/zodrs/scripts/verify-installed.mjs "$wasm_root/node_modules/$NPM_NAME" wasm
+
+      - name: Prove npm publication input
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/npm-version.json"
+          if ! status=$(curl --silent --show-error --connect-timeout 10 --max-time 60 \
+            --output "$response" --write-out '%{http_code}' \
+            "https://registry.npmjs.org/$NPM_NAME/$VERSION"); then
+            echo "npm registry lookup failed" >&2
+            exit 1
+          fi
+          case "$status" in
+            404)
+              npm publish "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" \
+                --dry-run --json --ignore-scripts --access public > "$RUNNER_TEMP/npm-dry-run.json"
+              jq -e --arg name "$NPM_NAME" --arg version "$VERSION" \
+                'select(type == "object" and .name == $name and .version == $version)' "$RUNNER_TEMP/npm-dry-run.json" > /dev/null
+              ;;
+            200) echo "$NPM_NAME $VERSION already exists; publish job will verify its exact integrity" ;;
+            *) echo "npm registry lookup returned HTTP $status" >&2; exit 1 ;;
+          esac
+
+      - name: Package the Rust crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --package zodrs --locked
+          crate="target/package/zodrs-$VERSION.crate"
+          test -f "$crate"
+          echo "CRATE_CHECKSUM=$(sha256sum "$crate" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Run Rust release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo nextest run --workspace
+
+      - name: Run TypeScript release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm -r build
+          pnpm -C packages/zodrs test
+          pnpm exec oxlint --config .oxlintrc.json packages/
+
+      - name: Run conformance release gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm -C packages/conformance test
+          ZODRS_BACKEND=interpreter pnpm -C packages/conformance test
+          ZODRS_LOADER=wasm pnpm -C packages/conformance test
+          ZODRS_LOADER=none pnpm -C packages/conformance test
+          pnpm -C packages/conformance test:differential
+
+      - name: Run and evaluate the performance release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm -C packages/bench test
+          cpu=$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')
+          result_dirs=()
+          for run in 1 2 3; do
+            result_dir="$RUNNER_TEMP/bench-run-$run"
+            result_dirs+=("$result_dir")
+            echo "performance gate run $run on CPU $cpu"
+            BENCH_RESULTS_DIR="$result_dir" taskset -c "$cpu" \
+              pnpm -C packages/bench run run \
+              object,object-safe,string,number,datetime,union,discriminated-union,array,init
+          done
+          node packages/bench/gate.mjs "${result_dirs[@]}"
+
+      - name: Run type-instantiation release gate
+        run: pnpm -C packages/tsc bench
+
+      - name: Write release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "$VERSION" \
+            --arg git_sha "$GITHUB_SHA" \
+            --arg npm_name "$NPM_NAME" \
+            --arg npm_tarball_name "$NPM_TARBALL_NAME" \
+            --arg npm_tarball_sha512 "$NPM_TARBALL_SHA512" \
+            --arg npm_integrity "$NPM_INTEGRITY" \
+            --arg crate_checksum "$CRATE_CHECKSUM" \
+            '{version: $version, git_sha: $git_sha, npm_name: $npm_name, npm_tarball_name: $npm_tarball_name, npm_tarball_sha512: $npm_tarball_sha512, npm_integrity: $npm_integrity, crate_checksum: $crate_checksum}' \
+            > "$RUNNER_TEMP/release/release-metadata.json"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+
+  publish:
+    needs: verify
+    if: github.repository == 'metaphorics/zodrs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the exact tag SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js 24 with npm registry
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Verify npm supports trusted publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2
+          hash -r
+          test "$(npm --version)" = "12.0.2"
+          npm_version=$(npm --version)
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (![major, minor, patch].every(Number.isInteger) || major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1);
+          ' "$npm_version"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          test "$(rustc --version)" = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+
+      - name: Download release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      - name: Load and validate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/release/release-metadata.json"
+          version=$(jq -er '.version | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$metadata")
+          git_sha=$(jq -er '.git_sha | select(test("^[0-9a-f]{40}$"))' "$metadata")
+          npm_name=$(jq -er '.npm_name | select(. == "zod-rs")' "$metadata")
+          npm_tarball_name=$(jq -er '.npm_tarball_name | select(test("^zod-rs-[0-9]+\\.[0-9]+\\.[0-9]+\\.tgz$"))' "$metadata")
+          npm_tarball_sha512=$(jq -er '.npm_tarball_sha512 | select(test("^[0-9a-f]{128}$"))' "$metadata")
+          npm_integrity=$(jq -er '.npm_integrity | select(test("^sha512-[A-Za-z0-9+/]+={0,2}$"))' "$metadata")
+          crate_checksum=$(jq -er '.crate_checksum | select(test("^[0-9a-f]{64}$"))' "$metadata")
+          {
+            echo "VERSION=$version"
+            echo "GIT_SHA=$git_sha"
+            echo "NPM_NAME=$npm_name"
+            echo "NPM_TARBALL_NAME=$npm_tarball_name"
+            echo "NPM_TARBALL_SHA512=$npm_tarball_sha512"
+            echo "NPM_INTEGRITY=$npm_integrity"
+            echo "CRATE_CHECKSUM=$crate_checksum"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify release identity and artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GIT_SHA"
+          test "v$VERSION" = "$GITHUB_REF_NAME"
+          tarball="$RUNNER_TEMP/release/$NPM_TARBALL_NAME"
+          test -f "$tarball"
+          test "$(sha512sum "$tarball" | cut -d' ' -f1)" = "$NPM_TARBALL_SHA512"
+
+      - name: Classify registry state
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          lookup() {
+            local url=$1 output=$2 status
+            if ! status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$output" --write-out '%{http_code}' \
+              -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' "$url"); then
+              printf '000'
+              return
+            fi
+            printf '%s' "$status"
+          }
+
+          crate_response="$RUNNER_TEMP/crate-version.json"
+          crate_status=$(lookup "https://crates.io/api/v1/crates/zodrs/$VERSION" "$crate_response")
+          case "$crate_status" in
+            200)
+              remote_checksum=$(jq -er --arg version "$VERSION" \
+                'select(.version.crate == "zodrs" and .version.num == $version) | .version.checksum' \
+                "$crate_response" 2>/dev/null || true)
+              if [[ "$remote_checksum" = "$CRATE_CHECKSUM" ]]; then
+                crate_state=already_exact
+              else
+                crate_state=collision
+              fi
+              ;;
+            404) crate_state=missing ;;
+            *) crate_state=lookup_failure ;;
+          esac
+
+          npm_response="$RUNNER_TEMP/npm-version.json"
+          npm_status=$(lookup "https://registry.npmjs.org/$NPM_NAME/$VERSION" "$npm_response")
+          case "$npm_status" in
+            200)
+              remote_integrity=$(jq -er --arg name "$NPM_NAME" --arg version "$VERSION" \
+                'select(.name == $name and .version == $version) | .dist.integrity' \
+                "$npm_response" 2>/dev/null || true)
+              if [[ "$remote_integrity" != "$NPM_INTEGRITY" ]]; then
+                npm_state=collision
+              else
+                attestation_url=$(jq -er '.dist.attestations.url' "$npm_response" 2>/dev/null || true)
+                set +e
+                node packages/zodrs/scripts/verify-npm-provenance.mjs \
+                  "$attestation_url" "$NPM_NAME" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$NPM_INTEGRITY"
+                provenance_status=$?
+                set -e
+                case "$provenance_status" in
+                  0) npm_state=already_exact ;;
+                  70) npm_state=lookup_failure ;;
+                  *) npm_state=collision ;;
+                esac
+              fi
+              ;;
+            404) npm_state=missing ;;
+            *) npm_state=lookup_failure ;;
+          esac
+          echo "crate_state=$crate_state" >> "$GITHUB_OUTPUT"
+          echo "npm_state=$npm_state" >> "$GITHUB_OUTPUT"
+
+      - name: Abort on unsafe registry state
+        shell: bash
+        env:
+          CRATE_STATE: ${{ steps.classify.outputs.crate_state }}
+          NPM_STATE: ${{ steps.classify.outputs.npm_state }}
+        run: |
+          set -euo pipefail
+          case "$CRATE_STATE:$NPM_STATE" in
+            *collision*|*lookup_failure*)
+              echo "registry state prevents safe publish: crate=$CRATE_STATE npm=$NPM_STATE" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Reproduce the verified crate package
+        if: steps.classify.outputs.crate_state == 'missing'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo package --package zodrs --locked --no-verify
+          test "$(sha256sum "target/package/zodrs-$VERSION.crate" | cut -d' ' -f1)" = "$CRATE_CHECKSUM"
+
+      - name: Obtain temporary crates.io token
+        if: steps.classify.outputs.crate_state == 'missing'
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish and verify crate
+        if: steps.classify.outputs.crate_state == 'missing'
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: |
+          set -uo pipefail
+          set +e
+          cargo publish --package zodrs --locked --no-verify
+          publish_status=$?
+          set -e
+          for attempt in $(seq 1 18); do
+            response="$RUNNER_TEMP/crate-published.json"
+            if status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$response" --write-out '%{http_code}' \
+              -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' \
+              "https://crates.io/api/v1/crates/zodrs/$VERSION") && [[ "$status" = 200 ]]; then
+              remote_checksum=$(jq -er '.version.checksum' "$response" 2>/dev/null || true)
+              if [[ "$remote_checksum" = "$CRATE_CHECKSUM" ]]; then
+                exit 0
+              fi
+              if [[ -n "$remote_checksum" ]]; then
+                echo "crates.io exposed a different checksum for zodrs $VERSION" >&2
+                exit 1
+              fi
+            fi
+            sleep 10
+          done
+          echo "cargo publish exited $publish_status and crates.io did not expose the verified checksum" >&2
+          exit 1
+
+      - name: Publish and verify npm artifact
+        if: steps.classify.outputs.npm_state == 'missing'
+        shell: bash
+        run: |
+          set -uo pipefail
+          tarball="$RUNNER_TEMP/release/$NPM_TARBALL_NAME"
+          set +e
+          npm publish "$tarball" --ignore-scripts --access public --provenance
+          publish_status=$?
+          set -e
+          for attempt in $(seq 1 18); do
+            response="$RUNNER_TEMP/npm-published.json"
+            if status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$response" --write-out '%{http_code}' \
+              "https://registry.npmjs.org/$NPM_NAME/$VERSION") && [[ "$status" = 200 ]]; then
+              remote_integrity=$(jq -er '.dist.integrity' "$response" 2>/dev/null || true)
+              if [[ "$remote_integrity" != "$NPM_INTEGRITY" ]]; then
+                if [[ -n "$remote_integrity" ]]; then
+                  echo "npm exposed a different integrity for $NPM_NAME $VERSION" >&2
+                  exit 1
+                fi
+              else
+                attestation_url=$(jq -er '.dist.attestations.url' "$response" 2>/dev/null || true)
+                set +e
+                node packages/zodrs/scripts/verify-npm-provenance.mjs \
+                  "$attestation_url" "$NPM_NAME" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$NPM_INTEGRITY"
+                provenance_status=$?
+                set -e
+                case "$provenance_status" in
+                  0) exit 0 ;;
+                  4) ;; # attestation not exposed yet; retry until the loop budget is spent
+                  2) echo "npm provenance verifier usage error" >&2; exit 1 ;;
+                  65) echo "npm provenance identity does not match" >&2; exit 1 ;;
+                  70) echo "npm provenance lookup failed" >&2; exit 1 ;;
+                  *) echo "npm provenance verifier returned unexpected status $provenance_status" >&2; exit 1 ;;
+                esac
+              fi
+            fi
+            sleep 10
+          done
+          echo "npm publish exited $publish_status and npm did not expose the verified artifact and provenance" >&2
+          exit 1
+
+  verify-public:
+    needs: publish
+    if: github.repository == 'metaphorics/zodrs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact tag SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install pinned npm and Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2
+          hash -r
+          test "$(npm --version)" = "12.0.2"
+          rustup toolchain install 1.97.1 --profile minimal
+          test "$(rustc --version)" = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+
+      - name: Download release artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      - name: Load and validate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/release/release-metadata.json"
+          version=$(jq -er '.version | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$metadata")
+          git_sha=$(jq -er '.git_sha | select(test("^[0-9a-f]{40}$"))' "$metadata")
+          npm_name=$(jq -er '.npm_name | select(. == "zod-rs")' "$metadata")
+          npm_tarball_name=$(jq -er '.npm_tarball_name | select(test("^zod-rs-[0-9]+\\.[0-9]+\\.[0-9]+\\.tgz$"))' "$metadata")
+          npm_integrity=$(jq -er '.npm_integrity | select(test("^sha512-[A-Za-z0-9+/]+={0,2}$"))' "$metadata")
+          {
+            echo "VERSION=$version"
+            echo "GIT_SHA=$git_sha"
+            echo "NPM_NAME=$npm_name"
+            echo "NPM_TARBALL_NAME=$npm_tarball_name"
+            echo "NPM_INTEGRITY=$npm_integrity"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$GIT_SHA"
+          test "v$VERSION" = "$GITHUB_REF_NAME"
+
+      - name: Prove a fresh public npm consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/npm-public"
+          reference="$RUNNER_TEMP/npm-reference"
+          mkdir -p "$root" "$reference"
+          tar -xzf "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" -C "$reference"
+          printf '{"private":true}\n' > "$root/package.json"
+          for attempt in $(seq 1 18); do
+            if npm install --prefix "$root" --ignore-scripts --no-audit --no-fund --save-exact "$NPM_NAME@$VERSION"; then
+              break
+            fi
+            if [[ "$attempt" -eq 18 ]]; then
+              echo "npm could not install $NPM_NAME $VERSION from the public registry" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          installed="$root/node_modules/$NPM_NAME"
+          node packages/zodrs/scripts/verify-installed.mjs "$installed" native "$reference/package"
+          node packages/zodrs/scripts/verify-installed.mjs "$installed" wasm "$reference/package"
+
+          cat > "$root/smoke.mjs" <<'EOF'
+          import { z } from "zod-rs";
+          const value = z.object({ a: z.string() }).parseJson('{"a":"public"}');
+          if (value.a !== "public") throw new Error("unexpected parseJson result");
+          EOF
+          (cd "$root" && node smoke.mjs)
+          (cd "$root" && ZODRS_LOADER=none node smoke.mjs)
+
+          audit="$RUNNER_TEMP/npm-signatures.json"
+          (cd "$root" && npm audit signatures --json --include-attestations > "$audit")
+          jq -e --arg name "$NPM_NAME" --arg version "$VERSION" '
+            .verified[]
+            | select(.name == $name and .version == $version)
+            | .attestationBundles[]
+            | select(.predicateType == "https://slsa.dev/provenance/v1")
+          ' "$audit" > /dev/null
+
+          response="$RUNNER_TEMP/npm-public-version.json"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            "https://registry.npmjs.org/$NPM_NAME/$VERSION" > "$response"
+          test "$(jq -er '.dist.integrity' "$response")" = "$NPM_INTEGRITY"
+          attestation_url=$(jq -er '.dist.attestations.url' "$response")
+          node packages/zodrs/scripts/verify-npm-provenance.mjs \
+            "$attestation_url" "$NPM_NAME" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$NPM_INTEGRITY"
+
+      - name: Prove a fresh public crates.io consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/crate-public"
+          mkdir -p "$root/src" "$RUNNER_TEMP/cargo-home"
+          cat > "$root/Cargo.toml" <<EOF
+          [package]
+          name = "zodrs-public-smoke"
+          version = "0.0.0"
+          edition = "2024"
+
+          [dependencies]
+          zodrs = "=$VERSION"
+          EOF
+          cat > "$root/src/main.rs" <<'EOF'
+          fn main() {
+              let _plan = zodrs::compile(r#"[{"k":"string","checks":[]}]"#)
+                  .expect("the public crate must compile a valid plan");
+          }
+          EOF
+          cd "$root"
+          for attempt in $(seq 1 18); do
+            if CARGO_HOME="$RUNNER_TEMP/cargo-home" cargo fetch; then
+              break
+            fi
+            if [[ "$attempt" -eq 18 ]]; then
+              echo "cargo could not resolve zodrs $VERSION from crates.io" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          CARGO_HOME="$RUNNER_TEMP/cargo-home" cargo run --release --locked
