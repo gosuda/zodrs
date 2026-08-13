@@ -74,6 +74,7 @@
     "dist",
     "dist-cjs",
     "native",
+    "!native/*.node",
     "wasm",
     "!dist/**/*.test.*",
     "!dist/**/*.selftest.*",
@@ -94,7 +95,7 @@
     "selftest:wasm": "ZODRS_LOADER=wasm node dist/core/loader.selftest.js",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "verify:installed": "node scripts/verify-installed.mjs",
-    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
+    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && node -e \"for(const f of require('fs').readdirSync('native'))if(f.endsWith('.node'))require('fs').rmSync('native/'+f)\" && pnpm run verify:artifacts",
     "test": "node --test scripts/*.test.mjs && vitest run"
   },
   "engines": {

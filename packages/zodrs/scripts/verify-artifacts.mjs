@@ -1,6 +1,4 @@
 import { access, readFile, readdir, stat } from "node:fs/promises";
-import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -62,32 +60,6 @@ const PLATFORM_PACKAGES = [
   { triple: "aarch64-pc-windows-msvc", dir: "win32-arm64-msvc", name: "zod-rs-node-win32-arm64-msvc", os: ["win32"], cpu: ["arm64"], nodeFile: "zodrs_node.win32-arm64-msvc.node" },
 ];
 
-/**
- * Determine the napi platform suffix for the current host so we can require the
- * one `.node` file a developer machine actually builds.  Mirrors the musl
- * detection the generated `native/index.js` uses.
- */
-function hostPlatformSuffix() {
-  const { platform, arch } = process;
-  const archName = arch === "x64" ? "x64" : arch === "arm64" ? "arm64" : null;
-  if (archName === null) return null;
-  if (platform === "darwin") return `darwin-${archName}`;
-  if (platform === "win32") return `win32-${archName}-msvc`;
-  if (platform === "linux") {
-    let musl = false;
-    try {
-      musl = readFileSync("/usr/bin/ldd", "utf-8").includes("musl");
-    } catch {
-      try {
-        musl = execSync("ldd --version", { encoding: "utf8" }).includes("musl");
-      } catch {
-        musl = false;
-      }
-    }
-    return `linux-${archName}-${musl ? "musl" : "gnu"}`;
-  }
-  return null;
-}
 
 const sourceManifestPath = resolve(repoRoot, "crates/zodrs-node/package.json");
 const mainManifestPath = resolve(packageDir, "package.json");
@@ -121,12 +93,25 @@ assert(mainManifest.version === cargoVersion, `${mainManifestPath} version must 
 assert(mainManifest.publishConfig?.name === "zod-rs", `${mainManifestPath} must publish as zod-rs`);
 assert(mainManifest.napi === undefined, `${mainManifestPath} must not duplicate N-API metadata`);
 
-// optionalDependencies must list exactly the eight native platform packages at the release version.
+// Object order is not part of package manifest semantics.
 const optionalDeps = mainManifest.optionalDependencies ?? {};
 const expectedOptionalDeps = Object.fromEntries(PLATFORM_PACKAGES.map((p) => [p.name, cargoVersion]));
+const expectedKeys = new Set(Object.keys(expectedOptionalDeps));
+const actualKeys = new Set(Object.keys(optionalDeps));
+const missingDeps = [...expectedKeys].filter((k) => !actualKeys.has(k));
+const extraDeps = [...actualKeys].filter((k) => !expectedKeys.has(k));
+const mismatchedDeps = [...expectedKeys].filter(
+  (k) => actualKeys.has(k) && optionalDeps[k] !== expectedOptionalDeps[k],
+);
+const depDetail =
+  (missingDeps.length ? `; missing: ${missingDeps.join(", ")}` : "") +
+  (extraDeps.length ? `; extra: ${extraDeps.join(", ")}` : "") +
+  (mismatchedDeps.length
+    ? `; wrong version: ${mismatchedDeps.map((k) => `${k} (expected ${expectedOptionalDeps[k]}, got ${optionalDeps[k]})`).join(", ")}`
+    : "");
 assert(
-  JSON.stringify(optionalDeps) === JSON.stringify(expectedOptionalDeps),
-  `${mainManifestPath} optionalDependencies must list exactly the eight native platform packages at version ${cargoVersion}`,
+  missingDeps.length === 0 && extraDeps.length === 0 && mismatchedDeps.length === 0,
+  `${mainManifestPath} optionalDependencies must list exactly the eight native platform packages at version ${cargoVersion}${depDetail}`,
 );
 
 // --- Native tier manifest (packages/zodrs/native/package.json) ---
@@ -205,33 +190,19 @@ const requiredFiles = [
   ["wasm/index.js", "pnpm run build:wasm"],
   ["wasm/index.d.ts", "pnpm run build:wasm"],
   ["wasm/zodrs_node.wasi.cjs", "pnpm run build:wasm"],
+  ["wasm/wasi-worker.mjs", "pnpm run build:wasm"],
   ["wasm/zodrs_node.wasi.d.cts", "pnpm run build:wasm"],
   ["wasm/zodrs_node.wasm32-wasi.wasm", "pnpm run build:wasm"],
 ];
 await Promise.all(requiredFiles.map(([path, producer]) => requireFile(resolve(packageDir, path), producer)));
 
-const hostSuffix = hostPlatformSuffix();
-assert(hostSuffix !== null, `unsupported host platform=${process.platform} arch=${process.arch}; cannot determine which .node to expect`);
-const hostNodeFile = PLATFORM_PACKAGES.find((p) => p.dir === hostSuffix)?.nodeFile;
-assert(hostNodeFile !== undefined, `no platform package matches host suffix ${hostSuffix}`);
 const nativeDir = resolve(packageDir, "native");
 const nativeEntries = await readdir(nativeDir, { withFileTypes: true });
-const oddNodeEntries = nativeEntries
-  .filter((e) => e.name.endsWith(".node") && !e.isFile())
-  .map((e) => e.name);
+const nodeEntries = nativeEntries.filter((entry) => entry.name.endsWith(".node"));
 assert(
-  oddNodeEntries.length === 0,
-  `${nativeDir} contains non-regular .node entries: ${oddNodeEntries.join(", ")}`,
+  nodeEntries.length === 0,
+  `${nativeDir} must not contain native addons; platform packages own every .node file, found [${nodeEntries.map((entry) => entry.name).join(", ")}]`,
 );
-const actualNodeFiles = nativeEntries
-  .filter((e) => e.isFile() && e.name.endsWith(".node"))
-  .map((e) => e.name)
-  .toSorted();
-assert(
-  JSON.stringify(actualNodeFiles) === JSON.stringify([hostNodeFile]),
-  `${nativeDir} must contain exactly the host .node file: expected ${hostNodeFile}, found [${actualNodeFiles.join(", ")}]`,
-);
-await requireFile(resolve(packageDir, "native", hostNodeFile), `pnpm run build:native (host target ${hostSuffix})`);
 
 // --- Debug WASM must be absent ---
 const debugWasm = resolve(packageDir, "wasm/zodrs_node.wasm32-wasi.debug.wasm");
@@ -263,10 +234,11 @@ for (const exclusion of [
   "!dist-cjs/**/*.test.*",
   "!dist-cjs/**/*.selftest.*",
   "!wasm/*.debug.wasm",
+  "!native/*.node",
 ]) {
   assert(files.has(exclusion), `${mainManifestPath} must exclude ${exclusion}`);
 }
 
 process.stdout.write(
-  `Verified zod-rs ${cargoVersion}: ${PLATFORM_PACKAGES.length} native platform packages (${hostSuffix} host addon built), WASM release artifacts, and version coherence across the matrix.\n`,
+  `Verified zod-rs ${cargoVersion}: ${PLATFORM_PACKAGES.length} native platform packages, zero main-package native addons, WASM release artifacts, and version coherence across the matrix.\n`,
 );

@@ -97,7 +97,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/release"
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/host-addon"
+          pnpm -C packages/zodrs run build:native
+          cp packages/zodrs/native/zodrs_node.linux-x64-gnu.node "$RUNNER_TEMP/host-addon/"
           pack_output=$(pnpm -C packages/zodrs pack --pack-destination "$RUNNER_TEMP/release")
           tarball=$(printf '%s\n' "$pack_output" | awk 'NF {last=$0} END {print last}')
           expected_tarball="$RUNNER_TEMP/release/$NPM_NAME-$VERSION.tgz"
@@ -108,18 +110,58 @@ jobs:
             'select(.name == $name and .version == $version and .repository.url == "git+https://github.com/metaphorics/zodrs.git")' \
             > /dev/null
 
+          # Inspect the exact tarball: native loader JS/types/metadata present,
+          # zero native .node files (they live in platform packages), release
+          # WASM present, debug WASM absent.
+          tar -tf "$tarball" | sort > "$RUNNER_TEMP/tarball-entries.txt"
+          grep -xF 'package/native/index.js' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/native/index.d.ts' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/native/package.json' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          if grep -E '^package/native/[^/]+\.node$' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null; then
+            echo "main tarball must not contain native .node files:" >&2
+            grep -E '^package/native/[^/]+\.node$' "$RUNNER_TEMP/tarball-entries.txt" >&2
+            exit 1
+          fi
+          grep -xF 'package/wasm/zodrs_node.wasi.cjs' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/wasm/zodrs_node.wasm32-wasi.wasm' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/wasm/wasi-worker.mjs' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          ! grep -xF 'package/wasm/zodrs_node.wasm32-wasi.debug.wasm' "$RUNNER_TEMP/tarball-entries.txt"
+
           npm_integrity="sha512-$(node -p "require('crypto').createHash('sha512').update(require('fs').readFileSync(process.argv[1])).digest('base64')" "$tarball")"
           npm_sha512=$(sha512sum "$tarball" | cut -d' ' -f1)
           echo "NPM_TARBALL_NAME=$(basename "$tarball")" >> "$GITHUB_ENV"
           echo "NPM_TARBALL_SHA512=$npm_sha512" >> "$GITHUB_ENV"
           echo "NPM_INTEGRITY=$npm_integrity" >> "$GITHUB_ENV"
 
+          # Local native installed proof: copy the built host addon into its
+          # platform package directory, pack that platform package, then
+          # co-install the main and host platform tarballs. This explicitly
+          # exercises the platform package; it does NOT prove natural
+          # optionalDependencies resolution (that is proven in verify-public).
+          host_dir="linux-x64-gnu"
+          platform_root="$RUNNER_TEMP/local-platform"
+          mkdir -p "$platform_root"
+          cp "$RUNNER_TEMP/host-addon/zodrs_node.$host_dir.node" "packages/zodrs/npm/$host_dir/"
+          platform_tarball=$(cd "packages/zodrs/npm/$host_dir" && \
+            npm pack --ignore-scripts --pack-destination "$platform_root")
+          test -f "$platform_root/$platform_tarball"
+
           native_root="$RUNNER_TEMP/install-native"
+          mkdir -p "$native_root"
+          printf '{"private":true}\n' > "$native_root/package.json"
+          npm install --prefix "$native_root" --ignore-scripts --no-audit --no-fund \
+            "$tarball" "$platform_root/$platform_tarball"
+          node packages/zodrs/scripts/verify-installed.mjs \
+            "$native_root/node_modules/$NPM_NAME" native \
+            "packages/zodrs" "packages/zodrs/npm/$host_dir"
+
+          # WASM verification is separate and host-independent.
           wasm_root="$RUNNER_TEMP/install-wasm"
-          npm install --prefix "$native_root" --ignore-scripts --no-audit --no-fund "$tarball"
-          node packages/zodrs/scripts/verify-installed.mjs "$native_root/node_modules/$NPM_NAME" native
+          mkdir -p "$wasm_root"
+          printf '{"private":true}\n' > "$wasm_root/package.json"
           npm install --prefix "$wasm_root" --ignore-scripts --no-audit --no-fund "$tarball"
-          node packages/zodrs/scripts/verify-installed.mjs "$wasm_root/node_modules/$NPM_NAME" wasm
+          node packages/zodrs/scripts/verify-installed.mjs \
+            "$wasm_root/node_modules/$NPM_NAME" wasm "packages/zodrs"
 
       - name: Prove npm publication input
         shell: bash
@@ -234,27 +276,35 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             cross: "true"
+            addon: linux-x64-gnu
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             cross: "true"
+            addon: linux-arm64-gnu
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
             cross: "true"
+            addon: linux-x64-musl
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
             cross: "true"
+            addon: linux-arm64-musl
           - target: x86_64-apple-darwin
             runner: macos-latest
             cross: "false"
+            addon: darwin-x64
           - target: aarch64-apple-darwin
             runner: macos-latest
             cross: "false"
+            addon: darwin-arm64
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             cross: "false"
+            addon: win32-x64-msvc
           - target: aarch64-pc-windows-msvc
             runner: windows-latest
             cross: "false"
+            addon: win32-arm64-msvc
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -320,21 +370,30 @@ jobs:
         run: |
           set -euo pipefail
           pnpm -C packages/zodrs run build:native:target
-          # Verify the .node file was produced with the expected platform suffix
+          # Require exactly one regular .node file with the expected addon suffix.
           node -e "
             const fs = require('fs');
-            const path = require('path');
             const dir = 'packages/zodrs/native';
+            const expected = 'zodrs_node.${{ matrix.addon }}.node';
             const entries = fs.readdirSync(dir).filter(f => f.endsWith('.node'));
-            if (entries.length === 0) throw new Error('no .node file produced in ' + dir);
-            console.log('produced:', entries.join(', '));
+            const regular = entries.filter(f => {
+              const s = fs.lstatSync(dir + '/' + f);
+              return s.isFile() && !s.isSymbolicLink();
+            });
+            if (entries.length !== 1 || regular.length !== 1) {
+              throw new Error('expected exactly 1 regular .node, got ' + regular.length + ': ' + entries.join(', '));
+            }
+            if (regular[0] !== expected) {
+              throw new Error('expected ' + expected + ', got ' + regular[0]);
+            }
+            console.log('produced:', regular[0]);
           "
 
       - name: Upload native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.target }}
-          path: packages/zodrs/native/*.node
+          path: packages/zodrs/native/zodrs_node.${{ matrix.addon }}.node
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -400,7 +459,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Each matrix job uploaded its .node file under native-<target>/.
+          # Each matrix job uploaded exactly one .node file under
+          # native-<target>/ with the exact name zodrs_node.<dir>.node.
           # Copy each into the corresponding npm/<dir>/ directory so the
           # platform package is complete and ready to pack.
           declare -A target_to_dir=(
@@ -417,12 +477,25 @@ jobs:
             dir="${target_to_dir[$target]}"
             src="$RUNNER_TEMP/native/native-$target"
             test -d "$src" || { echo "missing native artifact for $target" >&2; exit 1; }
-            node_file=$(find "$src" -name "zodrs_node.*.node" -type f | head -1)
-            test -n "$node_file" || { echo "no .node in $src" >&2; exit 1; }
-            cp "$node_file" "packages/zodrs/npm/$dir/"
-            echo "assembled $dir <- $(basename "$node_file")"
+            expected="zodrs_node.$dir.node"
+            # Count every .node entry before checking its type, so a symlink or
+            # directory cannot hide beside the expected regular file.
+            mapfile -t node_files < <(find "$src" -maxdepth 1 -name "*.node" -print)
+            if [[ "${#node_files[@]}" -ne 1 ]] || [[ ! -f "${node_files[0]}" ]] || [[ -L "${node_files[0]}" ]]; then
+              echo "expected exactly 1 regular .node in $src, got ${#node_files[@]}" >&2
+              find "$src" -maxdepth 1 -ls >&2
+              exit 1
+            fi
+            if [[ "$(basename "${node_files[0]}")" != "$expected" ]]; then
+              echo "expected $expected in $src, got $(basename "${node_files[0]}")" >&2
+              exit 1
+            fi
+            # Remove any stale destination .node before copying.
+            rm -f "packages/zodrs/npm/$dir/"*.node
+            cp "${node_files[0]}" "packages/zodrs/npm/$dir/"
+            echo "assembled $dir <- $expected"
           done
-          # Verify all 8 platform packages have their .node file
+          # Verify all 8 platform packages have exactly their expected .node file
           for dir in linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl darwin-x64 darwin-arm64 win32-x64-msvc win32-arm64-msvc; do
             test -f "packages/zodrs/npm/$dir/zodrs_node.$dir.node" || { echo "missing .node in npm/$dir" >&2; exit 1; }
           done
@@ -512,7 +585,7 @@ jobs:
                 set -e
                 case "$provenance_status" in
                   0) npm_state=already_exact ;;
-                  70) npm_state=lookup_failure ;;
+                  70|75) npm_state=lookup_failure ;;
                   *) npm_state=collision ;;
                 esac
               fi
@@ -568,10 +641,19 @@ jobs:
             for attempt in $(seq 1 18); do
               response="$RUNNER_TEMP/platform-$dir-published.json"
               status=$(lookup "https://registry.npmjs.org/$pkg_name/$VERSION" "$response")
-              if [[ "$status" != 200 ]]; then
-                echo "post-publish lookup for $pkg_name returned HTTP $status" >&2
-                exit 1
-              fi
+              case "$status" in
+                200) ;;
+                000|404|429|5*)
+                  echo "post-publish lookup for $pkg_name returned transient HTTP $status (attempt $attempt)" >&2
+                  sleep 10
+                  continue
+                  ;;
+                *)
+                  echo "post-publish lookup for $pkg_name returned terminal HTTP $status" >&2
+                  exit 1
+                  ;;
+              esac
+              # As soon as 200 appears, require exact remote SRI.
               remote_integrity=$(jq -er --arg name "$pkg_name" --arg version "$VERSION" \
                 'select(.name == $name and .version == $version) | .dist.integrity' \
                 "$response" 2>/dev/null || true)
@@ -586,6 +668,7 @@ jobs:
               case "$provenance_status" in
                 0) return 0 ;;
                 4) sleep 10 ;;
+                75) sleep 10 ;;
                 2) echo "npm provenance verifier usage error for $pkg_name" >&2; exit 1 ;;
                 65) echo "npm provenance identity mismatch for $pkg_name" >&2; exit 1 ;;
                 70) echo "npm provenance lookup failed for $pkg_name" >&2; exit 1 ;;
@@ -762,6 +845,7 @@ jobs:
                 case "$provenance_status" in
                   0) exit 0 ;;
                   4) ;; # attestation not exposed yet; retry until the loop budget is spent
+                  75) ;; # attestation lookup temporary; retry until the loop budget is spent
                   2) echo "npm provenance verifier usage error" >&2; exit 1 ;;
                   65) echo "npm provenance identity does not match" >&2; exit 1 ;;
                   70) echo "npm provenance lookup failed" >&2; exit 1 ;;
@@ -867,7 +951,25 @@ jobs:
           done
 
           installed="$main_root/node_modules/$NPM_NAME"
+          # The main package's optionalDependencies must have naturally
+          # resolved the host platform package. If this directory is absent,
+          # optional resolution is broken and the main tarball is shadowing
+          # the platform package.
+          host_platform_pkg="zod-rs-node-linux-x64-gnu"
+          host_platform_dir="$main_root/node_modules/$host_platform_pkg"
+          test -d "$host_platform_dir" || {
+            echo "optionalDependencies did not resolve $host_platform_pkg; main package shadows platform package" >&2
+            exit 1
+          }
+          test -f "$host_platform_dir/zodrs_node.linux-x64-gnu.node" || {
+            echo "naturally resolved $host_platform_pkg is missing its addon" >&2
+            exit 1
+          }
+
+          # Native verification through the main package using the naturally
+          # resolved platform addon.
           node packages/zodrs/scripts/verify-installed.mjs "$installed" native "$reference/package"
+          # WASM verification is separate and host-independent.
           node packages/zodrs/scripts/verify-installed.mjs "$installed" wasm "$reference/package"
 
           cat > "$main_root/smoke.mjs" <<'EOF'
