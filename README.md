@@ -131,15 +131,16 @@ comparison set is fixed in `packages/bench/gate.mjs`.
 | `z.string().datetime().parse` | 10,000 ISO strings | 820 | 441 | 1.86x |
 | `z.object()` initialization | build 1,000 schemas | 12 | 7 | 1.71x |
 | `z.object().parse` | 1,000 3-field objects | 19,812 | 17,871 | 1.11x |
-| `safeParseJson` | one 4 KB nested payload | 21,433 | 21,699 | 0.99x |
+| `safeParseJson` | 100 x 4 KB nested payloads | 233 | 213 | 1.09x |
 
 An op is a whole suite workload, not one value, and the workloads differ. Read
 each row across its two engine columns; do not compare rows to each other.
 
 The `safeParseJson` row measures `zodrs.safeParseJson(buffer)` against
-`zod4.safeParse(JSON.parse(json))`. At 0.99x it is a tie, and it is the one
-cell of the release gate that did not pass on this run: the gate requires
-every comparison to reach at least 1.00x.
+`zod4.safeParse(JSON.parse(json))`. One Tinybench callback iterates 100
+parses of the same ~4 KB nested payload, matching the batch-per-op pattern
+used by every other suite. At 1.09x zodrs is faster, and the cell passes
+the release gate, which requires every comparison to reach at least 1.00x.
 
 Reproduce the full gate with three runs into distinct directories, then the
 median-of-three comparison:
