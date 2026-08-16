@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const SCRIPT = new URL("./build-native-target.mjs", import.meta.url).pathname;
+const SCRIPT = fileURLToPath(new URL("./build-native-target.mjs", import.meta.url));
 
 function run(args, envOverrides = {}) {
   const env = { ...process.env };
