@@ -62,6 +62,8 @@ for dir in $platform_dirs; do
 	found=$(node -p "require('./$manifest').version")
 	[ "$found" = "$version" ] ||
 		die "platform package $dir is $found, expected $version"
+	npm view "$expected_name" name --json --registry=https://registry.npmjs.org/ >/dev/null 2>&1 ||
+		die "$expected_name is not bootstrapped on npm; publish an initial version and configure trusted publishing before tagging"
 done
 
 VERSION="$version" node -e '
