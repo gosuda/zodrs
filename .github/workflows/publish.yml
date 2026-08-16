@@ -445,7 +445,7 @@ jobs:
                 test "$(node -p "process.arch")" = "$EXPECTED_ARCH"
                 npm install --global npm@12.0.2
                 test "$(npm --version)" = 12.0.2
-                install_root=.release-native-verify/install
+                install_root=/tmp/zodrs-install
                 mkdir -p "$install_root"
                 printf "{\"private\":true}\n" > "$install_root/package.json"
                 npm install --prefix "$install_root" --ignore-scripts --no-audit --no-fund \
