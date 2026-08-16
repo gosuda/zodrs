@@ -858,7 +858,7 @@ jobs:
       - name: Obtain temporary crates.io token
         if: steps.classify.outputs.crate_state == 'missing'
         id: crates-auth
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d6b1a18 # v1.0.5
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Publish and verify crate
         if: steps.classify.outputs.crate_state == 'missing'
