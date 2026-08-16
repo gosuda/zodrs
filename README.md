@@ -38,12 +38,11 @@ npm install zod-rs
 
 Requires Node 20.17 or later. Prebuilt N-API addons cover Linux GNU
 (x64/arm64), Linux musl (x64/arm64), macOS (x64/arm64), and Windows MSVC
-(x64/arm64) as optional platform packages. The main package embeds the build
-host's native addon directly so it works without optional dependencies on that
-system, while optional platform packages provide native-by-default support on
-other listed systems. On any platform without a matching native addon, the
-loader uses the embedded `wasm32-wasip1-threads` WASM addon; if that is
-unavailable too, validation falls back to the TypeScript validator.
+(x64/arm64) through optional platform packages. When the matching optional
+package is installed, native validation is selected by default. If optional
+dependencies are disabled or no matching native addon exists, the loader uses
+the embedded `wasm32-wasip1-threads` WASM addon; if that is unavailable too,
+validation falls back to the TypeScript validator.
 
 ## Quickstart
 
