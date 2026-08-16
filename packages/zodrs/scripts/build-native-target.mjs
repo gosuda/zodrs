@@ -54,8 +54,18 @@ const crossCompile =
   crossCompileValue === "true" ||
   crossCompileFlag;
 
+// Targeted GNU release builds use NAPI-RS's manylinux-derived cross toolchain
+// even on a matching native Linux runner. This keeps the normal Rust target
+// triple/output path while pinning the generated addon's glibc floor to 2.17.
+const useNapiCross =
+  !crossCompile &&
+  process.platform === "linux" &&
+  (process.arch === "x64" || process.arch === "arm64") &&
+  (target === "x86_64-unknown-linux-gnu" || target === "aarch64-unknown-linux-gnu");
+
 const args = ["build", "--platform", "--release", "--target", target];
-if (crossCompile) args.push("--cross-compile");
+if (useNapiCross) args.push("--use-napi-cross");
+else if (crossCompile) args.push("--cross-compile");
 args.push("--output-dir", outputDir);
 
 const napiEntry = resolve(scriptDir, "../node_modules/@napi-rs/cli/dist/cli.js");
