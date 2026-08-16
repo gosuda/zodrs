@@ -103,12 +103,13 @@ const extraDeps = [...actualKeys].filter((k) => !expectedKeys.has(k));
 const mismatchedDeps = [...expectedKeys].filter(
   (k) => actualKeys.has(k) && optionalDeps[k] !== expectedOptionalDeps[k],
 );
-const depDetail =
-  (missingDeps.length ? `; missing: ${missingDeps.join(", ")}` : "") +
-  (extraDeps.length ? `; extra: ${extraDeps.join(", ")}` : "") +
-  (mismatchedDeps.length
-    ? `; wrong version: ${mismatchedDeps.map((k) => `${k} (expected ${expectedOptionalDeps[k]}, got ${optionalDeps[k]})`).join(", ")}`
-    : "");
+const depProblems = [
+  missingDeps.length && `missing: ${missingDeps.join(", ")}`,
+  extraDeps.length && `extra: ${extraDeps.join(", ")}`,
+  mismatchedDeps.length &&
+    `wrong version: ${mismatchedDeps.map((k) => `${k} (expected ${expectedOptionalDeps[k]}, got ${optionalDeps[k]})`).join(", ")}`,
+].filter(Boolean);
+const depDetail = depProblems.length ? `; ${depProblems.join("; ")}` : "";
 assert(
   missingDeps.length === 0 && extraDeps.length === 0 && mismatchedDeps.length === 0,
   `${mainManifestPath} optionalDependencies must list exactly the eight native platform packages at version ${cargoVersion}${depDetail}`,

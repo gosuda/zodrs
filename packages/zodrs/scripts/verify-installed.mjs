@@ -123,21 +123,34 @@ function regularFile(packageDir, relativePath) {
   return { path, relativePath, sha256 };
 }
 
+function isEnoent(error) {
+  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
 function requireAbsent(packageDir, relativePath) {
   try {
     lstatSync(resolve(packageDir, relativePath));
   } catch (error) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return;
-    }
+    if (isEnoent(error)) return;
     throw error;
   }
   throw new Error(`${relativePath} must not exist in a release package`);
+}
+
+/**
+ * Asserts a package manifest's name/version match what is expected. `label`
+ * identifies the manifest in error messages (a directory path or a
+ * description such as "platform package").
+ */
+function assertManifestMatches(label, manifest, expectedName, expectedVersion) {
+  if (manifest.name !== expectedName) {
+    throw new Error(`${label} name is ${JSON.stringify(manifest.name)}, expected ${JSON.stringify(expectedName)}`);
+  }
+  if (manifest.version !== expectedVersion) {
+    throw new Error(
+      `${label} version is ${JSON.stringify(manifest.version)}, expected ${JSON.stringify(expectedVersion)}`,
+    );
+  }
 }
 
 /**
@@ -152,14 +165,7 @@ function rejectEmbeddedNodeFiles(installedMain) {
   try {
     entries = readdirSync(nativeDir, { withFileTypes: true });
   } catch (error) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      error.code === "ENOENT"
-    ) {
-      return; // no native/ dir — fine
-    }
+    if (isEnoent(error)) return; // no native/ dir — fine
     throw error;
   }
   const nodeFiles = entries.filter((e) => e.name.endsWith(".node")).map((e) => e.name);
@@ -184,6 +190,29 @@ function errorMessage(error) {
   return error instanceof Error ? (error.stack ?? error.message) : String(error);
 }
 
+function loadAddon(loaded, label) {
+  const addon = isAddon(loaded) ? loaded : isAddon(loaded?.default) ? loaded.default : null;
+  if (addon === null) throw new Error(`${label} does not expose compile, validateJson, and dispose`);
+  return addon;
+}
+
+/** Compiles and validates one fixed plan/input pair, returning the verdict status. */
+function exerciseAddon(addon, label) {
+  let handle;
+  try {
+    handle = addon.compile(PLAN);
+    if (!Number.isInteger(handle)) throw new Error(`${label} returned a non-integer plan handle`);
+
+    const verdict = addon.validateJson(handle, INPUT);
+    if (verdict === null || typeof verdict !== "object" || verdict.status !== 0) {
+      throw new Error(`${label} returned verdict ${JSON.stringify(verdict)}; expected status 0`);
+    }
+    return verdict.status;
+  } finally {
+    if (Number.isInteger(handle)) addon.dispose(handle);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Native verification — resolves the platform package from the installed
 // main package's dependency graph, never from the source tree or workspace.
@@ -195,14 +224,7 @@ function verifyNative(packageDir, expectedPackageDir, expectedPlatformDir) {
   const expectedVersion = expectedManifest.version;
 
   const manifest = readManifest(packageDir);
-  if (manifest.name !== expectedName) {
-    throw new Error(`${packageDir} name is ${JSON.stringify(manifest.name)}, expected ${JSON.stringify(expectedName)}`);
-  }
-  if (manifest.version !== expectedVersion) {
-    throw new Error(
-      `${packageDir} version is ${JSON.stringify(manifest.version)}, expected ${JSON.stringify(expectedVersion)}`,
-    );
-  }
+  assertManifestMatches(packageDir, manifest, expectedName, expectedVersion);
 
   // Reject embedded .node files so a host addon inside the main package
   // cannot mask optional-dependency selection.
@@ -259,18 +281,7 @@ function verifyNative(packageDir, expectedPackageDir, expectedPlatformDir) {
   }
   const platformEntryReal = realpathSync(platformEntry);
   const platformManifest = readManifest(platformDir);
-
-  // Validate the platform package manifest.
-  if (platformManifest.name !== pkgName) {
-    throw new Error(
-      `platform package name is ${JSON.stringify(platformManifest.name)}, expected ${JSON.stringify(pkgName)}`,
-    );
-  }
-  if (platformManifest.version !== expectedVersion) {
-    throw new Error(
-      `platform package version is ${JSON.stringify(platformManifest.version)}, expected ${JSON.stringify(expectedVersion)}`,
-    );
-  }
+  assertManifestMatches("platform package", platformManifest, pkgName, expectedVersion);
 
   const nodeFile = platformManifest.main;
   if (typeof nodeFile !== "string" || !nodeFile.endsWith(".node")) {
@@ -310,20 +321,17 @@ function verifyNative(packageDir, expectedPackageDir, expectedPlatformDir) {
     throw new Error(`platform package files must include ${nodeFile}`);
   }
 
-  // The resolved entry must be the declared main .node file.
+  // The resolved entry must be the declared main .node file, and it must
+  // stay contained within the platform package directory.
   const entryBasename = relative(platformDir, platformEntryReal);
+  if (entryBasename === ".." || entryBasename.startsWith(`..${sep}`) || isAbsolute(entryBasename)) {
+    throw new Error(`platform entry ${platformEntry} resolves outside ${platformDir}`);
+  }
   if (entryBasename !== nodeFile) {
     throw new Error(
       `resolved platform entry ${entryBasename} does not match manifest main ${nodeFile}`,
     );
   }
-
-  // Containment: the entry realpath must be inside the platform dir.
-  const fromRoot = relative(platformDir, platformEntryReal);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
-    throw new Error(`platform entry ${platformEntry} resolves outside ${platformDir}`);
-  }
-
 
   // If an expected platform dir is supplied, compare the raw addon SHA.
   let sha256 = null;
@@ -350,27 +358,10 @@ function verifyNative(packageDir, expectedPackageDir, expectedPlatformDir) {
     sha256 = installedSha;
   }
 
-  // Directly load the raw addon from the resolved platform package entry.
-  const loaded = installedRequire(platformEntry);
-  const addon = isAddon(loaded) ? loaded : isAddon(loaded?.default) ? loaded.default : null;
-  if (addon === null) {
-    throw new Error(`${nodeFile} does not expose compile, validateJson, and dispose`);
-  }
-
-  let handle;
-  let status;
-  try {
-    handle = addon.compile(PLAN);
-    if (!Number.isInteger(handle)) throw new Error(`${nodeFile} returned a non-integer plan handle`);
-
-    const verdict = addon.validateJson(handle, INPUT);
-    if (verdict === null || typeof verdict !== "object" || verdict.status !== 0) {
-      throw new Error(`${nodeFile} returned verdict ${JSON.stringify(verdict)}; expected status 0`);
-    }
-    status = verdict.status;
-  } finally {
-    if (Number.isInteger(handle)) addon.dispose(handle);
-  }
+  // Directly load and exercise the raw addon from the resolved platform
+  // package entry.
+  const addon = loadAddon(installedRequire(platformEntry), nodeFile);
+  const status = exerciseAddon(addon, nodeFile);
 
   return {
     tool: TOOL,
@@ -396,14 +387,7 @@ function verifyWasm(packageDir, expectedPackageDir) {
   const expectedVersion = expectedManifest.version;
 
   const manifest = readManifest(packageDir);
-  if (manifest.name !== expectedName) {
-    throw new Error(`${packageDir} name is ${JSON.stringify(manifest.name)}, expected ${JSON.stringify(expectedName)}`);
-  }
-  if (manifest.version !== expectedVersion) {
-    throw new Error(
-      `${packageDir} version is ${JSON.stringify(manifest.version)}, expected ${JSON.stringify(expectedVersion)}`,
-    );
-  }
+  assertManifestMatches(packageDir, manifest, expectedName, expectedVersion);
 
   requireAbsent(expectedPackageDir, DEBUG_WASM);
   requireAbsent(packageDir, DEBUG_WASM);
@@ -419,24 +403,8 @@ function verifyWasm(packageDir, expectedPackageDir) {
   });
 
   const entry = regularFile(packageDir, tierFiles.entry);
-  const loaded = createRequire(import.meta.url)(entry.path);
-  const addon = isAddon(loaded) ? loaded : isAddon(loaded?.default) ? loaded.default : null;
-  if (addon === null) throw new Error(`${tierFiles.entry} does not expose compile, validateJson, and dispose`);
-
-  let handle;
-  let status;
-  try {
-    handle = addon.compile(PLAN);
-    if (!Number.isInteger(handle)) throw new Error(`${tierFiles.entry} returned a non-integer plan handle`);
-
-    const verdict = addon.validateJson(handle, INPUT);
-    if (verdict === null || typeof verdict !== "object" || verdict.status !== 0) {
-      throw new Error(`${tierFiles.entry} returned verdict ${JSON.stringify(verdict)}; expected status 0`);
-    }
-    status = verdict.status;
-  } finally {
-    if (Number.isInteger(handle)) addon.dispose(handle);
-  }
+  const addon = loadAddon(createRequire(import.meta.url)(entry.path), tierFiles.entry);
+  const status = exerciseAddon(addon, tierFiles.entry);
 
   return {
     tool: TOOL,

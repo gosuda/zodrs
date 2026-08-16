@@ -66,20 +66,11 @@ for dir in $platform_dirs; do
 		die "$expected_name is not bootstrapped on npm; publish an initial version and configure trusted publishing before tagging"
 done
 
-VERSION="$version" node -e '
+VERSION="$version" PLATFORM_DIRS="$platform_dirs" node -e '
   const fs = require("fs");
   const main = JSON.parse(fs.readFileSync("packages/zodrs/package.json", "utf8"));
   const version = process.env.VERSION;
-  const expected = [
-    "zod-rs-node-linux-x64-gnu",
-    "zod-rs-node-linux-arm64-gnu",
-    "zod-rs-node-linux-x64-musl",
-    "zod-rs-node-linux-arm64-musl",
-    "zod-rs-node-darwin-x64",
-    "zod-rs-node-darwin-arm64",
-    "zod-rs-node-win32-x64-msvc",
-    "zod-rs-node-win32-arm64-msvc",
-  ];
+  const expected = process.env.PLATFORM_DIRS.split(/\s+/).filter(Boolean).map((dir) => `zod-rs-node-${dir}`);
   const opt = main.optionalDependencies || {};
   const expectedSet = new Set(expected);
   const actual = Object.keys(opt);
