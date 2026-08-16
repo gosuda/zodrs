@@ -274,35 +274,35 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cross: "true"
+            runner: ubuntu-24.04
+            cross: "false"
             addon: linux-x64-gnu
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            cross: "true"
+            runner: ubuntu-24.04-arm
+            cross: "false"
             addon: linux-arm64-gnu
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             cross: "true"
             addon: linux-x64-musl
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             cross: "true"
             addon: linux-arm64-musl
           - target: x86_64-apple-darwin
-            runner: macos-latest
+            runner: macos-15-intel
             cross: "false"
             addon: darwin-x64
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            runner: macos-15
             cross: "false"
             addon: darwin-arm64
           - target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: windows-2025
             cross: "false"
             addon: win32-x64-msvc
           - target: aarch64-pc-windows-msvc
-            runner: windows-latest
+            runner: windows-11-arm
             cross: "false"
             addon: win32-arm64-msvc
     runs-on: ${{ matrix.runner }}
@@ -343,14 +343,14 @@ jobs:
           test "$(rustc --version)" = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
 
       - name: Install checksum-verified Zig for Linux cross-compilation
-        if: matrix.runner == 'ubuntu-latest' && matrix.cross == 'true'
+        if: matrix.cross == 'true'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
           use-cache: false
 
       - name: Install Linux cross-compilation tooling
-        if: matrix.runner == 'ubuntu-latest' && matrix.cross == 'true'
+        if: matrix.cross == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -361,6 +361,12 @@ jobs:
       - name: Install workspace dependencies
         shell: bash
         run: pnpm install --frozen-lockfile
+
+      - name: Download verified main package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: .release-native-main
 
       - name: Build native addon for ${{ matrix.target }}
         shell: bash
@@ -388,6 +394,77 @@ jobs:
             }
             console.log('produced:', regular[0]);
           "
+
+      - name: Pack, install, and exercise ${{ matrix.addon }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ matrix.addon }}"
+          expected="zodrs_node.$dir.node"
+          package_dir="packages/zodrs/npm/$dir"
+          verify_root=".release-native-verify"
+          cleanup() {
+            rm -rf "$verify_root"
+            rm -f "$package_dir/$expected"
+          }
+          trap cleanup EXIT
+          rm -rf "$verify_root"
+          mkdir -p "$verify_root/platform"
+          rm -f "$package_dir/"*.node
+          cp "packages/zodrs/native/$expected" "$package_dir/$expected"
+
+          platform_tarball=$(cd "$package_dir" && npm pack --ignore-scripts)
+          test -f "$package_dir/$platform_tarball"
+          mv "$package_dir/$platform_tarball" "$verify_root/platform/$platform_tarball"
+
+          metadata=".release-native-main/release-metadata.json"
+          main_tarball_name=$(node -e '
+            const fs = require("fs");
+            const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (typeof metadata.npm_tarball_name !== "string") process.exit(1);
+            process.stdout.write(metadata.npm_tarball_name);
+          ' "$metadata")
+          main_tarball=".release-native-main/$main_tarball_name"
+          test -f "$main_tarball"
+          cp "$main_tarball" "$verify_root/main.tgz"
+
+          if [[ "$dir" == *-musl ]]; then
+            case "$dir" in
+              *-arm64-*) expected_arch=arm64 ;;
+              *) expected_arch=x64 ;;
+            esac
+            docker run --rm \
+              -e ADDON_DIR="$dir" \
+              -e EXPECTED_ARCH="$expected_arch" \
+              -e PLATFORM_TARBALL="$platform_tarball" \
+              -v "$PWD:/work" \
+              -w /work \
+              node:24-alpine \
+              sh -euc '
+                test "$(node -p "process.platform")" = linux
+                test "$(node -p "process.arch")" = "$EXPECTED_ARCH"
+                npm install --global npm@12.0.2
+                test "$(npm --version)" = 12.0.2
+                install_root=.release-native-verify/install
+                mkdir -p "$install_root"
+                printf "{\"private\":true}\n" > "$install_root/package.json"
+                npm install --prefix "$install_root" --ignore-scripts --no-audit --no-fund \
+                  .release-native-verify/main.tgz \
+                  ".release-native-verify/platform/$PLATFORM_TARBALL"
+                node packages/zodrs/scripts/verify-installed.mjs \
+                  "$install_root/node_modules/zod-rs" native \
+                  packages/zodrs "packages/zodrs/npm/$ADDON_DIR"
+              '
+          else
+            install_root="$verify_root/install"
+            mkdir -p "$install_root"
+            printf '{"private":true}\n' > "$install_root/package.json"
+            npm install --prefix "$install_root" --ignore-scripts --no-audit --no-fund \
+              "$verify_root/main.tgz" "$verify_root/platform/$platform_tarball"
+            node packages/zodrs/scripts/verify-installed.mjs \
+              "$install_root/node_modules/zod-rs" native \
+              packages/zodrs "$package_dir"
+          fi
 
       - name: Upload native artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -781,7 +858,7 @@ jobs:
       - name: Obtain temporary crates.io token
         if: steps.classify.outputs.crate_state == 'missing'
         id: crates-auth
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d6b1a18 # v1.0.5
 
       - name: Publish and verify crate
         if: steps.classify.outputs.crate_state == 'missing'
