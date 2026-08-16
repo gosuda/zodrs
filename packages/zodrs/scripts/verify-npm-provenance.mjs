@@ -83,11 +83,16 @@ async function main() {
     response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   } catch (error) {
     process.stderr.write(`npm attestation lookup failed: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 70;
+    process.exitCode = 75;
     return;
   }
   if (response.status === 404) {
     process.exitCode = 4;
+    return;
+  }
+  if (response.status === 429 || response.status >= 500) {
+    process.stderr.write(`npm attestation lookup returned transient HTTP ${response.status}\n`);
+    process.exitCode = 75;
     return;
   }
   if (!response.ok || response.url !== url) {

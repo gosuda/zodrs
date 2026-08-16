@@ -97,7 +97,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/release"
+          mkdir -p "$RUNNER_TEMP/release" "$RUNNER_TEMP/host-addon"
+          pnpm -C packages/zodrs run build:native
+          cp packages/zodrs/native/zodrs_node.linux-x64-gnu.node "$RUNNER_TEMP/host-addon/"
           pack_output=$(pnpm -C packages/zodrs pack --pack-destination "$RUNNER_TEMP/release")
           tarball=$(printf '%s\n' "$pack_output" | awk 'NF {last=$0} END {print last}')
           expected_tarball="$RUNNER_TEMP/release/$NPM_NAME-$VERSION.tgz"
@@ -108,18 +110,58 @@ jobs:
             'select(.name == $name and .version == $version and .repository.url == "git+https://github.com/metaphorics/zodrs.git")' \
             > /dev/null
 
+          # Inspect the exact tarball: native loader JS/types/metadata present,
+          # zero native .node files (they live in platform packages), release
+          # WASM present, debug WASM absent.
+          tar -tf "$tarball" | sort > "$RUNNER_TEMP/tarball-entries.txt"
+          grep -xF 'package/native/index.js' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/native/index.d.ts' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/native/package.json' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          if grep -E '^package/native/[^/]+\.node$' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null; then
+            echo "main tarball must not contain native .node files:" >&2
+            grep -E '^package/native/[^/]+\.node$' "$RUNNER_TEMP/tarball-entries.txt" >&2
+            exit 1
+          fi
+          grep -xF 'package/wasm/zodrs_node.wasi.cjs' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/wasm/zodrs_node.wasm32-wasi.wasm' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          grep -xF 'package/wasm/wasi-worker.mjs' "$RUNNER_TEMP/tarball-entries.txt" > /dev/null
+          ! grep -xF 'package/wasm/zodrs_node.wasm32-wasi.debug.wasm' "$RUNNER_TEMP/tarball-entries.txt"
+
           npm_integrity="sha512-$(node -p "require('crypto').createHash('sha512').update(require('fs').readFileSync(process.argv[1])).digest('base64')" "$tarball")"
           npm_sha512=$(sha512sum "$tarball" | cut -d' ' -f1)
           echo "NPM_TARBALL_NAME=$(basename "$tarball")" >> "$GITHUB_ENV"
           echo "NPM_TARBALL_SHA512=$npm_sha512" >> "$GITHUB_ENV"
           echo "NPM_INTEGRITY=$npm_integrity" >> "$GITHUB_ENV"
 
+          # Local native installed proof: copy the built host addon into its
+          # platform package directory, pack that platform package, then
+          # co-install the main and host platform tarballs. This explicitly
+          # exercises the platform package; it does NOT prove natural
+          # optionalDependencies resolution (that is proven in verify-public).
+          host_dir="linux-x64-gnu"
+          platform_root="$RUNNER_TEMP/local-platform"
+          mkdir -p "$platform_root"
+          cp "$RUNNER_TEMP/host-addon/zodrs_node.$host_dir.node" "packages/zodrs/npm/$host_dir/"
+          platform_tarball=$(cd "packages/zodrs/npm/$host_dir" && \
+            npm pack --ignore-scripts --pack-destination "$platform_root")
+          test -f "$platform_root/$platform_tarball"
+
           native_root="$RUNNER_TEMP/install-native"
+          mkdir -p "$native_root"
+          printf '{"private":true}\n' > "$native_root/package.json"
+          npm install --prefix "$native_root" --ignore-scripts --no-audit --no-fund \
+            "$tarball" "$platform_root/$platform_tarball"
+          node packages/zodrs/scripts/verify-installed.mjs \
+            "$native_root/node_modules/$NPM_NAME" native \
+            "packages/zodrs" "packages/zodrs/npm/$host_dir"
+
+          # WASM verification is separate and host-independent.
           wasm_root="$RUNNER_TEMP/install-wasm"
-          npm install --prefix "$native_root" --ignore-scripts --no-audit --no-fund "$tarball"
-          node packages/zodrs/scripts/verify-installed.mjs "$native_root/node_modules/$NPM_NAME" native
+          mkdir -p "$wasm_root"
+          printf '{"private":true}\n' > "$wasm_root/package.json"
           npm install --prefix "$wasm_root" --ignore-scripts --no-audit --no-fund "$tarball"
-          node packages/zodrs/scripts/verify-installed.mjs "$wasm_root/node_modules/$NPM_NAME" wasm
+          node packages/zodrs/scripts/verify-installed.mjs \
+            "$wasm_root/node_modules/$NPM_NAME" wasm "packages/zodrs"
 
       - name: Prove npm publication input
         shell: bash
@@ -224,8 +266,218 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  publish:
+  build-native:
     needs: verify
+    if: github.repository == 'metaphorics/zodrs'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            cross: "false"
+            addon: linux-x64-gnu
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            cross: "false"
+            addon: linux-arm64-gnu
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            cross: "true"
+            addon: linux-x64-musl
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            cross: "true"
+            addon: linux-arm64-musl
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            cross: "false"
+            addon: darwin-x64
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            cross: "false"
+            addon: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            cross: "false"
+            addon: win32-x64-msvc
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            cross: "false"
+            addon: win32-arm64-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact tag SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install pinned JavaScript tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@12.0.2
+          hash -r
+          test "$(npm --version)" = "12.0.2"
+          corepack enable pnpm
+          corepack install --global "$(node -p "require('./package.json').packageManager")"
+          expected="pnpm@$(node -p "require('./package.json').packageManager" | cut -d@ -f2)"
+          test "pnpm@$(pnpm --version)" = "$expected"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 ${{ matrix.target }}
+          test "$(rustc --version)" = "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+
+      - name: Install checksum-verified Zig for Linux cross-compilation
+        if: matrix.cross == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Install Linux cross-compilation tooling
+        if: matrix.cross == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(zig version)" = "0.16.0"
+          cargo install cargo-zigbuild --version 0.19.8 --locked
+          cargo-zigbuild --version
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Download verified main package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: .release-native-main
+
+      - name: Build native addon for ${{ matrix.target }}
+        shell: bash
+        env:
+          NAPI_TARGET: ${{ matrix.target }}
+          NAPI_CROSS_COMPILE: ${{ matrix.cross }}
+        run: |
+          set -euo pipefail
+          pnpm -C packages/zodrs run build:native:target
+          # Require exactly one regular .node file with the expected addon suffix.
+          node -e "
+            const fs = require('fs');
+            const dir = 'packages/zodrs/native';
+            const expected = 'zodrs_node.${{ matrix.addon }}.node';
+            const entries = fs.readdirSync(dir).filter(f => f.endsWith('.node'));
+            const regular = entries.filter(f => {
+              const s = fs.lstatSync(dir + '/' + f);
+              return s.isFile() && !s.isSymbolicLink();
+            });
+            if (entries.length !== 1 || regular.length !== 1) {
+              throw new Error('expected exactly 1 regular .node, got ' + regular.length + ': ' + entries.join(', '));
+            }
+            if (regular[0] !== expected) {
+              throw new Error('expected ' + expected + ', got ' + regular[0]);
+            }
+            console.log('produced:', regular[0]);
+          "
+
+      - name: Pack, install, and exercise ${{ matrix.addon }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ matrix.addon }}"
+          expected="zodrs_node.$dir.node"
+          package_dir="packages/zodrs/npm/$dir"
+          verify_root=".release-native-verify"
+          cleanup() {
+            rm -rf "$verify_root"
+            rm -f "$package_dir/$expected"
+          }
+          trap cleanup EXIT
+          rm -rf "$verify_root"
+          mkdir -p "$verify_root/platform"
+          rm -f "$package_dir/"*.node
+          cp "packages/zodrs/native/$expected" "$package_dir/$expected"
+
+          platform_tarball=$(cd "$package_dir" && npm pack --ignore-scripts)
+          test -f "$package_dir/$platform_tarball"
+          mv "$package_dir/$platform_tarball" "$verify_root/platform/$platform_tarball"
+
+          metadata=".release-native-main/release-metadata.json"
+          main_tarball_name=$(node -e '
+            const fs = require("fs");
+            const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (typeof metadata.npm_tarball_name !== "string") process.exit(1);
+            process.stdout.write(metadata.npm_tarball_name);
+          ' "$metadata")
+          main_tarball=".release-native-main/$main_tarball_name"
+          test -f "$main_tarball"
+          cp "$main_tarball" "$verify_root/main.tgz"
+
+          if [[ "$dir" == *-musl ]]; then
+            case "$dir" in
+              *-arm64-*) expected_arch=arm64 ;;
+              *) expected_arch=x64 ;;
+            esac
+            docker run --rm \
+              -e ADDON_DIR="$dir" \
+              -e EXPECTED_ARCH="$expected_arch" \
+              -e PLATFORM_TARBALL="$platform_tarball" \
+              -v "$PWD:/work" \
+              -w /work \
+              node:24-alpine \
+              sh -euc '
+                test "$(node -p "process.platform")" = linux
+                test "$(node -p "process.arch")" = "$EXPECTED_ARCH"
+                npm install --global npm@12.0.2
+                test "$(npm --version)" = 12.0.2
+                install_root=/tmp/zodrs-install
+                mkdir -p "$install_root"
+                printf "{\"private\":true}\n" > "$install_root/package.json"
+                npm install --prefix "$install_root" --ignore-scripts --no-audit --no-fund \
+                  .release-native-verify/main.tgz \
+                  ".release-native-verify/platform/$PLATFORM_TARBALL"
+                node packages/zodrs/scripts/verify-installed.mjs \
+                  "$install_root/node_modules/zod-rs" native \
+                  packages/zodrs "packages/zodrs/npm/$ADDON_DIR"
+              '
+          else
+            install_root="$verify_root/install"
+            mkdir -p "$install_root"
+            printf '{"private":true}\n' > "$install_root/package.json"
+            npm install --prefix "$install_root" --ignore-scripts --no-audit --no-fund \
+              "$verify_root/main.tgz" "$verify_root/platform/$platform_tarball"
+            node packages/zodrs/scripts/verify-installed.mjs \
+              "$install_root/node_modules/zod-rs" native \
+              packages/zodrs "$package_dir"
+          fi
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-${{ matrix.target }}
+          path: packages/zodrs/native/zodrs_node.${{ matrix.addon }}.node
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+
+  publish:
+    needs: [verify, build-native]
     if: github.repository == 'metaphorics/zodrs'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -273,6 +525,58 @@ jobs:
           name: release
           path: ${{ runner.temp }}/release
 
+      - name: Download all native artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: native-*
+          path: ${{ runner.temp }}/native
+          merge-multiple: false
+
+      - name: Assemble platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each matrix job uploaded exactly one .node file under
+          # native-<target>/ with the exact name zodrs_node.<dir>.node.
+          # Copy each into the corresponding npm/<dir>/ directory so the
+          # platform package is complete and ready to pack.
+          declare -A target_to_dir=(
+            [x86_64-unknown-linux-gnu]=linux-x64-gnu
+            [aarch64-unknown-linux-gnu]=linux-arm64-gnu
+            [x86_64-unknown-linux-musl]=linux-x64-musl
+            [aarch64-unknown-linux-musl]=linux-arm64-musl
+            [x86_64-apple-darwin]=darwin-x64
+            [aarch64-apple-darwin]=darwin-arm64
+            [x86_64-pc-windows-msvc]=win32-x64-msvc
+            [aarch64-pc-windows-msvc]=win32-arm64-msvc
+          )
+          for target in "${!target_to_dir[@]}"; do
+            dir="${target_to_dir[$target]}"
+            src="$RUNNER_TEMP/native/native-$target"
+            test -d "$src" || { echo "missing native artifact for $target" >&2; exit 1; }
+            expected="zodrs_node.$dir.node"
+            # Count every .node entry before checking its type, so a symlink or
+            # directory cannot hide beside the expected regular file.
+            mapfile -t node_files < <(find "$src" -maxdepth 1 -name "*.node" -print)
+            if [[ "${#node_files[@]}" -ne 1 ]] || [[ ! -f "${node_files[0]}" ]] || [[ -L "${node_files[0]}" ]]; then
+              echo "expected exactly 1 regular .node in $src, got ${#node_files[@]}" >&2
+              find "$src" -maxdepth 1 -ls >&2
+              exit 1
+            fi
+            if [[ "$(basename "${node_files[0]}")" != "$expected" ]]; then
+              echo "expected $expected in $src, got $(basename "${node_files[0]}")" >&2
+              exit 1
+            fi
+            # Remove any stale destination .node before copying.
+            rm -f "packages/zodrs/npm/$dir/"*.node
+            cp "${node_files[0]}" "packages/zodrs/npm/$dir/"
+            echo "assembled $dir <- $expected"
+          done
+          # Verify all 8 platform packages have exactly their expected .node file
+          for dir in linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl darwin-x64 darwin-arm64 win32-x64-msvc win32-arm64-msvc; do
+            test -f "packages/zodrs/npm/$dir/zodrs_node.$dir.node" || { echo "missing .node in npm/$dir" >&2; exit 1; }
+          done
+
       - name: Load and validate release metadata
         shell: bash
         run: |
@@ -316,8 +620,9 @@ jobs:
             if ! status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
               --output "$output" --write-out '%{http_code}' \
               -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' "$url"); then
+              echo "registry lookup transport failed for $url" >&2
               printf '000'
-              return
+              return 0
             fi
             printf '%s' "$status"
           }
@@ -357,7 +662,7 @@ jobs:
                 set -e
                 case "$provenance_status" in
                   0) npm_state=already_exact ;;
-                  70) npm_state=lookup_failure ;;
+                  70|75) npm_state=lookup_failure ;;
                   *) npm_state=collision ;;
                 esac
               fi
@@ -381,6 +686,166 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Classify and publish platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          lookup() {
+            local url=$1 output=$2 status
+            if ! status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$output" --write-out '%{http_code}' \
+              -H 'User-Agent: zodrs-release-workflow (https://github.com/metaphorics/zodrs)' "$url"); then
+              echo "registry lookup transport failed for $url" >&2
+              printf '000'
+              return 0
+            fi
+            printf '%s' "$status"
+          }
+          verify_provenance() {
+            local response=$1 pkg_name=$2 integrity=$3 status
+            local attestation_url
+            attestation_url=$(jq -er '.dist.attestations.url' "$response" 2>/dev/null || true)
+            set +e
+            node packages/zodrs/scripts/verify-npm-provenance.mjs \
+              "$attestation_url" "$pkg_name" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$integrity"
+            status=$?
+            set -e
+            return "$status"
+          }
+          await_provenance() {
+            local dir=$1 pkg_name=$2 integrity=$3 response status provenance_status
+            for attempt in $(seq 1 18); do
+              response="$RUNNER_TEMP/platform-$dir-published.json"
+              status=$(lookup "https://registry.npmjs.org/$pkg_name/$VERSION" "$response")
+              case "$status" in
+                200) ;;
+                000|404|429|5*)
+                  echo "post-publish lookup for $pkg_name returned transient HTTP $status (attempt $attempt)" >&2
+                  sleep 10
+                  continue
+                  ;;
+                *)
+                  echo "post-publish lookup for $pkg_name returned terminal HTTP $status" >&2
+                  exit 1
+                  ;;
+              esac
+              # As soon as 200 appears, require exact remote SRI.
+              remote_integrity=$(jq -er --arg name "$pkg_name" --arg version "$VERSION" \
+                'select(.name == $name and .version == $version) | .dist.integrity' \
+                "$response" 2>/dev/null || true)
+              if [[ "$remote_integrity" != "$integrity" ]]; then
+                echo "npm exposed different or absent integrity for $pkg_name $VERSION" >&2
+                exit 1
+              fi
+              set +e
+              verify_provenance "$response" "$pkg_name" "$integrity"
+              provenance_status=$?
+              set -e
+              case "$provenance_status" in
+                0) return 0 ;;
+                4) sleep 10 ;;
+                75) sleep 10 ;;
+                2) echo "npm provenance verifier usage error for $pkg_name" >&2; exit 1 ;;
+                65) echo "npm provenance identity mismatch for $pkg_name" >&2; exit 1 ;;
+                70) echo "npm provenance lookup failed for $pkg_name" >&2; exit 1 ;;
+                *) echo "npm provenance verifier returned unexpected status $provenance_status for $pkg_name" >&2; exit 1 ;;
+              esac
+            done
+            echo "npm did not expose provenance for $pkg_name after 18 attempts" >&2
+            exit 1
+          }
+
+          declare -A target_to_dir=(
+            [x86_64-unknown-linux-gnu]=linux-x64-gnu
+            [aarch64-unknown-linux-gnu]=linux-arm64-gnu
+            [x86_64-unknown-linux-musl]=linux-x64-musl
+            [aarch64-unknown-linux-musl]=linux-arm64-musl
+            [x86_64-apple-darwin]=darwin-x64
+            [aarch64-apple-darwin]=darwin-arm64
+            [x86_64-pc-windows-msvc]=win32-x64-msvc
+            [aarch64-pc-windows-msvc]=win32-arm64-msvc
+          )
+          ledger_lines="$RUNNER_TEMP/platform-ledger.jsonl"
+          : > "$ledger_lines"
+          for target in "${!target_to_dir[@]}"; do
+            dir="${target_to_dir[$target]}"
+            package_dir="packages/zodrs/npm/$dir"
+            pkg_name=$(node -p "require('./$package_dir/package.json').name")
+            pkg_version=$(node -p "require('./$package_dir/package.json').version")
+            test "$pkg_name" = "zod-rs-node-$dir"
+            test "$pkg_version" = "$VERSION"
+            test -f "$package_dir/zodrs_node.$dir.node"
+
+            pack_json="$RUNNER_TEMP/platform-$dir-pack.json"
+            expected_tarball="$pkg_name-$VERSION.tgz"
+            (cd "$package_dir" && npm pack --ignore-scripts --json > "$pack_json")
+            jq -e --arg expected "$expected_tarball" \
+              'type == "array" and length == 1 and .[0].filename == $expected' "$pack_json" > /dev/null
+            tarball="$expected_tarball"
+            tarball_path="$package_dir/$tarball"
+            test -f "$tarball_path"
+            local_integrity="sha512-$(node -p "require('crypto').createHash('sha512').update(require('fs').readFileSync(process.argv[1])).digest('base64')" "$tarball_path")"
+
+            response="$RUNNER_TEMP/platform-$dir.json"
+            status=$(lookup "https://registry.npmjs.org/$pkg_name/$VERSION" "$response")
+            case "$status" in
+              200)
+                remote_integrity=$(jq -er --arg name "$pkg_name" --arg version "$VERSION" \
+                  'select(.name == $name and .version == $version) | .dist.integrity' \
+                  "$response" 2>/dev/null || true)
+                if [[ "$remote_integrity" != "$local_integrity" ]]; then
+                  echo "same-version collision for $pkg_name: registry integrity differs or is absent" >&2
+                  exit 1
+                fi
+                set +e
+                verify_provenance "$response" "$pkg_name" "$local_integrity"
+                provenance_status=$?
+                set -e
+                if [[ "$provenance_status" -ne 0 ]]; then
+                  echo "existing $pkg_name $VERSION has invalid or unavailable provenance (status $provenance_status)" >&2
+                  exit 1
+                fi
+                echo "$pkg_name $VERSION is byte-identical and provenance-valid"
+                rm -f "$tarball_path"
+                ;;
+              404)
+                npm publish "$tarball_path" --ignore-scripts --access public --provenance
+                await_provenance "$dir" "$pkg_name" "$local_integrity"
+                echo "$pkg_name $VERSION published and verified"
+                rm -f "$tarball_path"
+                ;;
+              000|*)
+                echo "registry lookup for $pkg_name failed (HTTP $status)" >&2
+                exit 1
+                ;;
+            esac
+            jq -cn --arg target "$target" --arg name "$pkg_name" \
+              --arg version "$VERSION" --arg integrity "$local_integrity" \
+              '{target: $target, name: $name, version: $version, integrity: $integrity}' >> "$ledger_lines"
+          done
+          jq -s 'sort_by(.target)' "$ledger_lines" > "$RUNNER_TEMP/platform-ledger.json"
+          jq -e --arg version "$VERSION" '
+            type == "array" and length == 8 and
+            ([.[].target] | unique | length == 8) and
+            ([.[].name] | unique | length == 8) and
+            all(.[]; .version == $version and (.integrity | test("^sha512-[A-Za-z0-9+/]+={0,2}$")))
+          ' "$RUNNER_TEMP/platform-ledger.json" > /dev/null
+          for target in "${!target_to_dir[@]}"; do
+            dir="${target_to_dir[$target]}"
+            expected_name="zod-rs-node-$dir"
+            actual_name=$(jq -er --arg target "$target" '.[] | select(.target == $target) | .name' "$RUNNER_TEMP/platform-ledger.json")
+            test "$actual_name" = "$expected_name" || { echo "ledger target/name mismatch for $target" >&2; exit 1; }
+          done
+      - name: Upload platform integrity ledger
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: platform-ledger
+          path: ${{ runner.temp }}/platform-ledger.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
 
       - name: Reproduce the verified crate package
         if: steps.classify.outputs.crate_state == 'missing'
@@ -457,6 +922,7 @@ jobs:
                 case "$provenance_status" in
                   0) exit 0 ;;
                   4) ;; # attestation not exposed yet; retry until the loop budget is spent
+                  75) ;; # attestation lookup temporary; retry until the loop budget is spent
                   2) echo "npm provenance verifier usage error" >&2; exit 1 ;;
                   65) echo "npm provenance identity does not match" >&2; exit 1 ;;
                   70) echo "npm provenance lookup failed" >&2; exit 1 ;;
@@ -505,6 +971,12 @@ jobs:
           name: release
           path: ${{ runner.temp }}/release
 
+      - name: Download platform integrity ledger
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: platform-ledger
+          path: ${{ runner.temp }}/platform-ledger
+
       - name: Load and validate release metadata
         shell: bash
         run: |
@@ -531,54 +1003,167 @@ jobs:
           test "$GITHUB_SHA" = "$GIT_SHA"
           test "v$VERSION" = "$GITHUB_REF_NAME"
 
-      - name: Prove a fresh public npm consumer
+      - name: Prove a fresh main-only npm consumer
         shell: bash
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/npm-public"
+          main_root="$RUNNER_TEMP/npm-main"
           reference="$RUNNER_TEMP/npm-reference"
-          mkdir -p "$root" "$reference"
+          mkdir -p "$main_root" "$reference"
           tar -xzf "$RUNNER_TEMP/release/$NPM_TARBALL_NAME" -C "$reference"
-          printf '{"private":true}\n' > "$root/package.json"
+          printf '{"private":true}\n' > "$main_root/package.json"
+
+          # Install only the main package. Natural optionalDependencies must
+          # supply the host platform package; do not force or pre-install it.
           for attempt in $(seq 1 18); do
-            if npm install --prefix "$root" --ignore-scripts --no-audit --no-fund --save-exact "$NPM_NAME@$VERSION"; then
+            if npm install --prefix "$main_root" --ignore-scripts --no-audit --no-fund --save-exact \
+              "$NPM_NAME@$VERSION"; then
               break
             fi
             if [[ "$attempt" -eq 18 ]]; then
-              echo "npm could not install $NPM_NAME $VERSION from the public registry" >&2
+              echo "npm could not install the public main package" >&2
               exit 1
             fi
             sleep 10
           done
-          installed="$root/node_modules/$NPM_NAME"
+
+          installed="$main_root/node_modules/$NPM_NAME"
+          # The main package's optionalDependencies must have naturally
+          # resolved the host platform package. If this directory is absent,
+          # optional resolution is broken and the main tarball is shadowing
+          # the platform package.
+          host_platform_pkg="zod-rs-node-linux-x64-gnu"
+          host_platform_dir="$main_root/node_modules/$host_platform_pkg"
+          test -d "$host_platform_dir" || {
+            echo "optionalDependencies did not resolve $host_platform_pkg; main package shadows platform package" >&2
+            exit 1
+          }
+          test -f "$host_platform_dir/zodrs_node.linux-x64-gnu.node" || {
+            echo "naturally resolved $host_platform_pkg is missing its addon" >&2
+            exit 1
+          }
+
+          # Native verification through the main package using the naturally
+          # resolved platform addon.
           node packages/zodrs/scripts/verify-installed.mjs "$installed" native "$reference/package"
+          # WASM verification is separate and host-independent.
           node packages/zodrs/scripts/verify-installed.mjs "$installed" wasm "$reference/package"
 
-          cat > "$root/smoke.mjs" <<'EOF'
+          cat > "$main_root/smoke.mjs" <<'EOF'
           import { z } from "zod-rs";
           const value = z.object({ a: z.string() }).parseJson('{"a":"public"}');
           if (value.a !== "public") throw new Error("unexpected parseJson result");
           EOF
-          (cd "$root" && node smoke.mjs)
-          (cd "$root" && ZODRS_LOADER=none node smoke.mjs)
+          (cd "$main_root" && node smoke.mjs)
+          (cd "$main_root" && ZODRS_LOADER=none node smoke.mjs)
 
-          audit="$RUNNER_TEMP/npm-signatures.json"
-          (cd "$root" && npm audit signatures --json --include-attestations > "$audit")
+          main_version="$RUNNER_TEMP/npm-main-version.json"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            "https://registry.npmjs.org/$NPM_NAME/$VERSION" > "$main_version"
+          test "$(jq -er '.dist.integrity' "$main_version")" = "$NPM_INTEGRITY"
+          attestation_url=$(jq -er '.dist.attestations.url' "$main_version")
+          node packages/zodrs/scripts/verify-npm-provenance.mjs \
+            "$attestation_url" "$NPM_NAME" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$NPM_INTEGRITY"
+
+          (cd "$main_root" && npm audit signatures --json --include-attestations > "$RUNNER_TEMP/npm-main-signatures.json")
           jq -e --arg name "$NPM_NAME" --arg version "$VERSION" '
             .verified[]
             | select(.name == $name and .version == $version)
             | .attestationBundles[]
             | select(.predicateType == "https://slsa.dev/provenance/v1")
-          ' "$audit" > /dev/null
+          ' "$RUNNER_TEMP/npm-main-signatures.json" > /dev/null
 
-          response="$RUNNER_TEMP/npm-public-version.json"
-          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
-            "https://registry.npmjs.org/$NPM_NAME/$VERSION" > "$response"
-          test "$(jq -er '.dist.integrity' "$response")" = "$NPM_INTEGRITY"
-          attestation_url=$(jq -er '.dist.attestations.url' "$response")
-          node packages/zodrs/scripts/verify-npm-provenance.mjs \
-            "$attestation_url" "$NPM_NAME" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$NPM_INTEGRITY"
+      - name: Verify public platform packages and SLSA attestations
+        shell: bash
+        run: |
+          set -euo pipefail
+          ledger="$RUNNER_TEMP/platform-ledger/platform-ledger.json"
+          jq -e --arg version "$VERSION" '
+            type == "array" and length == 8 and
+            ([.[].target] | sort) == ([
+              "aarch64-apple-darwin", "aarch64-pc-windows-msvc",
+              "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl",
+              "x86_64-apple-darwin", "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"
+            ] | sort) and
+            ([.[].name] | sort) == ([
+              "zod-rs-node-linux-x64-gnu", "zod-rs-node-linux-arm64-gnu",
+              "zod-rs-node-linux-x64-musl", "zod-rs-node-linux-arm64-musl",
+              "zod-rs-node-darwin-x64", "zod-rs-node-darwin-arm64",
+              "zod-rs-node-win32-x64-msvc", "zod-rs-node-win32-arm64-msvc"
+            ] | sort) and
+            all(.[]; .version == $version and (.integrity | test("^sha512-[A-Za-z0-9+/]+={0,2}$")))
+          ' "$ledger" > /dev/null
 
+          # Separate audit root with all eight platform packages so direct host
+          # addon loading and npm audit signatures do not depend on (or mask)
+          # the main package's optionalDependencies wiring.
+          audit_root="$RUNNER_TEMP/npm-audit"
+          mkdir -p "$audit_root"
+          printf '{"private":true}\n' > "$audit_root/package.json"
+          for attempt in $(seq 1 18); do
+            if npm install --prefix "$audit_root" --ignore-scripts --no-audit --no-fund --save-exact --force \
+              zod-rs-node-linux-x64-gnu@$VERSION \
+              zod-rs-node-linux-arm64-gnu@$VERSION \
+              zod-rs-node-linux-x64-musl@$VERSION \
+              zod-rs-node-linux-arm64-musl@$VERSION \
+              zod-rs-node-darwin-x64@$VERSION \
+              zod-rs-node-darwin-arm64@$VERSION \
+              zod-rs-node-win32-x64-msvc@$VERSION \
+              zod-rs-node-win32-arm64-msvc@$VERSION; then
+              break
+            fi
+            if [[ "$attempt" -eq 18 ]]; then
+              echo "npm could not install the public platform packages" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          case "$(node -e 'console.log(process.platform + "-" + process.arch)')" in
+            linux-x64) host_pkg="zod-rs-node-linux-x64-gnu" ;;
+            *)
+              echo "verify-public runner is not x64 Linux; direct platform exercise unsupported" >&2
+              exit 1
+              ;;
+          esac
+          (cd "$audit_root" && node - "$host_pkg" <<'EOF'
+          const addon = require(process.argv[2]);
+          const plan = addon.compile(JSON.stringify([{k:"string", checks:[]}]));
+          const verdict = addon.validateJson(plan, Buffer.from('"public-platform"'));
+          addon.dispose(plan);
+          if (verdict.status !== 0) throw new Error(`unexpected direct platform verdict ${verdict.status}`);
+          EOF
+          )
+
+          (cd "$audit_root" && npm audit signatures --json --include-attestations > "$RUNNER_TEMP/npm-platform-signatures.json")
+          cat "$RUNNER_TEMP/npm-main-signatures.json" "$RUNNER_TEMP/npm-platform-signatures.json" | \
+            jq -s '{"verified": [.[] | .verified[]?]}' > "$RUNNER_TEMP/npm-audit-signatures.json"
+          for pkg_name in "$NPM_NAME" $(jq -r '.[].name' "$ledger"); do
+            jq -e --arg name "$pkg_name" --arg version "$VERSION" '
+              .verified[]
+              | select(.name == $name and .version == $version)
+              | .attestationBundles[]
+              | select(.predicateType == "https://slsa.dev/provenance/v1")
+            ' "$RUNNER_TEMP/npm-audit-signatures.json" > /dev/null
+          done
+
+          while IFS=$'\t' read -r target pkg_name integrity; do
+            response="$RUNNER_TEMP/verify-platform-$target.json"
+            if ! status=$(curl --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              --output "$response" --write-out '%{http_code}' \
+              "https://registry.npmjs.org/$pkg_name/$VERSION"); then
+              echo "registry lookup failed for $pkg_name" >&2
+              exit 1
+            fi
+            test "$status" = 200 || { echo "$pkg_name $VERSION returned HTTP $status" >&2; exit 1; }
+            remote_integrity=$(jq -er --arg name "$pkg_name" --arg version "$VERSION" \
+              'select(.name == $name and .version == $version) | .dist.integrity' "$response")
+            test "$remote_integrity" = "$integrity" || { echo "integrity mismatch for $pkg_name" >&2; exit 1; }
+            attestation_url=$(jq -er '.dist.attestations.url' "$response")
+            node packages/zodrs/scripts/verify-npm-provenance.mjs \
+              "$attestation_url" "$pkg_name" "$VERSION" "$GITHUB_SHA" "$GITHUB_REF" "$integrity"
+          done < <(jq -r '.[] | [.target, .name, .integrity] | @tsv' "$ledger")
       - name: Prove a fresh public crates.io consumer
         shell: bash
         run: |

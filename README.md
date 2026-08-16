@@ -36,10 +36,13 @@ anything failing that was not excised is a bug.
 npm install zod-rs
 ```
 
-Requires Node 20.17 or later. The package embeds a prebuilt Linux x64 GNU
-N-API addon and a `wasm32-wasip1-threads` addon. On any other platform the
-loader skips the native tier and uses the embedded WASM addon; if that is
-unavailable too, validation falls back to the TypeScript validator.
+Requires Node 20.17 or later. Prebuilt N-API addons cover Linux GNU
+(x64/arm64), Linux musl (x64/arm64), macOS (x64/arm64), and Windows MSVC
+(x64/arm64) through optional platform packages. When the matching optional
+package is installed, native validation is selected by default. If optional
+dependencies are disabled or no matching native addon exists, the loader uses
+the embedded `wasm32-wasip1-threads` WASM addon; if that is unavailable too,
+validation falls back to the TypeScript validator.
 
 ## Quickstart
 
@@ -95,6 +98,19 @@ normal use.
 | | `none` | No Rust backend; TypeScript validator only |
 | `ZODRS_BACKEND` | `interpreter` | Forces the tree-walking interpreter over compiled codegen |
 
+Native platform packages (installed automatically as optional dependencies):
+
+| Platform | Package |
+|---|---|
+| Linux x64 (GNU) | `zod-rs-node-linux-x64-gnu` |
+| Linux arm64 (GNU) | `zod-rs-node-linux-arm64-gnu` |
+| Linux x64 (musl) | `zod-rs-node-linux-x64-musl` |
+| Linux arm64 (musl) | `zod-rs-node-linux-arm64-musl` |
+| macOS x64 | `zod-rs-node-darwin-x64` |
+| macOS arm64 | `zod-rs-node-darwin-arm64` |
+| Windows x64 (MSVC) | `zod-rs-node-win32-x64-msvc` |
+| Windows arm64 (MSVC) | `zod-rs-node-win32-arm64-msvc` |
+
 The suite runs all four lanes. Each passes 5,679 tests across 435 files.
 
 ## Benchmarks
@@ -114,15 +130,16 @@ comparison set is fixed in `packages/bench/gate.mjs`.
 | `z.string().datetime().parse` | 10,000 ISO strings | 820 | 441 | 1.86x |
 | `z.object()` initialization | build 1,000 schemas | 12 | 7 | 1.71x |
 | `z.object().parse` | 1,000 3-field objects | 19,812 | 17,871 | 1.11x |
-| `safeParseJson` | one 4 KB nested payload | 21,433 | 21,699 | 0.99x |
+| `safeParseJson` | 100 x 4 KB nested payloads | 233 | 213 | 1.09x |
 
 An op is a whole suite workload, not one value, and the workloads differ. Read
 each row across its two engine columns; do not compare rows to each other.
 
 The `safeParseJson` row measures `zodrs.safeParseJson(buffer)` against
-`zod4.safeParse(JSON.parse(json))`. At 0.99x it is a tie, and it is the one
-cell of the release gate that did not pass on this run: the gate requires
-every comparison to reach at least 1.00x.
+`zod4.safeParse(JSON.parse(json))`. One Tinybench callback iterates 100
+parses of the same ~4 KB nested payload, matching the batch-per-op pattern
+used by every other suite. At 1.09x zodrs is faster, and the cell passes
+the release gate, which requires every comparison to reach at least 1.00x.
 
 Reproduce the full gate with three runs into distinct directories, then the
 median-of-three comparison:

@@ -74,6 +74,7 @@
     "dist",
     "dist-cjs",
     "native",
+    "!native/*.node",
     "wasm",
     "!dist/**/*.test.*",
     "!dist/**/*.selftest.*",
@@ -87,13 +88,14 @@
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\n')\"",
     "build:esm": "tsc -p tsconfig.build.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist-cjs/package.json',JSON.stringify({type:'commonjs',imports:{'#module-url':'./core/module-url-cjs.js'}})+'\\n')\"",
-    "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --target x86_64-unknown-linux-gnu --output-dir ../../packages/zodrs/native",
+    "build:native": "cd ../../crates/zodrs-node && napi build --platform --release --output-dir ../../packages/zodrs/native",
+    "build:native:target": "node scripts/build-native-target.mjs",
     "build:wasm": "cd ../../crates/zodrs-node && napi build --platform --release --target wasm32-wasip1-threads --output-dir ../../packages/zodrs/wasm && cd ../../packages/zodrs && node -e \"const fs=require('fs');fs.rmSync('wasm/zodrs_node.wasm32-wasi.debug.wasm',{force:true});fs.copyFileSync('wasm/index.d.ts','wasm/zodrs_node.wasi.d.cts')\"",
     "selftest:native": "ZODRS_LOADER=native node dist/core/loader.selftest.js",
     "selftest:wasm": "ZODRS_LOADER=wasm node dist/core/loader.selftest.js",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "verify:installed": "node scripts/verify-installed.mjs",
-    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && pnpm run verify:artifacts",
+    "prepack": "pnpm run build && pnpm run build:native && pnpm run build:wasm && pnpm run selftest:native && pnpm run selftest:wasm && node -e \"for(const f of require('fs').readdirSync('native'))if(f.endsWith('.node'))require('fs').rmSync('native/'+f)\" && pnpm run verify:artifacts",
     "test": "node --test scripts/*.test.mjs && vitest run"
   },
   "engines": {
@@ -103,6 +105,16 @@
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
     "@napi-rs/wasm-runtime": "1.1.6"
+  },
+  "optionalDependencies": {
+    "zod-rs-node-linux-x64-gnu": "0.1.3",
+    "zod-rs-node-linux-arm64-gnu": "0.1.3",
+    "zod-rs-node-linux-x64-musl": "0.1.3",
+    "zod-rs-node-linux-arm64-musl": "0.1.3",
+    "zod-rs-node-darwin-x64": "0.1.3",
+    "zod-rs-node-darwin-arm64": "0.1.3",
+    "zod-rs-node-win32-x64-msvc": "0.1.3",
+    "zod-rs-node-win32-arm64-msvc": "0.1.3"
   },
   "publishConfig": {
     "name": "zod-rs"

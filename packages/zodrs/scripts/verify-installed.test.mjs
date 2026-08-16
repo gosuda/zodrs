@@ -1,74 +1,43 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-// Regression contract for PR #17: the native triple must be resolved only
-// after tier selection and only for the native tier. The WASM file set is
-// static and host-independent, so `verify-installed <dir> wasm` must work on
-// hosts that ship no native artifact. Spoofing process.platform/arch BEFORE
-// the dynamic import proves the module performs no eager host probing.
+import { hostDescriptor, resolveWasmTierFiles } from "./verify-installed.mjs";
 
-const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-const archDescriptor = Object.getOwnPropertyDescriptor(process, "arch");
-
-function spoofHost(platform, arch) {
-  Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
-  Object.defineProperty(process, "arch", { ...archDescriptor, value: arch });
-}
-
-function restoreHost() {
-  Object.defineProperty(process, "platform", platformDescriptor);
-  Object.defineProperty(process, "arch", archDescriptor);
-}
-
-const modulePromise = (async () => {
-  spoofHost("win32", "arm64");
-  try {
-    return await import("./verify-installed.mjs");
-  } finally {
-    restoreHost();
-  }
-})();
-
-test("importing the verifier never probes the native triple", async () => {
-  const { resolveTierFiles } = await modulePromise;
-  assert.equal(typeof resolveTierFiles, "function");
+test("WASM tier files are host-independent", () => {
+  assert.deepEqual(resolveWasmTierFiles(), {
+    entry: "wasm/zodrs_node.wasi.cjs",
+    files: [
+      "wasm/zodrs_node.wasi.cjs",
+      "wasm/zodrs_node.wasm32-wasi.wasm",
+      "wasm/wasi-worker.mjs",
+    ],
+  });
 });
 
-test("WASM tier files are static and host-independent", async () => {
-  const { resolveTierFiles } = await modulePromise;
-  spoofHost("darwin", "arm64");
-  try {
-    assert.deepEqual(resolveTierFiles("wasm"), {
-      entry: "wasm/zodrs_node.wasi.cjs",
-      files: ["wasm/zodrs_node.wasi.cjs", "wasm/zodrs_node.wasm32-wasi.wasm"],
-    });
-  } finally {
-    restoreHost();
+test("host descriptor covers every shipped native package", () => {
+  const hosts = [
+    ["linux", "x64", "gnu", "linux-x64-gnu"],
+    ["linux", "arm64", "gnu", "linux-arm64-gnu"],
+    ["linux", "x64", "musl", "linux-x64-musl"],
+    ["linux", "arm64", "musl", "linux-arm64-musl"],
+    ["darwin", "x64", undefined, "darwin-x64"],
+    ["darwin", "arm64", undefined, "darwin-arm64"],
+    ["win32", "x64", undefined, "win32-x64-msvc"],
+    ["win32", "arm64", undefined, "win32-arm64-msvc"],
+  ];
+
+  for (const [platform, arch, libc, expected] of hosts) {
+    assert.equal(hostDescriptor(platform, arch, libc), expected);
   }
 });
 
-test("native tier selects the same entry on a supported host", async () => {
-  const { resolveTierFiles } = await modulePromise;
-  spoofHost("linux", "x64");
-  try {
-    assert.deepEqual(resolveTierFiles("native"), {
-      entry: "native/zodrs_node.linux-x64-gnu.node",
-      files: ["native/zodrs_node.linux-x64-gnu.node"],
-    });
-  } finally {
-    restoreHost();
-  }
-});
-
-test("native tier fails closed on an unsupported host", async () => {
-  const { resolveTierFiles } = await modulePromise;
-  spoofHost("win32", "arm64");
-  try {
-    assert.throws(
-      () => resolveTierFiles("native"),
-      /unsupported host: platform="win32" arch="arm64"; no native artifact is shipped for this pair/,
-    );
-  } finally {
-    restoreHost();
-  }
+test("host descriptor rejects unshipped hosts", () => {
+  assert.throws(
+    () => hostDescriptor("aix", "ppc64"),
+    /unsupported host: platform="aix" arch="ppc64"/,
+  );
+  assert.throws(
+    () => hostDescriptor("linux", "x64", "other"),
+    /unsupported host: platform="linux" arch="x64"/,
+  );
 });

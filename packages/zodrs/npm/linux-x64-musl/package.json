@@ -1,0 +1,23 @@
+{
+  "name": "zod-rs-node-linux-x64-musl",
+  "version": "0.1.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/metaphorics/zodrs.git",
+    "directory": "packages/zodrs/npm/linux-x64-musl"
+  },
+  "cpu": [
+    "x64"
+  ],
+  "main": "zodrs_node.linux-x64-musl.node",
+  "files": [
+    "zodrs_node.linux-x64-musl.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "musl"
+  ]
+}

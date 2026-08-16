@@ -1,0 +1,23 @@
+{
+  "name": "zod-rs-node-linux-arm64-gnu",
+  "version": "0.1.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/metaphorics/zodrs.git",
+    "directory": "packages/zodrs/npm/linux-arm64-gnu"
+  },
+  "cpu": [
+    "arm64"
+  ],
+  "main": "zodrs_node.linux-arm64-gnu.node",
+  "files": [
+    "zodrs_node.linux-arm64-gnu.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

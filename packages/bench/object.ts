@@ -172,13 +172,20 @@ const bench = metabench("z.object().parse", {
   },
 });
 
-// parseJson variant — separate group so it gets its own table
+// parseJson variant — separate group so it gets its own table.
+//
+// One op is a batch, not a single parse. A single ~48us parse per op left
+// this cell swinging between 0.90x and 1.12x across runs of the SAME binary,
+// which is wider than the effects the release gate is asked to judge. Every
+// other suite already amortizes a batch per op; this one now matches.
+const JSON_BATCH = 100;
+
 const benchJson = metabench("object.safeParseJson (4KB payload)", {
   "zodrs.safeParseJson"() {
-    consume(zodrsLargeSchema.safeParseJson(largeBuf));
+    for (let i = 0; i < JSON_BATCH; i++) consume(zodrsLargeSchema.safeParseJson(largeBuf));
   },
   "zod4 (JSON.parse + safeParse)"() {
-    consume(z4LargeSchema.safeParse(JSON.parse(largeJson)));
+    for (let i = 0; i < JSON_BATCH; i++) consume(z4LargeSchema.safeParse(JSON.parse(largeJson)));
   },
 });
 
