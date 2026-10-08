@@ -1001,7 +1001,7 @@ async function runAsync(node: SchemaNode, input: unknown, context: ValidationCon
     }
     if (node.op === "superRefine" || node.op === "check") return (context.issues?.length ?? 0) > before ? FAIL : base;
     if ((context.issues?.length ?? 0) > before) return FAIL;
-    if (node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode") {
+    if (transformingHostOp(node.op)) {
       context.fallback = (context.fallback ?? 0) + 1;
     }
     return result;
