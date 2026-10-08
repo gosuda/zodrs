@@ -19,7 +19,8 @@ import { globalRegistry } from "./registries.js";
 import type { $ZodRegistry, $ZodRegistrySchema, GlobalMeta } from "./registries.js";
 import type { FormatId, SchemaNode } from "./nodes.js";
 import { bagOf } from "./introspect.js";
-import { escapeRegex } from "./util.js";
+import { DATE_SOURCE, PATTERNS, datetimePattern, hashFormatPattern, macPattern, timeSource } from "./formats.js";
+import { NUMBER_FORMAT_RANGES, escapeRegex } from "./util.js";
 import type { BaseSchema, JSONSchema } from "./json-schema-types.js";
 
 // ---------------------------------------------------------------------------
@@ -226,97 +227,32 @@ const FORMAT_NAME_MAP: Record<string, string> = {
   regex: "", // sentinel: delete the format key
 };
 
-const STATIC_FORMAT_PATTERNS: Record<string, string> = {
-  cuid: "^[cC][0-9a-z]{6,}$",
-  cuid2: "^[0-9a-z]+$",
-  ulid: "^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$",
-  xid: "^[0-9a-vA-V]{20}$",
-  ksuid: "^[A-Za-z0-9]{27}$",
-  nanoid: "^[a-zA-Z0-9_-]{21}$",
-  duration:
-    "^P(?:(\\d+W)|(?!.*W)(?=\\d|T\\d)(\\d+Y)?(\\d+M)?(\\d+D)?(T(?=\\d)(\\d+H)?(\\d+M)?(\\d+([.,]\\d+)?S)?)?)$",
-  extendedDuration:
-    "^[-+]?P(?!$)(?:(?:[-+]?\\d+Y)|(?:[-+]?\\d+[.,]\\d+Y$))?(?:(?:[-+]?\\d+M)|(?:[-+]?\\d+[.,]\\d+M$))?(?:(?:[-+]?\\d+W)|(?:[-+]?\\d+[.,]\\d+W$))?(?:(?:[-+]?\\d+D)|(?:[-+]?\\d+[.,]\\d+D$))?(?:T(?=[\\d+-])(?:(?:[-+]?\\d+H)|(?:[-+]?\\d+[.,]\\d+H$))?(?:(?:[-+]?\\d+M)|(?:[-+]?\\d+[.,]\\d+M$))?(?:[-+]?\\d+(?:[.,]\\d+)?S)??)$",
-  guid: "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
-  uuid: "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-  uuidv4: "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
-  uuidv6: "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-6[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
-  uuidv7: "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$",
-  email: "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
-  html5Email:
-    "^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$",
-  rfc5322Email:
-    "^(([^<>()\\[\\]\\\\.,;:\\s@\"]+(\\.[^<>()\\[\\]\\\\.,;:\\s@\"]+)*)|(\".+\"))@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}])|(([a-zA-Z\\-0-9]+\\.)+[a-zA-Z]{2,}))$",
-  unicodeEmail: "^[^\\s@\"]{1,64}@[^\\s@]{1,255}$",
-  emoji: "^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$",
-  ipv4: "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$",
-  ipv6: "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$",
-  cidrv4: "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/([0-9]|[1-2][0-9]|3[0-2])$",
-  cidrv6: "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))\\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$",
-  base64: "^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$",
-  base64url: "^[A-Za-z0-9_-]*$",
-  hostname: "^(?=.{1,253}\\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\\.?$",
-  e164: "^\\+[1-9]\\d{6,14}$",
-  lowercase: "^[^A-Z]*$",
-  uppercase: "^[^a-z]*$",
-  hex: "^[0-9a-fA-F]*$",
-};
+// `PATTERNS` is the source of truth in formats.ts; JSON Schema emits the
+// same literals minus `domain`/`httpProtocol`, which carry no pattern in
+// zod's own toJSONSchema output.
+const STATIC_FORMAT_PATTERNS: Record<string, string> = Object.fromEntries(
+  Object.entries(PATTERNS)
+    .filter(([name]) => name !== "domain" && name !== "httpProtocol")
+    .map(([name, re]) => [name, re.source]),
+);
 
-const DATE_SOURCE =
-  "(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))";
 
-const HASH_LENGTHS: Record<string, readonly [number, number, string]> = {
-  md5: [32, 22, "=="],
-  sha1: [40, 27, "="],
-  sha256: [64, 43, "="],
-  sha384: [96, 64, ""],
-  sha512: [128, 86, "=="],
-};
 
-function timeSource(precision: unknown): string {
-  const hhmm = "(?:[01]\\d|2[0-3]):[0-5]\\d";
-  if (typeof precision === "number") {
-    if (precision === -1) return hhmm;
-    if (precision === 0) return `${hhmm}:[0-5]\\d`;
-    return `${hhmm}:[0-5]\\d\\.\\d{${precision}}`;
-  }
-  return `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
-}
+
 
 /** JSON Schema `pattern` for a string format check, or undefined when the format carries no pattern. */
 function formatPattern(format: FormatId, params: Record<string, unknown> | undefined): string | undefined {
   if (format === "date") return `^${DATE_SOURCE}$`;
   if (format === "time") return `^${timeSource(params?.["precision"])}$`;
-  if (format === "datetime") {
-    const time = timeSource(params?.["precision"]);
-    const opts = ["Z"];
-    if (params?.["local"] === true) opts.push("");
-    if (params?.["offset"] === true) opts.push("([+-](?:[01]\\d|2[0-3]):[0-5]\\d)");
-    return `^${DATE_SOURCE}T(?:${time}(?:${opts.join("|")}))$`;
-  }
+  if (format === "datetime") return datetimePattern(params ?? {});
   if (format === "mac") {
-    const delimiter = typeof params?.["delimiter"] === "string" ? params["delimiter"] : ":";
-    const d = escapeRegex(delimiter);
-    return `^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`;
+    return macPattern(typeof params?.["delimiter"] === "string" ? params["delimiter"] : ":");
   }
-  const hash = HASH_LENGTHS[format];
-  if (hash) {
-    const [hexLength, base64Length, padding] = hash;
-    const encoding = typeof params?.["enc"] === "string" ? params["enc"] : "hex";
-    if (encoding === "hex") return `^[0-9a-fA-F]{${hexLength}}$`;
-    if (encoding === "base64url") return `^[A-Za-z0-9_-]{${base64Length}}$`;
-    return `^[A-Za-z0-9+/]{${base64Length}}${escapeRegex(padding)}$`;
-  }
+  const hash = hashFormatPattern(format, typeof params?.["enc"] === "string" ? params["enc"] : "hex");
+  if (hash) return hash;
   return STATIC_FORMAT_PATTERNS[format];
 }
 
-const NUMBER_FORMAT_BOUNDS: Record<string, readonly [number, number]> = {
-  int32: [-2147483648, 2147483647],
-  uint32: [0, 4294967295],
-  float32: [-3.4028234663852886e38, 3.4028234663852886e38],
-  float64: [-Number.MAX_VALUE, Number.MAX_VALUE],
-  safeint: [-9007199254740991, 9007199254740991],
-};
 
 // ---------------------------------------------------------------------------
 // Node-shape predicates
@@ -574,7 +510,7 @@ function processNode(schema: SchemaLike, node: SchemaNode, seen: Seen, ctx: GenC
             if (typeof check.v === "number") multipleOf ??= check.v;
             break;
           case "number_format": {
-            const bounds = NUMBER_FORMAT_BOUNDS[check.v];
+            const bounds = NUMBER_FORMAT_RANGES[check.v as keyof typeof NUMBER_FORMAT_RANGES];
             if (bounds) {
               [minimum, maximum] = bounds;
               if (check.v.includes("int")) integer = true;

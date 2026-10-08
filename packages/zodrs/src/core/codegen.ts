@@ -125,14 +125,21 @@ function snap(path: Path, key: PropertyKey | undefined): Path {
   return key === undefined ? path.slice() : [...path, key];
 }
 
+/** Shared issue shape: `{ ...details, input, path, inst }` in interpreter key order, plus `continue: true` for check issues. */
+function emitIssue(context: Ctx, error: unknown, details: Readonly<Record<string, unknown>>, input: unknown, path: Path, key: PropertyKey | undefined, cont: boolean): void {
+  const raw = { ...details, input, path: snap(path, key), inst: { error } } as $ZodRawIssue;
+  if (cont) raw.continue = true;
+  (context.issues ??= []).push(raw);
+}
+
 /** Type-issue shape: `{ ...details, input, path, inst }` — interpreter key order. */
 function nodeIssue(context: Ctx, error: unknown, details: Readonly<Record<string, unknown>>, input: unknown, path: Path, key: PropertyKey | undefined): void {
-  (context.issues ??= []).push({ ...details, input, path: snap(path, key), inst: { error } } as $ZodRawIssue);
+  emitIssue(context, error, details, input, path, key, false);
 }
 
 /** Check-issue shape for compiled checks (abort !== true ⇒ continue: true). */
 function checkIssue(context: Ctx, error: unknown, details: Readonly<Record<string, unknown>>, input: unknown, path: Path, key: PropertyKey | undefined): void {
-  (context.issues ??= []).push({ ...details, input, path: snap(path, key), inst: { error }, continue: true } as $ZodRawIssue);
+  emitIssue(context, error, details, input, path, key, true);
 }
 
 // ─── Wire-check leaves ─────────────────────────────────────────────────────
