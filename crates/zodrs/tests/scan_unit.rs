@@ -23,31 +23,20 @@ fn validate_status(plan_json: &str, input: &[u8]) -> u8 {
 
 #[test]
 fn clean_simple_object() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"passthrough","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"a":1,"b":2}"#), Scan::Clean);
 }
 
 #[test]
 fn defer_out_of_order_keys() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"passthrough","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#;
     // Keys arrive in the wrong order; DOM walk must rewrite.
     assert_eq!(scan(plan, br#"{"b":2,"a":1}"#), Scan::Defer);
 }
 
 #[test]
 fn defer_unknown_key_in_strip_mode() {
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"a":1,"b":2}"#), Scan::Defer);
 }
 
@@ -102,40 +91,28 @@ fn defer_safeint_over() {
 
 #[test]
 fn clean_empty_string_key() {
-    let plan = r#"[
-        {"k":"object","keys":[""],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":[""],"values":[1],"mode":"passthrough","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"":1}"#), Scan::Clean);
 }
 
 #[test]
 fn clean_long_object_key() {
     // "verylongkey" is > 8 bytes; should hit the `long` vec path.
-    let plan = r#"[
-        {"k":"object","keys":["verylongkey"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["verylongkey"],"values":[1],"mode":"passthrough","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"verylongkey":1}"#), Scan::Clean);
 }
 
 #[test]
 fn clean_eight_byte_key() {
     // 8 bytes is the upper boundary of the packed-word path (kb.len() <= 8).
-    let plan = r#"[
-        {"k":"object","keys":["abcdefgh"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["abcdefgh"],"values":[1],"mode":"passthrough","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"abcdefgh":1}"#), Scan::Clean);
 }
 
 #[test]
 fn clean_nine_byte_key() {
     // 9 bytes crosses into the `long` vec path (kb.len() > 8).
-    let plan = r#"[
-        {"k":"object","keys":["abcdefghi"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["abcdefghi"],"values":[1],"mode":"passthrough","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"abcdefghi":1}"#), Scan::Clean);
 }
 
@@ -143,11 +120,7 @@ fn clean_nine_byte_key() {
 fn clean_eight_byte_keys_differ_in_last_byte() {
     // Two 8-byte keys that differ only in the final byte; strict mode so a
     // pack_key collision would defer instead of silently passing through.
-    let plan = r#"[
-        {"k":"object","keys":["abcdefgh","abcdefgi"],"values":[1,2],"optional":[false,false],"mode":"strict","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["abcdefgh","abcdefgi"],"values":[1,2],"mode":"strict","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"abcdefgh":1,"abcdefgi":2}"#), Scan::Clean);
 }
 
@@ -155,11 +128,7 @@ fn clean_eight_byte_keys_differ_in_last_byte() {
 fn defer_mixed_short_and_long_keys_out_of_order() {
     // One key on the `words` path (8 bytes) and one on the `long` path (11
     // bytes), arriving out of order — the DOM walk must rewrite.
-    let plan = r#"[
-        {"k":"object","keys":["abcdefgh","verylongkey"],"values":[1,2],"optional":[false,false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["abcdefgh","verylongkey"],"values":[1,2],"mode":"passthrough","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#;
     assert_eq!(
         scan(plan, br#"{"verylongkey":2,"abcdefgh":1}"#),
         Scan::Defer
@@ -168,10 +137,7 @@ fn defer_mixed_short_and_long_keys_out_of_order() {
 
 #[test]
 fn defer_duplicate_object_key() {
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"passthrough","catchall":null},{"k":"number","checks":[]}]"#;
     // Duplicate keys collapse to the last value in the DOM walk; scanner must defer.
     assert_eq!(scan(plan, br#"{"a":1,"a":2}"#), Scan::Defer);
 }
@@ -180,11 +146,7 @@ fn defer_duplicate_object_key() {
 fn defer_dirty_object_in_array_no_depth_underflow() {
     // A strip-mode object that sets dirty mid-array must not underflow the
     // depth counter when the array loop continues to the next element.
-    let plan = r#"[
-        {"k":"array","element":1,"checks":[]},
-        {"k":"object","keys":["a"],"values":[2],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"array","element":1,"checks":[]},{"k":"object","keys":["a"],"values":[2],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"[{"a":1,"b":2},2]"#), Scan::Defer);
 }
 
@@ -310,11 +272,7 @@ fn defer_float64_over() {
 #[test]
 fn clean_catchall_unknown_string() {
     // Object with catchall string: unknown keys validated via catchall stay Clean
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
-        {"k":"number","checks":[]},
-        {"k":"string","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":2},{"k":"number","checks":[]},{"k":"string","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"a":1,"b":"hello"}"#), Scan::Clean);
 }
 
@@ -322,20 +280,13 @@ fn clean_catchall_unknown_string() {
 fn defer_catchall_unknown_dirty() {
     // Same catchall but with an overwrite check; unknown key value needing
     // trim rewrites -> dirty_hint -> Defer, distinct from strip/passthrough.
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
-        {"k":"number","checks":[]},
-        {"k":"string","checks":[{"c":"overwrite","v":"trim","op":"trim"}]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":2},{"k":"number","checks":[]},{"k":"string","checks":[{"c":"overwrite","v":"trim","op":"trim"}]}]"#;
     assert_eq!(scan(plan, br#"{"a":1,"b":"  hello  "}"#), Scan::Defer);
 }
 
 #[test]
 fn defer_strict_unknown_key() {
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strict","catchall":null},{"k":"number","checks":[]}]"#;
     // Strict mode unknown key is a hard failure -> Defer (not dirty write but still not Clean)
     assert_eq!(scan(plan, br#"{"a":1,"b":2}"#), Scan::Defer);
 }
@@ -350,7 +301,7 @@ fn bigint_plan_is_not_json_eligible() {
     let p = r#"[{"k":"bigint","checks":[{"c":"lt","v":"9223372036854775807","inclusive":true,"bigint":true}],"coerce":true}]"#;
     assert!(!compile(p).unwrap().json_eligible);
     // Nested behind a container, not just at the root.
-    let nested = r#"[{"k":"object","keys":["id"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"bigint","checks":[],"coerce":true}]"#;
+    let nested = r#"[{"k":"object","keys":["id"],"values":[1],"mode":"strip","catchall":null},{"k":"bigint","checks":[],"coerce":true}]"#;
     assert!(!compile(nested).unwrap().json_eligible);
     // A bigint-free sibling plan stays eligible, so the rule is not over-broad.
     let plain = r#"[{"k":"number","checks":[]}]"#;
@@ -444,12 +395,7 @@ fn utf16_includes_past_end_empty_succeeds() {
 }
 #[test]
 fn clean_absent_optional_field() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"optional","inner":3},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,4],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"optional","inner":3},{"k":"number","checks":[]},{"k":"optional","inner":2}]"#;
     assert_eq!(
         scan(plan, br#"{"a":1}"#),
         Scan::Clean,
@@ -460,36 +406,21 @@ fn clean_absent_optional_field() {
 
 #[test]
 fn clean_absent_optional_nested() {
-    let plan = r#"[
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"object","keys":["b"],"values":[2],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"optional","inner":3},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"object","keys":["b"],"values":[4],"mode":"strip","catchall":null},{"k":"optional","inner":3},{"k":"number","checks":[]},{"k":"optional","inner":2}]"#;
     assert_eq!(scan(plan, br#"{"a":{}}"#), Scan::Clean);
     assert_eq!(validate_status(plan, br#"{"a":{}}"#), 0);
 }
 
 #[test]
 fn defer_absent_required_field() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
     assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
 }
 
 #[test]
 fn defer_absent_optional_default() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"optional","inner":3},
-        {"k":"default","inner":4,"value":5},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,5],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"optional","inner":3},{"k":"default","inner":4,"value":5},{"k":"number","checks":[]},{"k":"optional","inner":2}]"#;
     assert_eq!(
         scan(plan, br#"{"a":1}"#),
         Scan::Defer,
@@ -502,13 +433,7 @@ fn defer_absent_optional_default() {
 fn clean_absent_optional_catch() {
     // A fired catch is zod's only `fallback`: handleOptionalResult swallows
     // it to `undefined` under Optional, so the key drops out cleanly.
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"optional","inner":3},
-        {"k":"catch","inner":4,"value":5},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,5],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"optional","inner":3},{"k":"catch","inner":4,"value":5},{"k":"number","checks":[]},{"k":"optional","inner":2}]"#;
     assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Clean);
     assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
 }
@@ -520,15 +445,7 @@ fn defer_absent_optional_coerce_union() {
     // catch fallbacks: Optional does not swallow them (zod returns
     // {"b":"undefined"}). A flag mis-set on the coerce arm would swallow the
     // value and wrongly report Clean.
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"optional","inner":3},
-        {"k":"union","options":[4,5]},
-        {"k":"string","checks":[],"coerce":true},
-        {"k":"optional","inner":6},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,7],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"optional","inner":3},{"k":"union","options":[4,5]},{"k":"string","checks":[],"coerce":true},{"k":"optional","inner":6},{"k":"number","checks":[]},{"k":"optional","inner":2}]"#;
     assert_eq!(
         scan(plan, br#"{"a":1}"#),
         Scan::Defer,
@@ -544,13 +461,7 @@ fn defer_absent_optional_coerce_union() {
 
 #[test]
 fn defer_absent_nonoptional() {
-    let plan = r#"[
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]},
-        {"k":"nonoptional","inner":3},
-        {"k":"optional","inner":4},
-        {"k":"number","checks":[]}
-    ]"#;
+    let plan = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"nonoptional","inner":3},{"k":"optional","inner":4},{"k":"number","checks":[]}]"#;
     assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
     assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
 }
@@ -653,4 +564,52 @@ fn defer_tuple_catch_tail() {
     let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
     assert_eq!(verdict.status, 1);
     assert_eq!(verdict.payload.as_deref(), Some("[1,9]"));
+}
+#[test]
+fn defer_tuple_discunion_optional_tail() {
+    // `optin_optional` folds DiscUnion like Union: a discunion containing an
+    // optional-input branch accepts an absent tail slot, which the DOM walk
+    // then swallows instead of emitting `too_small`.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"discunion","key":"t","map":[["x",3]]},
+        {"k":"optional","inner":4},
+        {"k":"object","keys":["t"],"values":[5],"mode":"strip","catchall":null},
+        {"k":"literal","values":["x"]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+}
+
+#[test]
+fn defer_tuple_discunion_required_tail() {
+    // All-required discunion options are not input-optional: the short input
+    // stays a canonical `too_small`.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"discunion","key":"t","map":[["x",3]]},
+        {"k":"object","keys":["t"],"values":[4],"mode":"strip","catchall":null},
+        {"k":"literal","values":["x"]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn clean_absent_discunion_optional_field() {
+    // The object tail takes the same gate: an optin discunion field drops out
+    // cleanly; the classifier itself reports Fail on the unmodeled node, so
+    // the scan still defers but the DOM swallows the issues.
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"discunion","key":"t","map":[["x",3]]},
+        {"k":"optional","inner":4},
+        {"k":"object","keys":["t"],"values":[5],"mode":"strip","catchall":null},
+        {"k":"literal","values":["x"]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
 }

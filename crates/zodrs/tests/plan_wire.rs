@@ -85,12 +85,9 @@ fn tag_position_does_not_matter() {
 /// the fixture is deliberately unsorted.
 #[test]
 fn default_object_keeps_plan_key_order() {
-    let compiled = ok(r#"[
-        {"k":"object","keys":["cfg"],"values":[1],"optional":[true],"mode":"strip"},
-        {"k":"default","inner":2,"value":{"zeta":1,"alpha":2,"mid":3}},
-        {"k":"object","keys":["zeta","alpha","mid"],"values":[3,3,3],"optional":[false,false,false],"mode":"strip"},
-        {"k":"number","checks":[{"c":"gt","v":0,"inclusive":false}]}
-    ]"#);
+    let compiled = ok(
+        r#"[{"k":"object","keys":["cfg"],"values":[4],"mode":"strip"},{"k":"default","inner":2,"value":{"zeta":1,"alpha":2,"mid":3}},{"k":"object","keys":["zeta","alpha","mid"],"values":[3,3,3],"mode":"strip"},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":false}]},{"k":"optional","inner":1}]"#,
+    );
 
     let verdict = validate(&compiled, b"{}");
     assert_eq!(verdict.status, 1, "default must rewrite the output");
@@ -104,13 +101,9 @@ fn default_object_keeps_plan_key_order() {
 /// together.
 #[test]
 fn default_nested_containers_keep_order() {
-    let compiled = ok(r#"[
-        {"k":"object","keys":["rows"],"values":[1],"optional":[true],"mode":"strip"},
-        {"k":"default","inner":2,"value":[{"b":1,"a":2},{"d":3,"c":4}]},
-        {"k":"array","element":3},
-        {"k":"object","keys":["b","a","d","c"],"values":[4,4,4,4],"optional":[true,true,true,true],"mode":"passthrough"},
-        {"k":"number"}
-    ]"#);
+    let compiled = ok(
+        r#"[{"k":"object","keys":["rows"],"values":[5],"mode":"strip"},{"k":"default","inner":2,"value":[{"b":1,"a":2},{"d":3,"c":4}]},{"k":"array","element":3},{"k":"object","keys":["b","a","d","c"],"values":[6,7,8,9],"mode":"passthrough"},{"k":"number"},{"k":"optional","inner":1},{"k":"optional","inner":4},{"k":"optional","inner":4},{"k":"optional","inner":4},{"k":"optional","inner":4}]"#,
+    );
 
     let verdict = validate(&compiled, b"{}");
     assert_eq!(verdict.status, 1);

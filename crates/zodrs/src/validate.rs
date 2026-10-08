@@ -1014,7 +1014,6 @@ impl<'p> Validator<'p> {
         let PlanNode::Object {
             keys,
             values,
-            optional,
             mode,
             catchall,
             ..
@@ -1075,7 +1074,11 @@ impl<'p> Validator<'p> {
         for (schema_i, key) in keys.iter().enumerate() {
             let slot = pos[schema_i];
             if slot == u32::MAX {
-                self.check_missing_object_field(values[schema_i], optional[schema_i], key.as_str());
+                self.check_missing_object_field(
+                    values[schema_i],
+                    self.dispatch(values[schema_i]).optin_optional,
+                    key.as_str(),
+                );
                 if self.fallback {
                     return;
                 }

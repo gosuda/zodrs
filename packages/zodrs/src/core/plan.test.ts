@@ -25,7 +25,6 @@ describe("compilePlan", () => {
           k: "object",
           keys: ["a", "b"],
           values: [1, 2],
-          optional: [false, false],
           mode: "strip",
           catchall: null,
         },

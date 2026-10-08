@@ -469,6 +469,15 @@ fn optionality(
             }
             flags
         }
+        PlanNode::DiscUnion { map, .. } => {
+            let mut flags = (false, false);
+            for (_, opt) in map {
+                let (optin, optout) = optionality(nodes, memo, visiting, *opt);
+                flags.0 |= optin;
+                flags.1 |= optout;
+            }
+            flags
+        }
         PlanNode::Pipe { a, b } => (
             optionality(nodes, memo, visiting, *a).0,
             optionality(nodes, memo, visiting, *b).1,
@@ -520,14 +529,13 @@ fn compile_js_regex(src: &str, flags: &str) -> Result<Regex, ()> {
 fn validate_object_edges(
     key_count: usize,
     values: &[NodeId],
-    optional_count: usize,
     catchall: Option<NodeId>,
     len: usize,
     at: usize,
 ) -> Result<(), CompileError> {
-    if key_count != values.len() || key_count != optional_count {
+    if key_count != values.len() {
         return Err(CompileError::new(format!(
-            "node {at} object keys/values/optional lengths differ"
+            "node {at} object keys/values lengths differ"
         )));
     }
     for id in values {
@@ -562,10 +570,9 @@ fn validate_arena(plan: &RawPlan) -> Result<(), CompileError> {
             PlanNode::Object {
                 keys,
                 values,
-                optional,
                 catchall,
                 ..
-            } => validate_object_edges(keys.len(), values, optional.len(), *catchall, len, at)?,
+            } => validate_object_edges(keys.len(), values, *catchall, len, at)?,
             PlanNode::Array { element, checks } => {
                 edge(*element, len, &here("array element"))?;
                 check_edges(checks, len, at)?;

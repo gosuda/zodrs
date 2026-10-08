@@ -6,7 +6,6 @@ import type {
   RuntimeCheck,
   SchemaNode,
 } from "./nodes.js";
-import { optinOf } from "./introspect.js";
 import type { JSONType } from "./util.js";
 
 export interface CompiledPlan {
@@ -292,7 +291,6 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
       if (schema.checks.length > 0) return poisonNode(state);
       const keys = Object.keys(schema.shape);
       const values: NodeId[] = [];
-      const optional: boolean[] = [];
       for (const key of keys) {
         state.objectShapeKeys.add(key);
         // A shape key that names an `Object.prototype` member resolves
@@ -304,7 +302,6 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
         if (!child) return poisonNode(state);
         values.push(emit(child, state));
         if (state.unsupported) return poisonNode(state);
-        optional.push(optinOf(child) === "optional");
       }
       const catchall = schema.catchall ? emit(schema.catchall, state) : null;
       if (state.unsupported) return poisonNode(state);
@@ -312,7 +309,6 @@ function serialize(schema: SchemaNode, state: EmitState): PlanNode {
         k: "object",
         keys,
         values,
-        optional,
         mode: schema.mode,
         catchall,
       };

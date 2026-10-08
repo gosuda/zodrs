@@ -33,7 +33,7 @@ fn truncated_escape_no_panic() {
 #[test]
 fn missing_default_rewrites() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},{"k":"default","inner":2,"value":5,"dynamic":false},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a"],"values":[3],"mode":"strip","catchall":null},{"k":"default","inner":2,"value":5,"dynamic":false},{"k":"number","checks":[]},{"k":"optional","inner":1}]"#,
     )
     .unwrap();
     let v = validate(&plan, b"{}");
@@ -45,7 +45,7 @@ fn missing_default_rewrites() {
 #[test]
 fn strip_unknown_key_rewrites() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":1,"x":2}"#);
@@ -62,21 +62,7 @@ fn strip_unknown_key_rewrites() {
 #[test]
 fn catch_inside_union_option_is_clean() {
     let plan = compile(
-        r#"[
-          {"k":"object","keys":["value"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-          {"k":"tuple","items":[2],"rest":null},
-          {"k":"optional","inner":3},
-          {"k":"union","options":[4,8]},
-          {"k":"record","key":5,"value":6},
-          {"k":"string","checks":[]},
-          {"k":"optional","inner":7},
-          {"k":"object","keys":["id","k1"],"values":[9,11],"optional":[false,true],"mode":"strip","catchall":null},
-          {"k":"boolean"},
-          {"k":"catch","inner":8,"value":true,"dynamic":false},
-          {"k":"boolean"},
-          {"k":"default","inner":12,"value":5,"dynamic":false},
-          {"k":"number","checks":[]}
-        ]"#,
+        r#"[{"k":"object","keys":["value"],"values":[1],"mode":"strip","catchall":null},{"k":"tuple","items":[2],"rest":null},{"k":"optional","inner":3},{"k":"union","options":[4,8]},{"k":"record","key":5,"value":6},{"k":"string","checks":[]},{"k":"optional","inner":7},{"k":"object","keys":["id","k1"],"values":[9,13],"mode":"strip","catchall":null},{"k":"boolean"},{"k":"catch","inner":8,"value":true,"dynamic":false},{"k":"boolean"},{"k":"default","inner":12,"value":5,"dynamic":false},{"k":"number","checks":[]},{"k":"optional","inner":11}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"value":[{"k1":{"id":true},"k2":{"id":1}}]}"#);
@@ -96,14 +82,7 @@ fn catch_inside_union_option_is_clean() {
 fn nested_union_success_leaves_no_fail_trace() {
     // union([string endsWith "yz", union([object strict {}, enum ["red","","a"]])])
     let plan = compile(
-        r#"[
-          {"k":"union","options":[1,3]},
-          {"k":"string","checks":[{"c":"ends_with","v":"yz"}]},
-          {"k":"string","checks":[]},
-          {"k":"union","options":[4,5]},
-          {"k":"object","keys":[],"values":[],"optional":[],"mode":"strict","catchall":null},
-          {"k":"enum","values":["red","","a"]}
-        ]"#,
+        r#"[{"k":"union","options":[1,3]},{"k":"string","checks":[{"c":"ends_with","v":"yz"}]},{"k":"string","checks":[]},{"k":"union","options":[4,5]},{"k":"object","keys":[],"values":[],"mode":"strict","catchall":null},{"k":"enum","values":["red","","a"]}]"#,
     )
     .unwrap();
     let v = validate(&plan, b"\"\"");
@@ -130,12 +109,7 @@ fn fuzz_seed24301_case2357() {
 #[test]
 fn repeated_union_node_reuses_the_decision_for_each_value() {
     let plan = compile(
-        r#"[
-          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"union","options":[2,3]},
-          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
-          {"k":"number","checks":[]}
-        ]"#,
+        r#"[{"k":"object","keys":["a","b"],"values":[1,1],"mode":"strip","catchall":null},{"k":"union","options":[2,3]},{"k":"string","checks":[{"c":"overwrite","op":"trim"}]},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":" x ","b":1}"#);
@@ -146,11 +120,7 @@ fn repeated_union_node_reuses_the_decision_for_each_value() {
 #[test]
 fn repeated_catch_node_keeps_inner_and_fallback_decisions_separate() {
     let plan = compile(
-        r#"[
-          {"k":"object","keys":["a","b"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"catch","inner":2,"value":"caught","dynamic":false},
-          {"k":"string","checks":[]}
-        ]"#,
+        r#"[{"k":"object","keys":["a","b"],"values":[1,1],"mode":"strip","catchall":null},{"k":"catch","inner":2,"value":"caught","dynamic":false},{"k":"string","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":"ok","b":1}"#);
@@ -161,16 +131,7 @@ fn repeated_catch_node_keeps_inner_and_fallback_decisions_separate() {
 #[test]
 fn dirty_discriminated_union_reuses_its_selected_branch() {
     let plan = compile(
-        r#"[
-          {"k":"discunion","key":"type","map":[["a",1],["b",5]]},
-          {"k":"object","keys":["type","value"],"values":[2,3],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"literal","values":["a"]},
-          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
-          {"k":"string","checks":[]},
-          {"k":"object","keys":["type","value"],"values":[6,7],"optional":[false,false],"mode":"strip","catchall":null},
-          {"k":"literal","values":["b"]},
-          {"k":"number","checks":[]}
-        ]"#,
+        r#"[{"k":"discunion","key":"type","map":[["a",1],["b",5]]},{"k":"object","keys":["type","value"],"values":[2,3],"mode":"strip","catchall":null},{"k":"literal","values":["a"]},{"k":"string","checks":[{"c":"overwrite","op":"trim"}]},{"k":"string","checks":[]},{"k":"object","keys":["type","value"],"values":[6,7],"mode":"strip","catchall":null},{"k":"literal","values":["b"]},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"type":"a","value":" x "}"#);
@@ -181,13 +142,7 @@ fn dirty_discriminated_union_reuses_its_selected_branch() {
 #[test]
 fn prefault_temporary_decisions_do_not_replace_present_value_decisions() {
     let plan = compile(
-        r#"[
-          {"k":"object","keys":["missing","present"],"values":[1,2],"optional":[true,false],"mode":"strip","catchall":null},
-          {"k":"prefault","inner":2,"value":" x ","dynamic":false},
-          {"k":"union","options":[3,4]},
-          {"k":"string","checks":[{"c":"overwrite","op":"trim"}]},
-          {"k":"number","checks":[]}
-        ]"#,
+        r#"[{"k":"object","keys":["missing","present"],"values":[5,2],"mode":"strip","catchall":null},{"k":"prefault","inner":2,"value":" x ","dynamic":false},{"k":"union","options":[3,4]},{"k":"string","checks":[{"c":"overwrite","op":"trim"}]},{"k":"number","checks":[]},{"k":"optional","inner":1}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"present":1}"#);
@@ -289,7 +244,7 @@ fn preflight_rejects_mismatched_closer() {
 #[test]
 fn canonical_object_keys_status_0() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":1,"b":2}"#);
@@ -301,7 +256,7 @@ fn canonical_object_keys_status_0() {
 #[test]
 fn out_of_order_object_keys_rewrite() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"b":2,"a":1}"#);
@@ -313,7 +268,7 @@ fn out_of_order_object_keys_rewrite() {
 #[test]
 fn duplicate_object_key_last_wins() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":1,"a":2}"#);
@@ -328,7 +283,7 @@ fn duplicate_object_key_last_wins() {
 #[test]
 fn strip_unknown_key_between_known_rewrites() {
     let plan = compile(
-        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
+        r#"[{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"number","checks":[]},{"k":"number","checks":[]}]"#,
     )
     .unwrap();
     let v = validate(&plan, br#"{"a":1,"x":9,"b":2}"#);

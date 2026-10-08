@@ -36,7 +36,7 @@ export type PlanNode =
   | { readonly k: "null" | "undefined" | "any" | "unknown" | "never" | "void" | "symbol" | "nan" }
   | { readonly k: "literal"; readonly values: (string | number | boolean | null)[] }
   | { readonly k: "enum"; readonly values: (string | number)[] }
-  | { readonly k: "object"; readonly keys: string[]; readonly values: NodeId[]; readonly optional: boolean[]; readonly mode: ObjectMode; readonly catchall: NodeId | null }
+  | { readonly k: "object"; readonly keys: string[]; readonly values: NodeId[]; readonly mode: ObjectMode; readonly catchall: NodeId | null }
   | { readonly k: "array"; readonly element: NodeId; readonly checks: Check[] }
   | { readonly k: "tuple"; readonly items: NodeId[]; readonly rest: NodeId | null }
   | { readonly k: "union"; readonly options: NodeId[] }
