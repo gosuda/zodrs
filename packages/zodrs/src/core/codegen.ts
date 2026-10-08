@@ -11,6 +11,7 @@ import {
   isObject,
   NUMBER_FORMAT_RANGES,
   shallowClone,
+  sizeOf,
 } from "./util.js";
 import type { FAIL as FailType, Primitive } from "./util.js";
 
@@ -147,14 +148,7 @@ type Leaf = (value: unknown, context: Ctx, path: Path, key: PropertyKey | undefi
 function sizeCompiler(kind: SchemaNode["kind"]): (value: unknown) => number {
   if (kind === "string" || kind === "array") return (value) => (value as { length: number }).length;
   if (kind === "set" || kind === "map") return (value) => (value as { size: number }).size;
-  return (value) =>
-    typeof value === "string" || Array.isArray(value)
-      ? value.length
-      : value instanceof Set || value instanceof Map
-        ? value.size
-        : isObject(value) && typeof value["size"] === "number"
-          ? (value as { size: number }).size
-          : 0;
+  return (value) => sizeOf(value);
 }
 
 function compileWireCheck(check: WireCheck, error: unknown, kind: SchemaNode["kind"], origin: string): Leaf {
@@ -162,27 +156,27 @@ function compileWireCheck(check: WireCheck, error: unknown, kind: SchemaNode["ki
     case "min_length":
     case "min_size": {
       const v = check.v;
-      const sizeOf = sizeCompiler(kind);
+      const measure = sizeCompiler(kind);
       return (value, context, path, key) =>
-        sizeOf(value) < v
+        measure(value) < v
           ? (checkIssue(context, error, { origin, code: "too_small", minimum: v, inclusive: true }, value, path, key), FAIL)
           : value;
     }
     case "max_length":
     case "max_size": {
       const v = check.v;
-      const sizeOf = sizeCompiler(kind);
+      const measure = sizeCompiler(kind);
       return (value, context, path, key) =>
-        sizeOf(value) > v
+        measure(value) > v
           ? (checkIssue(context, error, { origin, code: "too_big", maximum: v, inclusive: true }, value, path, key), FAIL)
           : value;
     }
     case "length":
     case "size": {
       const v = check.v;
-      const sizeOf = sizeCompiler(kind);
+      const measure = sizeCompiler(kind);
       return (value, context, path, key) => {
-        const size = sizeOf(value);
+        const size = measure(value);
         if (size === v) return value;
         if (size < v) checkIssue(context, error, { origin, code: "too_small", minimum: v, inclusive: true, exact: true }, value, path, key);
         else checkIssue(context, error, { origin, code: "too_big", maximum: v, inclusive: true, exact: true }, value, path, key);

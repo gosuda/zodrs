@@ -127,6 +127,19 @@ export function cleanRegex(source: string): string {
   return source.slice(start, end);
 }
 
+/** Generic length/size probe shared by the interpreter's check switch and the
+ *  codegen `sizeCompiler` fallback for container kinds without a dedicated
+ *  accessor. */
+export function sizeOf(value: unknown): number {
+  return typeof value === "string" || Array.isArray(value)
+    ? value.length
+    : value instanceof Set || value instanceof Map
+      ? value.size
+      : isObject(value) && typeof value["size"] === "number"
+        ? (value as { size: number }).size
+        : 0;
+}
+
 /** Remainder that tolerates binary-float representation error, scaled to the ratio. */
 export function floatSafeRemainder(val: number, step: number): number {
   const ratio = val / step;
