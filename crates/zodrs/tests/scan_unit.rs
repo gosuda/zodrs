@@ -612,16 +612,34 @@ fn clean_absent_shared_lazy_cycle_field() {
 }
 
 #[test]
+fn clean_absent_nullable_wrapped_optional_field() {
+    // Nullable delegates optionality to inner: the leaf's optin propagates
+    // across the wrapper, so the object tail treats the field as droppable.
+    let plan = r#"[
+        {"k":"object","keys":["x"],"values":[1],"mode":"strip","catchall":null},
+        {"k":"nullable","inner":2},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br"{}"), Scan::Clean);
+}
+
+#[test]
 fn deep_wrapper_chain_compiles_linearly() {
-    // A forward-pointing wrapper chain used to take N fixed-point passes —
-    // 20k nodes meant ~4×10^8 recomputes. The worklist propagation is linear.
+    // Nullable delegates optionality, so the optional leaf's flag propagates
+    // 20k steps backward through dependent edges — a full-pass fixed point
+    // takes 20k sweeps of 20k nodes; the worklist walks each edge once.
     let chain = 20_000;
-    let mut nodes: Vec<String> = (1..=chain)
-        .map(|i| format!(r#"{{"k":"optional","inner":{i}}}"#))
-        .collect();
+    let mut nodes = vec![
+        r#"{"k":"object","keys":["x"],"values":[1],"mode":"strip","catchall":null}"#.to_string(),
+    ];
+    for i in 1..=chain {
+        nodes.push(format!(r#"{{"k":"nullable","inner":{}}}"#, i + 1));
+    }
+    nodes.push(r#"{"k":"optional","inner":20002}"#.to_string());
     nodes.push(r#"{"k":"string","checks":[]}"#.to_string());
     let plan = compile(&format!("[{}]", nodes.join(","))).unwrap();
-    assert!(plan.nodes().len() > chain);
+    assert!(plan.json_eligible);
 }
 
 #[test]

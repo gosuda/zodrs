@@ -89,10 +89,26 @@ export function macPattern(delimiter: string): string {
   return `^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`;
 }
 
-// Parameterized formats build regexes per (format, params) pair; both
-// `testFormat` and `patternForFormat` call sites can run once per parsed
-// element, so compiled patterns are memoized on the wire-stable params.
+// Parameterized formats build regexes per (format, params) pair. `testFormat`
+// can run once per parsed element, so compiled patterns are memoized — keyed
+// on the params that shape the pattern, not the whole wire params (an `error`
+// message must not mint a new entry), and bounded so schema churn cannot grow
+// the module-global table without limit.
 const dynamicCache = new Map<string, RegExp | undefined>();
+const DYNAMIC_CACHE_LIMIT = 512;
+
+function dynamicKey(format: FormatId, params: Readonly<Record<string, unknown>>): string {
+  switch (format) {
+    case "time":
+      return `time ${params["precision"]}`;
+    case "datetime":
+      return `datetime ${params["precision"]} ${params["local"]} ${params["offset"]}`;
+    case "mac":
+      return `mac ${params["delimiter"]}`;
+    default:
+      return `${format} ${params["enc"]}`;
+  }
+}
 
 function dynamicPattern(format: FormatId, params: Readonly<Record<string, unknown>>): RegExp | undefined {
   switch (format) {
@@ -119,10 +135,10 @@ function dynamicPattern(format: FormatId, params: Readonly<Record<string, unknow
 }
 
 function cachedPattern(format: FormatId, params: Readonly<Record<string, unknown>>): RegExp | undefined {
-  const key = `${format} ${JSON.stringify(params)}`;
+  const key = dynamicKey(format, params);
   if (dynamicCache.has(key)) return dynamicCache.get(key);
   const re = dynamicPattern(format, params);
-  dynamicCache.set(key, re);
+  if (dynamicCache.size < DYNAMIC_CACHE_LIMIT) dynamicCache.set(key, re);
   return re;
 }
 
@@ -274,6 +290,9 @@ export function patternForFormat(format: FormatId, params: Readonly<Record<strin
       return PATTERNS["base64url"];
     case "date":
       return DATE;
+    // Exposed `pattern` values get a fresh RegExp per schema: the memoized
+    // instances serve the internal testFormat hot path only, so a consumer
+    // mutating one schema's pattern cannot leak state into another's.
     case "time":
     case "datetime":
     case "mac":
@@ -282,7 +301,7 @@ export function patternForFormat(format: FormatId, params: Readonly<Record<strin
     case "sha256":
     case "sha384":
     case "sha512":
-      return cachedPattern(format, params);
+      return dynamicPattern(format, params);
     default:
       return PATTERNS[format];
   }
