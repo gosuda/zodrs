@@ -1258,9 +1258,7 @@ impl<'p> Validator<'p> {
         } else {
             *hops -= 1;
             match self.node(id) {
-                PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
-                    Missing::Undefined
-                }
+                n if accepts_absent_undefined(n) => Missing::Undefined,
                 PlanNode::Optional { inner } => {
                     let inner = *inner;
                     if self.dispatch(inner).optin_optional {
@@ -1346,26 +1344,6 @@ impl<'p> Validator<'p> {
                         Missing::Fail
                     }
                 }
-                PlanNode::Intersection { left, right } => {
-                    let (left, right) = (*left, *right);
-                    let a = self.eval_missing(left, hops);
-                    let b = self.eval_missing(right, hops);
-                    match (a, b) {
-                        (Missing::Cycle, _) | (_, Missing::Cycle) => Missing::Cycle,
-                        (Missing::Undefined, Missing::Undefined) => Missing::Undefined,
-                        (Missing::Value(value), Missing::Undefined)
-                        | (Missing::Undefined, Missing::Value(value)) => Missing::Value(value),
-                        (Missing::Value(a), Missing::Value(b))
-                            if a.is_object() && b.is_object() =>
-                        {
-                            merge_objects(&a, &b).map_or(Missing::Cycle, Missing::Value)
-                        }
-                        (Missing::Value(a), Missing::Value(b)) if a == b => Missing::Value(a),
-                        (Missing::Fail, _)
-                        | (_, Missing::Fail)
-                        | (Missing::Value(_), Missing::Value(_)) => Missing::Fail,
-                    }
-                }
                 PlanNode::String { coerce: true, .. } => Missing::Value(Json::from("undefined")),
                 PlanNode::Boolean { coerce: true } => Missing::Value(Json::from(false)),
                 PlanNode::Number { coerce: true, .. } => {
@@ -1379,13 +1357,8 @@ impl<'p> Validator<'p> {
                 PlanNode::String { coerce: false, .. }
                 | PlanNode::Number { coerce: false, .. }
                 | PlanNode::Boolean { coerce: false }
-                | PlanNode::BigInt { .. }
-                | PlanNode::Date { .. }
-                | PlanNode::File { .. }
                 | PlanNode::Null
                 | PlanNode::Never
-                | PlanNode::Symbol
-                | PlanNode::Nan
                 | PlanNode::Literal { .. }
                 | PlanNode::Enum { .. }
                 | PlanNode::Object { .. }
@@ -1393,17 +1366,15 @@ impl<'p> Validator<'p> {
                 | PlanNode::Tuple { .. }
                 | PlanNode::DiscUnion { .. }
                 | PlanNode::Record { .. }
-                | PlanNode::Map { .. }
-                | PlanNode::Set { .. }
                 | PlanNode::TemplateLiteral { .. } => {
                     self.check_missing(id);
                     Missing::Fail
                 }
-                PlanNode::Readonly { .. }
-                | PlanNode::Promise { .. }
-                | PlanNode::Pipe { .. }
-                | PlanNode::Host { .. }
-                | PlanNode::Unsupported => {
+                // BigInt, Date, File, Map, Set, Symbol, Nan, Intersection,
+                // Readonly, Promise, Pipe, Host, and Unsupported poison the
+                // whole plan's `json_eligible`, so the DOM never sees them;
+                // future kinds default to the same JS fallback.
+                _ => {
                     self.fallback = true;
                     Missing::Cycle
                 }
@@ -1899,7 +1870,7 @@ enum Missing {
 /// concrete re-validation of `Prefault` payloads (a prefault value that
 /// fails its inner still materializes here — the scan only needs to know
 /// whether a value exists, and defers anything else to the DOM).
-pub(crate) enum Absent<'a> {
+pub(crate) enum Absent {
     /// Validates cleanly with `undefined` output (the slot drops out of the
     /// object output).
     Undefined,
@@ -1907,35 +1878,53 @@ pub(crate) enum Absent<'a> {
     /// flag marks a catch fallback — zod's `fallback` flag, which only a
     /// fired `catch` sets: canonical `handleOptionalResult` swallows it back
     /// to `undefined` under an `Optional` wrapper. Coerced values do NOT set
-    /// it; an optional-wrapped coercion materializes like a default.
-    Value(Cow<'a, Json>, bool),
+    /// it; an optional-wrapped coercion materializes like a default. The
+    /// payload itself is not carried: the DOM re-derives it when rewriting.
+    Value(bool),
     /// Emits issues on `undefined` input.
     Fail,
     /// Wrapper traversal exhausted its fixed hop budget.
     Cycle,
 }
 
-pub(crate) fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
+/// Kinds whose schema accepts `undefined` as a canonical value: absent input
+/// resolves to `undefined` with no issues and no materialization. Shared
+/// classification leaf for `Validator::eval_missing` and `absent_result`.
+fn accepts_absent_undefined(node: &PlanNode) -> bool {
+    matches!(
+        node,
+        PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void
+    )
+}
+
+pub(crate) fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent {
     let mut hops = ABSENT_MAX_HOPS;
     absent_result_bounded(plan, id, &mut hops)
 }
 
-fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usize) -> Absent<'a> {
+/// Stateless twin of `Validator::eval_missing`, same missing-input
+/// classification contract: `Missing::Undefined` ↔ `Absent::Undefined`,
+/// `Missing::Value` ↔ `Absent::Value`, `Missing::Fail` ↔ `Absent::Fail`,
+/// `Missing::Cycle` ↔ `Absent::Cycle`. Deliberate reductions from the DOM
+/// walk, which owns the semantic eval: issues are never emitted (a `Fail`
+/// means "the DOM would produce issues"), prefault payloads are not
+/// re-validated, and the union arm selects the first success without
+/// collecting branch errors. Only reachable on `json_eligible` plans, so
+/// ineligible kinds (Intersection, Map, Readonly, ...) fall to `Fail`.
+fn absent_result_bounded(plan: &CompiledPlan, id: NodeId, hops: &mut usize) -> Absent {
     if *hops == 0 {
         return Absent::Cycle;
     }
     *hops -= 1;
 
     match &plan.nodes()[id as usize] {
-        PlanNode::Any | PlanNode::Unknown | PlanNode::Undefined | PlanNode::Void => {
-            Absent::Undefined
-        }
+        n if accepts_absent_undefined(n) => Absent::Undefined,
         PlanNode::Optional { inner } => {
             if plan.dispatch[*inner as usize].optin_optional {
                 match absent_result_bounded(plan, *inner, hops) {
                     // `handleOptionalResult`: undefined input plus issues or a
                     // catch fallback resolves to a clean `undefined`.
-                    Absent::Fail | Absent::Value(_, true) => Absent::Undefined,
+                    Absent::Fail | Absent::Value(true) => Absent::Undefined,
                     ok => ok,
                 }
             } else {
@@ -1944,14 +1933,10 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
         }
         PlanNode::ExactOptional { inner }
         | PlanNode::Nullable { inner }
-        | PlanNode::Lazy { inner }
-        | PlanNode::Readonly { inner }
-        | PlanNode::Promise { inner } => absent_result_bounded(plan, *inner, hops),
-        PlanNode::Default { value, .. } | PlanNode::Prefault { value, .. } => {
-            Absent::Value(Cow::Borrowed(value), false)
-        }
-        PlanNode::Catch { inner, value, .. } => match absent_result_bounded(plan, *inner, hops) {
-            Absent::Fail => Absent::Value(Cow::Borrowed(value), true),
+        | PlanNode::Lazy { inner } => absent_result_bounded(plan, *inner, hops),
+        PlanNode::Default { .. } | PlanNode::Prefault { .. } => Absent::Value(false),
+        PlanNode::Catch { inner, .. } => match absent_result_bounded(plan, *inner, hops) {
+            Absent::Fail => Absent::Value(true),
             ok => ok,
         },
         PlanNode::Union { options } => {
@@ -1963,55 +1948,12 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
             }
             Absent::Fail
         }
-        PlanNode::Intersection { left, right } => {
-            match (
-                absent_result_bounded(plan, *left, hops),
-                absent_result_bounded(plan, *right, hops),
-            ) {
-                (Absent::Cycle, _) | (_, Absent::Cycle) => Absent::Cycle,
-                (Absent::Fail, _) | (_, Absent::Fail) => Absent::Fail,
-                (Absent::Undefined, Absent::Undefined) => Absent::Undefined,
-                (Absent::Value(v, f), Absent::Undefined)
-                | (Absent::Undefined, Absent::Value(v, f)) => Absent::Value(v, f),
-                (Absent::Value(a, fa), Absent::Value(b, fb)) => {
-                    if !a.is_object() || !b.is_object() {
-                        // Non-mergeable undefined intersections do not arise
-                        // in JSON-eligible schemas; treat as failure.
-                        return Absent::Fail;
-                    }
-                    merge_objects(&a, &b)
-                        .map_or(Absent::Cycle, |m| Absent::Value(Cow::Owned(m), fa || fb))
-                }
-            }
+        PlanNode::String { coerce: true, .. } | PlanNode::Boolean { coerce: true } => {
+            Absent::Value(false)
         }
-        PlanNode::String { coerce: true, .. } => {
-            Absent::Value(Cow::Owned(Json::from("undefined")), false)
-        }
-        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), false),
-        PlanNode::String { coerce: false, .. }
-        | PlanNode::Number { .. }
-        | PlanNode::BigInt { .. }
-        | PlanNode::Date { .. }
-        | PlanNode::File { .. }
-        | PlanNode::Boolean { coerce: false }
-        | PlanNode::Null
-        | PlanNode::Never
-        | PlanNode::Symbol
-        | PlanNode::Nan
-        | PlanNode::Literal { .. }
-        | PlanNode::Enum { .. }
-        | PlanNode::Object { .. }
-        | PlanNode::Array { .. }
-        | PlanNode::Tuple { .. }
-        | PlanNode::DiscUnion { .. }
-        | PlanNode::Record { .. }
-        | PlanNode::Map { .. }
-        | PlanNode::Set { .. }
-        | PlanNode::NonOptional { .. }
-        | PlanNode::Pipe { .. }
-        | PlanNode::TemplateLiteral { .. }
-        | PlanNode::Host { .. }
-        | PlanNode::Unsupported => Absent::Fail,
+        // Every other kind fails missing-input validation in the DOM walk;
+        // the scan defers and lets it decide.
+        _ => Absent::Fail,
     }
 }
 
@@ -2033,40 +1975,6 @@ where
 
 fn append_raw(value: &Value, out: &mut OutputBuffer) {
     append_json(value, out);
-}
-
-/// Merges two JSON objects, keeping the left object's key order and letting
-/// the right object's values win on shared keys. Duplicate keys collapse the
-/// ECMA way first: first position, last value.
-///
-/// A mutable `sonic_rs::Object` is hash-backed, so merging by insertion would
-/// scramble the key order the canonical output depends on. Writing the merged
-/// form and parsing it back keeps document order. This runs only on the cold
-/// intersection-default path.
-fn merge_objects(left: &Json, right: &Json) -> Option<Json> {
-    let (a_entries, a_last) = collapse_object(left.as_object()?);
-    let (b_entries, b_last) = collapse_object(right.as_object()?);
-
-    let mut text = String::from("{");
-    let mut write = |key: &str, value: &Value| -> Option<()> {
-        if text.len() > 1 {
-            text.push(',');
-        }
-        text.push_str(&sonic_rs::to_string(key).ok()?);
-        text.push(':');
-        text.push_str(&sonic_rs::to_string(value).ok()?);
-        Some(())
-    };
-    for (key, value) in &a_entries {
-        write(key, b_last.get(key).copied().unwrap_or(value))?;
-    }
-    for (key, value) in &b_entries {
-        if !a_last.contains_key(key) {
-            write(key, value)?;
-        }
-    }
-    text.push('}');
-    sonic_rs::from_str(&text).ok()
 }
 
 // ------------------------------------------------------------------------
@@ -2595,40 +2503,5 @@ mod tests {
         super::append_json("ok", &mut out);
         assert!(!out.is_failed());
         assert_eq!(out.as_bytes(), b"\"ok\"");
-    }
-
-    fn parse(text: &str) -> super::Json {
-        sonic_rs::from_str(text).expect("fixture parses")
-    }
-
-    /// Intersection defaults merge two plan objects. The result is written
-    /// verbatim into canonical output, so key order is part of the contract:
-    /// left order wins, right values win, and duplicate keys collapse to
-    /// first position with the last value.
-    #[test]
-    fn merge_objects_keeps_left_order_and_right_values() {
-        let cases = [
-            (r#"{"z":1,"a":2}"#, r#"{"m":3}"#, r#"{"z":1,"a":2,"m":3}"#),
-            (r#"{"z":1,"a":2}"#, r#"{"a":9}"#, r#"{"z":1,"a":9}"#),
-            (r#"{"z":1,"z":2}"#, r#"{"y":3}"#, r#"{"z":2,"y":3}"#),
-            (r#"{"z":1}"#, r#"{"y":3,"y":4}"#, r#"{"z":1,"y":4}"#),
-            (r"{}", r#"{"a":1}"#, r#"{"a":1}"#),
-            (r#"{"a":1}"#, r"{}", r#"{"a":1}"#),
-            (r"{}", r"{}", r"{}"),
-        ];
-        for (left, right, expected) in cases {
-            let merged = super::merge_objects(&parse(left), &parse(right)).expect("objects merge");
-            assert_eq!(
-                sonic_rs::to_string(&merged).unwrap_or_default(),
-                expected,
-                "{left} + {right}"
-            );
-        }
-    }
-
-    #[test]
-    fn merge_objects_rejects_non_objects() {
-        assert!(super::merge_objects(&parse("[1]"), &parse(r#"{"a":1}"#)).is_none());
-        assert!(super::merge_objects(&parse(r#"{"a":1}"#), &parse("3")).is_none());
     }
 }

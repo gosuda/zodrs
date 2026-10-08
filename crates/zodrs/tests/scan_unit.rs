@@ -473,12 +473,8 @@ fn clean_tuple_optional_tail() {
         {"k":"optional","inner":3},
         {"k":"string","checks":[]}
     ]"#;
-    assert_eq!(
-        scan(plan, br#"[1]"#),
-        Scan::Clean,
-        "optional tail slot drops"
-    );
-    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+    assert_eq!(scan(plan, b"[1]"), Scan::Clean, "optional tail slot drops");
+    assert_eq!(validate_status(plan, b"[1]"), 0);
 }
 
 #[test]
@@ -491,8 +487,8 @@ fn clean_tuple_optional_tail_multi() {
         {"k":"optional","inner":5},
         {"k":"number","checks":[]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Clean);
-    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+    assert_eq!(scan(plan, b"[1]"), Scan::Clean);
+    assert_eq!(validate_status(plan, b"[1]"), 0);
 }
 
 #[test]
@@ -504,11 +500,11 @@ fn defer_tuple_default_tail() {
         {"k":"number","checks":[]}
     ]"#;
     assert_eq!(
-        scan(plan, br#"[1]"#),
+        scan(plan, b"[1]"),
         Scan::Defer,
         "default tail slot materializes on rewrite"
     );
-    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    let verdict = validate(&compile(plan).unwrap(), b"[1]");
     assert_eq!(verdict.status, 1);
     assert_eq!(verdict.payload.as_deref(), Some("[1,5]"));
 }
@@ -520,8 +516,8 @@ fn defer_tuple_required_tail() {
         {"k":"number","checks":[]},
         {"k":"number","checks":[]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"[1]"), 2);
 }
 
 #[test]
@@ -533,8 +529,8 @@ fn defer_tuple_undefined_tail() {
         {"k":"number","checks":[]},
         {"k":"undefined"}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"[1]"), 2);
 }
 
 #[test]
@@ -548,8 +544,8 @@ fn defer_tuple_required_after_optional() {
         {"k":"string","checks":[]},
         {"k":"number","checks":[]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"[1]"), 2);
 }
 
 #[test]
@@ -560,8 +556,8 @@ fn defer_tuple_catch_tail() {
         {"k":"catch","inner":3,"value":9},
         {"k":"number","checks":[]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    let verdict = validate(&compile(plan).unwrap(), b"[1]");
     assert_eq!(verdict.status, 1);
     assert_eq!(verdict.payload.as_deref(), Some("[1,9]"));
 }
@@ -578,8 +574,8 @@ fn defer_tuple_discunion_optional_tail() {
         {"k":"object","keys":["t"],"values":[5],"mode":"strip","catchall":null},
         {"k":"literal","values":["x"]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"[1]"), 0);
 }
 
 #[test]
@@ -593,8 +589,8 @@ fn defer_tuple_discunion_required_tail() {
         {"k":"object","keys":["t"],"values":[4],"mode":"strip","catchall":null},
         {"k":"literal","values":["x"]}
     ]"#;
-    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
-    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+    assert_eq!(scan(plan, b"[1]"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"[1]"), 2);
 }
 
 #[test]
