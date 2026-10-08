@@ -4,9 +4,12 @@ import { escapeRegex } from "./util.js";
 
 /**
  * Lazy `_zod` introspection mirrors Zod v4.4.3: `values`, `pattern`, `optin`,
- * `optout`, and `propValues` derived from the node graph. Memoized per node so
- * `lazy` back-edges terminate (a cycle is only reachable through a thunk that
- * itself bottoms out in a non-lazy node before recurring).
+ * `optout`, and `propValues` derived from the node graph. Results are memoized
+ * per node, but memoization alone cannot terminate a `lazy` back-edge (the
+ * cache is only written after a call returns), so each recursive function
+ * guards in-flight lazy nodes the way Zod's `defineLazy` does — a re-entrant
+ * read contributes `undefined`, which bottoms cyclic evaluations out at the
+ * least fixed point instead of overflowing the stack.
  */
 
 const valuesCache = new WeakMap<SchemaNode, ReadonlySet<unknown> | undefined>();
@@ -265,70 +268,65 @@ function cleanSource(source: string): string {
   return source.slice(start, end);
 }
 
+const lazyOptionalityInProgress = new Set<SchemaNode>();
+
 /** `_zod.optin`: "optional" when the INPUT may be absent. */
 export function optinOf(node: SchemaNode): "optional" | undefined {
   if (optinCache.has(node)) return optinCache.get(node);
-  const computed = computeOptin(node);
+  const computed = computeOptionality(node, "in");
   optinCache.set(node, computed);
   return computed;
-}
-
-function computeOptin(node: SchemaNode): "optional" | undefined {
-  switch (node.kind) {
-    case "optional":
-    case "exactOptional":
-    case "default":
-    case "prefault":
-    case "catch":
-      return "optional";
-    case "nullable":
-    case "readonly":
-      return optinOf(node.inner);
-    case "pipe":
-      return optinOf(node.a);
-    case "union":
-    case "discunion":
-      return node.options.some((option) => optinOf(option) === "optional") ? "optional" : undefined;
-    case "lazy":
-      return optinOf(node.getter());
-    case "host":
-      // $ZodTransform and preprocess declare optin "optional"; other host ops do not.
-      return node.op === "transform" || node.op === "preprocess" ? "optional" : undefined;
-    default:
-      return undefined;
-  }
 }
 
 /** `_zod.optout`: "optional" when the OUTPUT may be absent. */
 export function optoutOf(node: SchemaNode): "optional" | undefined {
   if (optoutCache.has(node)) return optoutCache.get(node);
-  const computed = computeOptout(node);
+  const computed = computeOptionality(node, "out");
   optoutCache.set(node, computed);
   return computed;
 }
 
-function computeOptout(node: SchemaNode): "optional" | undefined {
+function computeOptionality(node: SchemaNode, side: "in" | "out"): "optional" | undefined {
+  const at = (child: SchemaNode) => (side === "in" ? optinOf(child) : optoutOf(child));
   switch (node.kind) {
     case "optional":
     case "exactOptional":
       return "optional";
-    case "nullable":
-    case "readonly":
     case "default":
     case "prefault":
+      // Input-optional, but the materialized output is never absent: Zod
+      // leaves optout undefined here rather than delegating to the inner type.
+      return side === "in" ? "optional" : undefined;
     case "catch":
-      return optoutOf(node.inner);
+      return side === "in" ? "optional" : at(node.inner);
+    case "nullable":
+    case "readonly":
+      return at(node.inner);
     case "pipe":
-      return optoutOf(node.b);
+      return at(side === "in" ? node.a : node.b);
     case "union":
     case "discunion":
-      return node.options.some((option) => optoutOf(option) === "optional") ? "optional" : undefined;
+      return node.options.some((option) => at(option) === "optional") ? "optional" : undefined;
     case "lazy":
-      return optoutOf(node.getter());
+      // Cycle guard, matching Zod's defineLazy: a re-entrant read contributes
+      // undefined, so purely cyclic optionality claims resolve to "required".
+      if (lazyOptionalityInProgress.has(node)) return undefined;
+      lazyOptionalityInProgress.add(node);
+      try {
+        return at(node.getter());
+      } finally {
+        lazyOptionalityInProgress.delete(node);
+      }
+    case "host":
+      // $ZodTransform and preprocess declare optin "optional"; other host ops
+      // do not, and no host op is output-optional.
+      return side === "in" && (node.op === "transform" || node.op === "preprocess") ? "optional" : undefined;
     default:
       return undefined;
   }
 }
+
+const lazyPropValuesInProgress = new Set<SchemaNode>();
 
 /** `_zod.propValues`: per-property accepted value sets (discriminator source). */
 export function propValuesOf(node: SchemaNode): Readonly<Record<string, ReadonlySet<unknown>>> | undefined {
@@ -370,7 +368,13 @@ function computePropValues(node: SchemaNode): Readonly<Record<string, ReadonlySe
     case "pipe":
       return propValuesOf(node.a);
     case "lazy":
-      return propValuesOf(node.getter());
+      if (lazyPropValuesInProgress.has(node)) return undefined;
+      lazyPropValuesInProgress.add(node);
+      try {
+        return propValuesOf(node.getter());
+      } finally {
+        lazyPropValuesInProgress.delete(node);
+      }
     default:
       return undefined;
   }
