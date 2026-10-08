@@ -1,4 +1,4 @@
-import type { FormatId, SchemaNode } from "./nodes.js";
+import type { FormatId, HostOperation, SchemaNode } from "./nodes.js";
 import { patternForFormat } from "./formats.js";
 import { BIGINT_FORMAT_RANGES, NUMBER_FORMAT_RANGES, escapeRegex } from "./util.js";
 
@@ -11,6 +11,15 @@ import { BIGINT_FORMAT_RANGES, NUMBER_FORMAT_RANGES, escapeRegex } from "./util.
  * read contributes `undefined`, which bottoms cyclic evaluations out at the
  * least fixed point instead of overflowing the stack.
  */
+
+/**
+ * Host ops that produce a new value — Zod's $ZodTransform-family. Drives the
+ * interpreter's catch-fallback marker and the JSON-Schema input-mode
+ * examples/default scrub.
+ */
+export function transformingHostOp(op: HostOperation): boolean {
+  return op === "transform" || op === "preprocess" || op === "codec_decode" || op === "codec_encode";
+}
 
 const valuesCache = new WeakMap<SchemaNode, ReadonlySet<unknown> | undefined>();
 const patternCache = new WeakMap<SchemaNode, RegExp | undefined>();

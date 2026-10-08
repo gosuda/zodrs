@@ -18,7 +18,7 @@
 import { globalRegistry } from "./registries.js";
 import type { $ZodRegistry, $ZodRegistrySchema, GlobalMeta } from "./registries.js";
 import type { FormatId, SchemaNode } from "./nodes.js";
-import { bagOf, optinOf, optoutOf } from "./introspect.js";
+import { bagOf, optinOf, optoutOf, transformingHostOp } from "./introspect.js";
 import { DATE_SOURCE, PATTERNS, datetimePattern, hashFormatPattern, macPattern, timeSource } from "./formats.js";
 import { NUMBER_FORMAT_RANGES, escapeRegex } from "./util.js";
 import type { BaseSchema, JSONSchema } from "./json-schema-types.js";
@@ -264,7 +264,7 @@ function isTransforming(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNo
   visited.add(node);
   switch (node.kind) {
     case "host":
-      return node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode";
+      return transformingHostOp(node.op);
     case "array":
       return isTransforming(node.element, ctx, visited);
     case "set":
