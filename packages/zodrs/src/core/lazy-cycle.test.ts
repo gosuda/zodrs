@@ -125,3 +125,44 @@ describe("cyclic lazy introspection", () => {
     expect(L._zod.optin).toBe("optional");
   });
 });
+
+describe("JSON Schema required follows the shared optionality table", () => {
+  const required = (schema: z.ZodType, io: "input" | "output") =>
+    (z.toJSONSchema(z.object({ x: schema }), { io }) as { required?: string[] }).required ?? [];
+
+  test.each([
+    // optin/optout both undefined — required in both directions.
+    ["required both", () => z.promise(z.string().optional()), ["x"], ["x"]],
+    // a discunion of plain objects carries no optional option.
+    [
+      "required both",
+      () => z.discriminatedUnion("k", [z.object({ k: z.literal("a") }), z.object({ k: z.literal("b") })]),
+      ["x"],
+      ["x"],
+    ],
+    // input-optional but output-materialized: optional out, required in.
+    ["io-split", () => z.string().default("d"), [], ["x"]],
+    ["io-split", () => z.preprocess((v) => v, z.string()), [], ["x"]],
+    // catch delegates optout to the inner optional.
+    ["optional both", () => z.string().optional().catch("c"), [], []],
+    ["optional both", () => z.union([z.string().optional(), z.string()]), [], []],
+    // an optional OPTION inside a discunion still flips the flag.
+    [
+      "optional both",
+      () => z.discriminatedUnion("k", [z.object({ k: z.literal("a") }), z.optional(z.object({ k: z.literal("b") }))]),
+      [],
+      [],
+    ],
+  ])("%s: %s", (_label, build, inReq, outReq) => {
+    expect(required(build(), "input")).toEqual(inReq);
+    expect(required(build(), "output")).toEqual(outReq);
+  });
+
+  test("cyclic lazy shapes still answer required without overflowing", () => {
+    let U: z.ZodType = z.string();
+    const L = z.lazy(() => U);
+    U = z.union([L, z.string().optional()]);
+    expect(required(U, "input")).toEqual([]);
+    expect(required(L, "input")).toEqual([]);
+  });
+});

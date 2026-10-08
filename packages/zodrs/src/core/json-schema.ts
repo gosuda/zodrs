@@ -18,7 +18,7 @@
 import { globalRegistry } from "./registries.js";
 import type { $ZodRegistry, $ZodRegistrySchema, GlobalMeta } from "./registries.js";
 import type { FormatId, SchemaNode } from "./nodes.js";
-import { bagOf } from "./introspect.js";
+import { bagOf, optinOf, optoutOf } from "./introspect.js";
 import { DATE_SOURCE, PATTERNS, datetimePattern, hashFormatPattern, macPattern, timeSource } from "./formats.js";
 import { NUMBER_FORMAT_RANGES, escapeRegex } from "./util.js";
 import type { BaseSchema, JSONSchema } from "./json-schema-types.js";
@@ -301,62 +301,11 @@ function isTransforming(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNo
   }
 }
 
-/** Zod `optin === undefined` equivalent: whether the property may be absent from valid input. */
-function inputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNode>): boolean {
-  if (visited.has(node)) return false;
-  visited.add(node);
-  switch (node.kind) {
-    case "optional":
-    case "exactOptional":
-    case "default":
-    case "prefault":
-    case "catch":
-      return true;
-    case "nonoptional":
-      return false;
-    case "nullable":
-    case "readonly":
-    case "promise":
-      return inputOptional(node.inner, ctx, visited);
-    case "lazy":
-      return inputOptional(resolveLazyNode(node, ctx), ctx, visited);
-    case "pipe":
-      return inputOptional(node.a, ctx, visited);
-    case "union":
-      return node.options.some((option) => inputOptional(option, ctx, visited));
-    case "host":
-      return node.inner !== null && inputOptional(node.inner, ctx, visited);
-    default:
-      return false;
-  }
-}
-
-/** Zod `optout === undefined` equivalent: whether the property may be absent from valid output. */
-function outputOptional(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNode>): boolean {
-  if (visited.has(node)) return false;
-  visited.add(node);
-  switch (node.kind) {
-    case "optional":
-    case "exactOptional":
-      return true;
-    case "nonoptional":
-      return false;
-    case "nullable":
-    case "readonly":
-    case "promise":
-      return outputOptional(node.inner, ctx, visited);
-    case "lazy":
-      return outputOptional(resolveLazyNode(node, ctx), ctx, visited);
-    case "pipe":
-      return outputOptional(node.b, ctx, visited);
-    case "union":
-      return node.options.some((option) => outputOptional(option, ctx, visited));
-    case "host":
-      return node.inner !== null && outputOptional(node.inner, ctx, visited);
-    default:
-      return false;
-  }
-}
+// An object property is JSON-Schema `required` exactly when Zod's optionality
+// flag is not "optional" — `optin` for input schemas, `optout` for output
+// (json-schema-processors.ts). The shared `optinOf`/`optoutOf` table already
+// computes both sides memoized and lazy-cycle-guarded, so `required` consults
+// it directly instead of maintaining a parallel classifier.
 
 // ---------------------------------------------------------------------------
 // process: walk the graph, build per-schema JSON, track seen/cycles
@@ -688,8 +637,7 @@ function processNode(schema: SchemaLike, node: SchemaNode, seen: Seen, ctx: GenC
       }
       json["properties"] = properties;
       for (const [key, childNode] of Object.entries(node.shape)) {
-        const optional =
-          ctx.io === "input" ? inputOptional(childNode, ctx, new Set()) : outputOptional(childNode, ctx, new Set());
+        const optional = (ctx.io === "input" ? optinOf(childNode) : optoutOf(childNode)) === "optional";
         if (!optional) required.push(key);
       }
       if (required.length > 0) json["required"] = required;
