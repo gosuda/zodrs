@@ -554,3 +554,103 @@ fn defer_absent_nonoptional() {
     assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
     assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
 }
+#[test]
+fn clean_tuple_optional_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"[1]"#),
+        Scan::Clean,
+        "optional tail slot drops"
+    );
+    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+}
+
+#[test]
+fn clean_tuple_optional_tail_multi() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2,4],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]},
+        {"k":"optional","inner":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+}
+
+#[test]
+fn defer_tuple_default_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"default","inner":3,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"[1]"#),
+        Scan::Defer,
+        "default tail slot materializes on rewrite"
+    );
+    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(verdict.payload.as_deref(), Some("[1,5]"));
+}
+
+#[test]
+fn defer_tuple_required_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_undefined_tail() {
+    // `z.undefined()` is not input-optional: the absent slot collapses to
+    // `too_small` even though the classifier says the value drops out.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"undefined"}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_required_after_optional() {
+    // The optin tail is a contiguous run: a required slot after an optional
+    // one still makes the short input fail.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2,4],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_catch_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"catch","inner":3,"value":9},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(verdict.payload.as_deref(), Some("[1,9]"));
+}

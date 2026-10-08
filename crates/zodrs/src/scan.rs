@@ -993,8 +993,9 @@ impl<'a> Scanner<'a> {
         true
     }
 
-    /// Tuple validation. Fully-present inputs scan; any absent slot defers to
-    /// the DOM walk's optional-tail machinery.
+    /// Tuple validation. Present items validate inline; absent tail slots
+    /// resolve through the shared missing-input classifier (clean drops stay
+    /// clean, materialized values mark dirty, required slots defer).
     fn tuple(&mut self, id: NodeId) -> bool {
         let PlanNode::Tuple { items, rest } = self.node(id) else {
             return false;
@@ -1055,11 +1056,27 @@ impl<'a> Scanner<'a> {
             return false;
         }
         if len < items.len() {
-            // Absent slots run the DOM walk's default/catch/optional-tail
-            // machinery: the tuple may validate with a rewrite (dropped tail
-            // or filled default) or fail — the scan cannot tell cheaply.
-            self.dirty_hint = true;
-            return false;
+            // Absent slots form a contiguous tail: short input is valid only
+            // inside the trailing run of optin-optional items, where each
+            // slot resolves through the shared missing-input classifier —
+            // `Undefined` drops out of the output (still clean), `Value`
+            // materializes (validates dirty). A required slot collapses the
+            // input to canonical `too_small`; anything unsettled defers to
+            // the DOM walk.
+            for &item in &items[len..] {
+                use crate::validate::{Absent, absent_result};
+                match (
+                    absent_result(self.plan, item),
+                    self.dispatch(item).optin_optional,
+                ) {
+                    (Absent::Undefined, true) => {}
+                    (Absent::Value(..), true) => {
+                        self.dirty_hint = true;
+                        return true;
+                    }
+                    _ => return false,
+                }
+            }
         }
         true
     }
