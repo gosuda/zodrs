@@ -273,11 +273,13 @@ function isTransforming(node: SchemaNode, ctx: GenContext, visited: Set<SchemaNo
       return isTransforming(resolveLazyNode(node, ctx), ctx, visited);
     case "promise":
     case "optional":
+    case "exactOptional":
     case "nonoptional":
     case "nullable":
     case "readonly":
     case "default":
     case "prefault":
+    case "catch":
       return isTransforming(node.inner, ctx, visited);
     case "intersection":
       return isTransforming(node.left, ctx, visited) || isTransforming(node.right, ctx, visited);

@@ -166,3 +166,61 @@ describe("JSON Schema required follows the shared optionality table", () => {
     expect(required(L, "input")).toEqual([]);
   });
 });
+
+describe("introspection tables match zod exactly", () => {
+  test("readonly delegates propValues; default/prefault/catch do not", () => {
+    const O = z.object({ k: z.literal("a") });
+    // Zod defines propValues on object/readonly/pipe/lazy/discunion only.
+    expect(O.readonly()._zod.propValues).toBeDefined();
+    expect(O.pipe(z.object({ k: z.literal("b") }))._zod.propValues).toBeDefined();
+    expect(z.lazy(() => O)._zod.propValues).toBeDefined();
+    // default/prefault/catch carry no propValues in Zod — delegating inner
+    // would wrongly expose the inner object's map.
+    expect(O.default({ k: "a" })._zod.propValues).toBeUndefined();
+    expect(O.prefault({ k: "a" })._zod.propValues).toBeUndefined();
+    expect(O.catch({ k: "a" })._zod.propValues).toBeUndefined();
+  });
+
+  test("readonly has no pattern; optional(nullable) chains still compose", () => {
+    const S = z.string();
+    // $ZodReadonly defines no _zod.pattern — it must not borrow inner's.
+    expect(S.readonly()._zod.pattern).toBeUndefined();
+    expect(S.optional()._zod.pattern).toBeInstanceOf(RegExp);
+    expect(S.nullable()._zod.pattern).toBeInstanceOf(RegExp);
+  });
+
+  test("templateLiteral rejects a readonly part like zod", () => {
+    expect(() => z.templateLiteral([z.string().readonly()])).toThrow(/regex pattern/);
+  });
+
+  test("void has no values; undefined keeps {undefined}", () => {
+    expect(z.void()._zod.values).toBeUndefined();
+    expect(z.undefined()._zod.values?.has(undefined)).toBe(true);
+    expect(z.nan()._zod.values).toBeUndefined();
+  });
+
+  test("discriminatedUnion rejects default/prefault/catch-wrapped options on parse", () => {
+    const A = z.object({ k: z.literal("a") });
+    const B = z.object({ k: z.literal("b") });
+    // Zod defers the rejection to first dispatch access (util.cached); zodrs
+    // records invalidOptionIndex at construction and throws at parse — same
+    // deferred verdict, identical message.
+    for (const wrap of [() => A.default({ k: "a" }), () => A.prefault({ k: "a" }), () => A.catch({ k: "a" })]) {
+      const d = z.discriminatedUnion("k", [wrap() as z.ZodType, B]);
+      expect(() => d.parse({ k: "a" })).toThrow(/Invalid discriminated union option at index "0"/);
+    }
+    // readonly/pipe/lazy options still dispatch.
+    expect(z.discriminatedUnion("k", [A.readonly(), B]).parse({ k: "a" })).toEqual({ k: "a" });
+  });
+
+  test("catch/exactOptional wrappers delegate the transforming scrub on io=input", () => {
+    const ex = { examples: ["x"] };
+    const jsonOf = (s: z.ZodType) => z.toJSONSchema(s, { io: "input", unrepresentable: "any" });
+    // A transform through a value-preserving wrapper still transforms — input
+    // schemas drop output-shaped examples/default exactly like the bare pipe.
+    expect(jsonOf(z.string().transform((v) => v).catch("c").meta(ex))).not.toHaveProperty("examples");
+    expect(jsonOf(z.string().transform((v) => v).exactOptional().meta(ex))).not.toHaveProperty("examples");
+    // A non-transforming wrapper keeps them.
+    expect(jsonOf(z.string().catch("c").meta(ex))).toHaveProperty("examples");
+  });
+});
