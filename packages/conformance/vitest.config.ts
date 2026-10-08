@@ -11,9 +11,8 @@ import { defineConfig } from "vitest/config";
  *   wasm         — WASM loader tier (ZODRS_LOADER=wasm)
  *   none         — TypeScript-only fallback, no native/WASM (ZODRS_LOADER=none)
  *
- * A fifth project, `differential`, points at differential/ where the
- * differential fuzz generator will land (later task). The directory is
- * empty for now; passWithNoTests keeps the config valid.
+ * A fifth project, `differential`, runs the native-vs-TS differential
+ * fuzz harness under differential/ (see differential/README.md).
  */
 export default defineConfig({
   test: {
