@@ -612,6 +612,19 @@ fn clean_absent_shared_lazy_cycle_field() {
 }
 
 #[test]
+fn deep_wrapper_chain_compiles_linearly() {
+    // A forward-pointing wrapper chain used to take N fixed-point passes —
+    // 20k nodes meant ~4×10^8 recomputes. The worklist propagation is linear.
+    let chain = 20_000;
+    let mut nodes: Vec<String> = (1..=chain)
+        .map(|i| format!(r#"{{"k":"optional","inner":{i}}}"#))
+        .collect();
+    nodes.push(r#"{"k":"string","checks":[]}"#.to_string());
+    let plan = compile(&format!("[{}]", nodes.join(","))).unwrap();
+    assert!(plan.nodes().len() > chain);
+}
+
+#[test]
 fn defer_absent_pure_lazy_cycle_field() {
     // With no optional-claiming member the fixed point stays all-required —
     // the same verdict the old back-edge rule gave. The missing-input walk

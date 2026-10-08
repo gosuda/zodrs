@@ -425,29 +425,54 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
 ///
 /// Recursive lazy schemas make the plan cyclic, so optionality is a system
 /// of equations, not a tree fold. Every kind's flags are a monotone function
-/// of its children's flags (constant, delegate, or disjunction), so the
-/// least fixed point is reached by iterating from all-required until stable;
-/// it is order-independent, claims optional only when a non-cyclic path
-/// establishes it, and leaves purely cyclic claims required — the same
-/// answer a DFS back-edge produced, without memoizing mid-cycle verdicts.
+/// of its children's flags (constant, delegate, or disjunction), so iterating
+/// from all-required reaches the least fixed point: optional only when a
+/// non-cyclic path establishes it, purely cyclic claims stay required — the
+/// same answer a DFS back-edge produced, without memoizing mid-cycle
+/// verdicts.
+///
+/// Iteration runs as a worklist over reverse edges rather than full passes:
+/// a flag can only flip false→true, so each node is recomputed at most twice
+/// and the whole pass is O(nodes + edges) — a forward-pointing wrapper chain
+/// no longer stalls compilation in quadratic time.
 fn compute_optionality(nodes: &[PlanNode], dispatch: &mut [NodeDispatch]) {
-    let mut flags = vec![(false, false); nodes.len()];
-    loop {
-        let mut changed = false;
-        for id in 0..flags.len() {
-            let next = optionality_of(&nodes[id], &flags);
-            if next != flags[id] {
-                flags[id] = next;
-                changed = true;
-            }
+    // dependents[child] = nodes whose flag equation reads child.
+    let mut dependents: Vec<Vec<NodeId>> = vec![Vec::new(); nodes.len()];
+    for (id, node) in nodes.iter().enumerate() {
+        for child in optionality_deps(node) {
+            dependents[child as usize].push(NodeId::try_from(id).unwrap_or(u32::MAX));
         }
-        if !changed {
-            break;
+    }
+
+    let mut flags = vec![(false, false); nodes.len()];
+    let mut queue: Vec<NodeId> = (0..nodes.len())
+        .map(|i| NodeId::try_from(i).unwrap_or(u32::MAX))
+        .collect();
+    while let Some(id) = queue.pop() {
+        let next = optionality_of(&nodes[id as usize], &flags);
+        if next != flags[id as usize] {
+            flags[id as usize] = next;
+            queue.extend_from_slice(&dependents[id as usize]);
         }
     }
     for (d, &(optin, optout)) in dispatch.iter_mut().zip(&flags) {
         d.optin_optional = optin;
         d.optout_optional = optout;
+    }
+}
+
+/// Children whose flags a node's optionality equation reads (the constant
+/// arms — optional/default/prefault — read none).
+fn optionality_deps(node: &PlanNode) -> Vec<NodeId> {
+    match node {
+        PlanNode::Catch { inner, .. }
+        | PlanNode::Nullable { inner }
+        | PlanNode::Lazy { inner }
+        | PlanNode::Readonly { inner } => vec![*inner],
+        PlanNode::Union { options } => options.clone(),
+        PlanNode::DiscUnion { map, .. } => map.iter().map(|(_, opt)| *opt).collect(),
+        PlanNode::Pipe { a, b } => vec![*a, *b],
+        _ => Vec::new(),
     }
 }
 
@@ -460,16 +485,12 @@ fn optionality_of(node: &PlanNode, flags: &[(bool, bool)]) -> (bool, bool) {
         PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
             at(*inner)
         }
-        PlanNode::Union { options } => options
-            .iter()
-            .fold((false, false), |acc, opt| {
-                (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
-            }),
-        PlanNode::DiscUnion { map, .. } => map
-            .iter()
-            .fold((false, false), |acc, (_, opt)| {
-                (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
-            }),
+        PlanNode::Union { options } => options.iter().fold((false, false), |acc, opt| {
+            (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
+        }),
+        PlanNode::DiscUnion { map, .. } => map.iter().fold((false, false), |acc, (_, opt)| {
+            (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
+        }),
         PlanNode::Pipe { a, b } => (at(*a).0, at(*b).1),
         _ => (false, false),
     }
