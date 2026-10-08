@@ -166,6 +166,13 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Marks the verdict dirty and exits the current container level.
+    fn dirty_exit(&mut self) -> bool {
+        self.dirty_hint = true;
+        self.depth -= 1;
+        true
+    }
+
     fn peek(&self) -> Option<u8> {
         self.b.get(self.i).copied()
     }
@@ -411,47 +418,11 @@ impl<'a> Scanner<'a> {
             // The verdict is already Defer; spare the remaining work.
             return true;
         }
+        if let Some(result) = self.leaf(id) {
+            return result;
+        }
         match self.node(id) {
             PlanNode::Any | PlanNode::Unknown => self.skip_value(),
-            PlanNode::Null => self.eat(b"null"),
-            PlanNode::Boolean { coerce } => {
-                if *coerce {
-                    self.dirty_hint = true; // coercion semantics live in the DOM walk
-                    return false;
-                }
-                self.eat(b"true") || self.eat(b"false")
-            }
-            PlanNode::Literal { values } | PlanNode::Enum { values } => self.literal(values),
-            PlanNode::String { checks, coerce } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                if checks.is_empty() {
-                    // No checks: content is irrelevant, so escapes and even
-                    // invalid UTF-8 need no decoding here — the JS wrapper's
-                    // `JSON.parse` reproduces the exact same value on either
-                    // verdict path.
-                    return self.skip_string();
-                }
-                let Some(s) = self.string_token() else {
-                    // Escaped content: zod may validate it (clean or with a
-                    // rewrite); the scan cannot model it.
-                    self.dirty_hint = true;
-                    return false;
-                };
-                self.string_checks(id, s)
-            }
-            PlanNode::Number { coerce, .. } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                let Some(n) = self.number_token() else {
-                    return false;
-                };
-                self.number_checks(id, n)
-            }
             PlanNode::Object { .. } => self.object(id),
             PlanNode::Array { element, .. } => {
                 let element = *element;
@@ -589,7 +560,15 @@ impl<'a> Scanner<'a> {
             | PlanNode::Nan
             | PlanNode::Symbol
             | PlanNode::Host { .. } => false,
-            PlanNode::Unsupported => {
+            // Leaf kinds dispatch through `leaf` above; this arm is unreachable.
+            PlanNode::String { .. }
+            | PlanNode::Number { .. }
+            | PlanNode::Boolean { .. }
+            | PlanNode::Null
+            | PlanNode::Literal { .. }
+            | PlanNode::Enum { .. }
+            | PlanNode::Unsupported => {
+                debug_assert!(false, "leaf kinds handled by leaf()");
                 self.dirty_hint = true;
                 false
             }
@@ -719,15 +698,7 @@ impl<'a> Scanner<'a> {
                 }
                 Check::MultipleOf { v } => float_multiple_of(n, v.as_f64().unwrap_or(1.0)),
                 Check::NumberFormat { v } => number_format_scan(*v, n),
-                Check::BigIntFormat { v } => {
-                    let (min, max) = match v {
-                        crate::plan::BigIntFormat::Int64 => {
-                            (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_807.0)
-                        }
-                        crate::plan::BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
-                    };
-                    n >= min && n <= max
-                }
+                Check::BigIntFormat { v } => crate::validate::bigint_format_in_range(*v, n),
                 Check::Property { .. } | Check::Unsupported => {
                     self.dirty_hint = true;
                     false
@@ -752,9 +723,15 @@ impl<'a> Scanner<'a> {
                     return Some(false);
                 }
                 if checks.is_empty() {
+                    // No checks: content is irrelevant, so escapes and even
+                    // invalid UTF-8 need no decoding here — the JS wrapper's
+                    // `JSON.parse` reproduces the exact same value on either
+                    // verdict path.
                     return Some(self.skip_string());
                 }
                 let Some(s) = self.string_token() else {
+                    // Escaped content: zod may validate it (clean or with a
+                    // rewrite); the scan cannot model it.
                     self.dirty_hint = true;
                     return Some(false);
                 };
@@ -809,6 +786,7 @@ impl<'a> Scanner<'a> {
         let PlanNode::Object {
             keys,
             values,
+            optional,
             mode,
             catchall,
             ..
@@ -840,8 +818,7 @@ impl<'a> Scanner<'a> {
             'entries: loop {
                 self.ws();
                 if self.dirty_hint {
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 let Some(k) = self.key_token() else {
                     // Escaped or malformed key: the DOM walk decides.
@@ -881,14 +858,10 @@ impl<'a> Scanner<'a> {
                     // Duplicates and out-of-order keys are reordered or
                     // collapsed on rewrite: the object validates dirty.
                     if last_schema_i.is_some_and(|l| schema_i <= l) {
-                        self.dirty_hint = true;
-                        self.depth -= 1;
-                        return true;
+                        return self.dirty_exit();
                     }
                     if seen_catchall {
-                        self.dirty_hint = true;
-                        self.depth -= 1;
-                        return true;
+                        return self.dirty_exit();
                     }
                     last_schema_i = Some(schema_i);
                     seen |= 1 << schema_i;
@@ -898,9 +871,7 @@ impl<'a> Scanner<'a> {
                     }
                 } else if k == b"__proto__" {
                     // Dropped on output: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 } else if let Some(catchall_id) = catchall {
                     seen_catchall = true;
                     if !self.value(catchall_id) {
@@ -913,9 +884,7 @@ impl<'a> Scanner<'a> {
                     break;
                 } else {
                     // strip/passthrough rewrite the output: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 self.ws();
                 match self.peek() {
@@ -942,16 +911,22 @@ impl<'a> Scanner<'a> {
         if seen.count_ones() as usize == keys.len() {
             return true;
         }
-        // Absent schema keys: a default/prefault/catch value materializes on
-        // rewrite (validates dirty); anything else is a hard missing-input
-        // failure.
+        // Absent schema keys resolve through the shared missing-input
+        // classifier: `Undefined` drops out of the output (still clean),
+        // `Value` materializes on rewrite (validates dirty). Both require the
+        // schema flag that marks the key optional on input; without it the
+        // DOM walk emits `nonoptional` instead, so the scan defers.
         for (schema_i, _) in keys.iter().enumerate() {
             if seen & (1 << schema_i) == 0 {
-                if crate::validate::has_default(self.plan, values[schema_i]) {
-                    self.dirty_hint = true;
-                    return true;
+                use crate::validate::{Absent, absent_result};
+                match absent_result(self.plan, values[schema_i]) {
+                    Absent::Undefined if optional[schema_i] => {}
+                    Absent::Value(..) if optional[schema_i] => {
+                        self.dirty_hint = true;
+                        return true;
+                    }
+                    _ => return false,
                 }
-                return false;
             }
         }
         true
@@ -1018,8 +993,9 @@ impl<'a> Scanner<'a> {
         true
     }
 
-    /// Tuple validation. Fully-present inputs scan; any absent slot defers to
-    /// the DOM walk's optional-tail machinery.
+    /// Tuple validation. Present items validate inline; absent tail slots
+    /// resolve through the shared missing-input classifier (clean drops stay
+    /// clean, materialized values mark dirty, required slots defer).
     fn tuple(&mut self, id: NodeId) -> bool {
         let PlanNode::Tuple { items, rest } = self.node(id) else {
             return false;
@@ -1080,11 +1056,27 @@ impl<'a> Scanner<'a> {
             return false;
         }
         if len < items.len() {
-            // Absent slots run the DOM walk's default/catch/optional-tail
-            // machinery: the tuple may validate with a rewrite (dropped tail
-            // or filled default) or fail — the scan cannot tell cheaply.
-            self.dirty_hint = true;
-            return false;
+            // Absent slots form a contiguous tail: short input is valid only
+            // inside the trailing run of optin-optional items, where each
+            // slot resolves through the shared missing-input classifier —
+            // `Undefined` drops out of the output (still clean), `Value`
+            // materializes (validates dirty). A required slot collapses the
+            // input to canonical `too_small`; anything unsettled defers to
+            // the DOM walk.
+            for &item in &items[len..] {
+                use crate::validate::{Absent, absent_result};
+                match (
+                    absent_result(self.plan, item),
+                    self.dispatch(item).optin_optional,
+                ) {
+                    (Absent::Undefined, true) => {}
+                    (Absent::Value(..), true) => {
+                        self.dirty_hint = true;
+                        return true;
+                    }
+                    _ => return false,
+                }
+            }
         }
         true
     }
@@ -1238,15 +1230,11 @@ impl<'a> Scanner<'a> {
                 self.ws();
                 if k == b"__proto__" {
                     // Dropped key rewrites the input: the record validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 if entries.contains(&k) {
                     // Duplicate key collapsed to last-wins: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 // Bound the quadratic duplicate check. Beyond 128 entries the
                 // scan would cost O(n^2) on its zero-alloc hot path (see
@@ -1254,9 +1242,7 @@ impl<'a> Scanner<'a> {
                 // clean records defer to the DOM walk, which collapses via
                 // HashMap O(n) and remains correct.
                 if entries.len() >= 128 {
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 entries.push(k);
                 if string_key {

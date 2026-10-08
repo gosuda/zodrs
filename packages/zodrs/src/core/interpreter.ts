@@ -16,6 +16,7 @@ import {
   NUMBER_FORMAT_RANGES,
   setOwn,
   shallowClone,
+  sizeOf,
 } from "./util.js";
 import type { FAIL as FailType, MaybeAsync, Primitive } from "./util.js";
 
@@ -198,19 +199,19 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
       switch (check.c) {
         case "min_length":
         case "min_size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
+          const size = sizeOf(value);
           if (size < check.v) checkPayloadIssues(context, node, path, { origin, code: "too_small", minimum: check.v, inclusive: true }, value, runtime);
           break;
         }
         case "max_length":
         case "max_size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
+          const size = sizeOf(value);
           if (size > check.v) checkPayloadIssues(context, node, path, { origin, code: "too_big", maximum: check.v, inclusive: true }, value, runtime);
           break;
         }
         case "length":
         case "size": {
-          const size = typeof value === "string" || Array.isArray(value) ? value.length : value instanceof Set || value instanceof Map ? value.size : isObject(value) && typeof value["size"] === "number" ? (value as { size: number }).size : 0;
+          const size = sizeOf(value);
           if (size !== check.v) {
             const small = size < check.v;
             checkPayloadIssues(context, node, path, small

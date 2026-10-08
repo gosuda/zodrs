@@ -219,8 +219,7 @@ parallel; several of these are live conformance failures.)
    `to_json_schema(plan, opts)` was cut because the `ZODRS_LOADER=none`
    conformance tier must pass to-json-schema tests with no native backend, so
    one TS implementation serves all tiers. `crates/zodrs/src/jsonschema.rs`
-   remains a 1-line placeholder slated for deletion (verified: file contains
-   only a doc comment).
+   was a 1-line placeholder and has been deleted.
 3. **Crate renamed `zodrs-core` → `zodrs`** for the crates.io publication
    requirement (verified: `crates/zodrs/Cargo.toml` `name = "zodrs"`).
 
@@ -297,12 +296,11 @@ the two-backend invariant for random schemas and inputs.
 Successful data uses `exactDataEqual`; issue arrays use
 `issuePayloadEqual` (`compare.ts:124–177`).
 
-**Current status (2026-08-07):** The gate FAILS. The fuzz found 12 distinct
-root-cause divergence classes between the backends. Last survey (seed 24301,
-20000 cases): 19535 compared, 13009 matched, 4810 known-skips, 1716 new
-mismatches across 52 signatures, wall ~2s. `KNOWN-MISMATCHES.json` is
-currently empty (`"entries": []`); previously recorded entries were cleared
-after their fixes landed.
+**Current status:** The gate passes. The 12 divergence classes the fuzz
+found were fixed; `KNOWN-MISMATCHES.json` is empty (`"entries": []`) and the
+differential lane passes clean. Historical survey (seed 24301, 20000 cases,
+2026-08-07): 19535 compared, 13009 matched, 4810 known-skips, 1716 new
+mismatches across 52 signatures, wall ~2s.
 
 `compare.ts:issuePayloadEqual` treats issue keys with `undefined` values as
 absent. This matches the TS and Rust issue-construction paths. In contrast,
@@ -310,11 +308,15 @@ absent. This matches the TS and Rust issue-construction paths. In contrast,
 therefore reports `{}` and `{ a: undefined }` as different successful results
 (`compare.ts:100–133`).
 
-### Known payload/trace divergence classes
+### Historical payload/trace divergence classes (all fixed)
 
-Each class is grounded in the source files that produce the divergent payloads.
-The fuzz harness classifies mismatches by `caseKind|diffTag` signatures; the
-classes below map to the source-level root causes.
+The classes below document the 12 root causes the fuzz found on 2026-08-07,
+describing each as it existed before its fix. They are kept for provenance —
+none are live divergences; `KNOWN-MISMATCHES.json` is empty and the gate
+passes.
+Each class is grounded in the source files that produced the divergent
+payloads. The fuzz harness classifies mismatches by `caseKind|diffTag`
+signatures; the classes below map to the source-level root causes.
 
 #### P1. Issue field key insertion order
 

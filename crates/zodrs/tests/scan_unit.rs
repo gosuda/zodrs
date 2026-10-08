@@ -229,9 +229,15 @@ fn defer_depth_129() {
 }
 
 #[test]
-fn clean_int64_max() {
+fn defer_int64_max_literal() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"int64"}]}]"#;
-    assert_eq!(scan(plan, b"9223372036854775807"), Scan::Clean);
+    // "9223372036854775807" is unrepresentable in f64: the parsed value is
+    // exactly 2^63, which exceeds i64::MAX — the DOM walk and zod reject it.
+    // An f64-bound comparison would clean a literal the real path rejects.
+    assert_eq!(scan(plan, b"9223372036854775807"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"9223372036854775807"), 2);
+    assert_eq!(scan(plan, b"9223372036854775808"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"9223372036854775808"), 2);
 }
 
 #[test]
@@ -245,11 +251,14 @@ fn defer_int64_over() {
 }
 
 #[test]
-fn clean_uint64_max() {
+fn defer_uint64_max_literal() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
-    // 2^64 - 1 = 18446744073709551615; scanner uses f64 bounds so this probes
-    // the 19-digit parse path and the lossy 2^64 boundary.
-    assert_eq!(scan(plan, b"18446744073709551615"), Scan::Clean);
+    // "18446744073709551615" parses as f64 2^64, which exceeds u64::MAX —
+    // both reject paths must see a Defer, not a Clean over-acceptance.
+    assert_eq!(scan(plan, b"18446744073709551615"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"18446744073709551615"), 2);
+    assert_eq!(scan(plan, b"18446744073709551616"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"18446744073709551616"), 2);
 }
 
 #[test]
@@ -432,4 +441,216 @@ fn utf16_includes_past_end_empty_succeeds() {
         0,
         "JS .includes('', 5) on 'abc' is true"
     );
+}
+#[test]
+fn clean_absent_optional_field() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Clean,
+        "absent optional key drops out of the output"
+    );
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
+}
+
+#[test]
+fn clean_absent_optional_nested() {
+    let plan = r#"[
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["b"],"values":[2],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":{}}"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"{"a":{}}"#), 0);
+}
+
+#[test]
+fn defer_absent_required_field() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
+}
+
+#[test]
+fn defer_absent_optional_default() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"default","inner":4,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Defer,
+        "absent optional default materializes on rewrite"
+    );
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 1);
+}
+
+#[test]
+fn clean_absent_optional_catch() {
+    // A fired catch is zod's only `fallback`: handleOptionalResult swallows
+    // it to `undefined` under Optional, so the key drops out cleanly.
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"catch","inner":4,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
+}
+
+#[test]
+fn defer_absent_optional_coerce_union() {
+    // Union opts in via its optional member; the coerce branch fires on the
+    // absent input and materializes "undefined". Coerced values are not
+    // catch fallbacks: Optional does not swallow them (zod returns
+    // {"b":"undefined"}). A flag mis-set on the coerce arm would swallow the
+    // value and wrongly report Clean.
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"union","options":[4,5]},
+        {"k":"string","checks":[],"coerce":true},
+        {"k":"optional","inner":6},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Defer,
+        "optional-wrapped union materializes the coerced branch"
+    );
+    let verdict = validate(&compile(plan).unwrap(), br#"{"a":1}"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(
+        verdict.payload.as_deref(),
+        Some(r#"{"a":1,"b":"undefined"}"#)
+    );
+}
+
+#[test]
+fn defer_absent_nonoptional() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"nonoptional","inner":3},
+        {"k":"optional","inner":4},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
+}
+#[test]
+fn clean_tuple_optional_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"[1]"#),
+        Scan::Clean,
+        "optional tail slot drops"
+    );
+    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+}
+
+#[test]
+fn clean_tuple_optional_tail_multi() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2,4],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]},
+        {"k":"optional","inner":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"[1]"#), 0);
+}
+
+#[test]
+fn defer_tuple_default_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"default","inner":3,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"[1]"#),
+        Scan::Defer,
+        "default tail slot materializes on rewrite"
+    );
+    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(verdict.payload.as_deref(), Some("[1,5]"));
+}
+
+#[test]
+fn defer_tuple_required_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_undefined_tail() {
+    // `z.undefined()` is not input-optional: the absent slot collapses to
+    // `too_small` even though the classifier says the value drops out.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"undefined"}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_required_after_optional() {
+    // The optin tail is a contiguous run: a required slot after an optional
+    // one still makes the short input fail.
+    let plan = r#"[
+        {"k":"tuple","items":[1,2,4],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"[1]"#), 2);
+}
+
+#[test]
+fn defer_tuple_catch_tail() {
+    let plan = r#"[
+        {"k":"tuple","items":[1,2],"rest":null},
+        {"k":"number","checks":[]},
+        {"k":"catch","inner":3,"value":9},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"[1]"#), Scan::Defer);
+    let verdict = validate(&compile(plan).unwrap(), br#"[1]"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(verdict.payload.as_deref(), Some("[1,9]"));
 }

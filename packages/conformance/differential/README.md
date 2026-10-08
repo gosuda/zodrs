@@ -16,26 +16,24 @@ FUZZ_SEED=12345 FUZZ_CASES=20000 pnpm -C packages/conformance test:differential
 
 The vitest `differential` project pins `ZODRS_LOADER=native`.
 
-## Current status (2026-08-07)
+## Current status
 
-The gate FAILS: the fuzz found 12 distinct root-cause divergence classes
-between the backends, past the assignment's 3-class tripwire — the backend
-needs fixing before this suite can pass. Three classes are recorded in
-`KNOWN-MISMATCHES.json` and skipped (self-retiring rules); the remaining
-classes abort the run early with full reproductions (default
-`FUZZ_MAX_NEW=3`).
+The gate passes: the 12 divergence classes the fuzz found were fixed and
+`KNOWN-MISMATCHES.json` is empty (`"entries": []`). Any new mismatch fails
+the test with seed + schema descriptor + input bytes + both outcomes; past
+`FUZZ_MAX_NEW` (default 3) distinct new signatures the run aborts early.
 
-Survey the full case count while the backend is known-broken (the test
-still fails at the end, but prints every distinct signature with counts):
+To survey the full case count without aborting early (prints every distinct
+signature with counts, then still fails if any are new):
 
 ```
 FUZZ_CASES=20000 FUZZ_MAX_NEW=1000 FUZZ_REPORT_BODIES=60 \
   pnpm -C packages/conformance test:differential
 ```
 
-Last survey (seed 24301, 20000 cases): 19535 compared, 13009 matched,
-4810 known-skips, 1716 new mismatches across 52 signatures (12 root
-causes), wall ~2s.
+Historical survey while the backend was broken (seed 24301, 20000 cases,
+2026-08-07): 19535 compared, 13009 matched, 4810 known-skips, 1716 new
+mismatches across 52 signatures (12 root causes), wall ~2s.
 
 ## Layout
 

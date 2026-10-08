@@ -948,7 +948,7 @@ impl<'p> Validator<'p> {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
         reason = "f64->i128 is exact for every integral f64; the bound back-cast only feeds the issue payload, which zod reports at the same f64 precision"
@@ -959,10 +959,7 @@ impl<'p> Validator<'p> {
         // `util.BIGINT_FORMAT_RANGES`. An f64 bound literal cannot: `i64::MAX`
         // and `2^63` collapse onto one f64, so `n <= max` in f64 would accept
         // the overflowing `2^63` that zod rejects.
-        let (min, max): (i128, i128) = match fmt {
-            BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
-            BigIntFormat::Uint64 => (0, u64::MAX.into()),
-        };
+        let (min, max): (i128, i128) = bigint_format_bounds(fmt);
         let exact = n as i128;
         if exact < min {
             self.too_small("bigint", min as f64, true, false);
@@ -1892,15 +1889,22 @@ enum Missing {
     Cycle,
 }
 
-/// A conservative, allocation-light missing-input probe used only by the byte
-/// scanner. The DOM validator owns semantic missing evaluation.
-enum Absent<'a> {
+/// A conservative, allocation-light missing-input probe used by the byte
+/// scanner. The DOM validator owns semantic missing evaluation via
+/// [`Validator::eval_missing`]; this must classify every node into the same
+/// verdict family that walk would reach, modulo issue emission and the
+/// concrete re-validation of `Prefault` payloads (a prefault value that
+/// fails its inner still materializes here — the scan only needs to know
+/// whether a value exists, and defers anything else to the DOM).
+pub(crate) enum Absent<'a> {
     /// Validates cleanly with `undefined` output (the slot drops out of the
-    /// tuple output).
+    /// object output).
     Undefined,
     /// Validates cleanly with a concrete JSON value (defaults, catches). The
-    /// flag marks a catch fallback: canonical `handleOptionalResult` swallows
-    /// it back to `undefined` under an `Optional` wrapper.
+    /// flag marks a catch fallback — zod's `fallback` flag, which only a
+    /// fired `catch` sets: canonical `handleOptionalResult` swallows it back
+    /// to `undefined` under an `Optional` wrapper. Coerced values do NOT set
+    /// it; an optional-wrapped coercion materializes like a default.
     Value(Cow<'a, Json>, bool),
     /// Emits issues on `undefined` input.
     Fail,
@@ -1908,7 +1912,7 @@ enum Absent<'a> {
     Cycle,
 }
 
-fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
+pub(crate) fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
     let mut hops = ABSENT_MAX_HOPS;
     absent_result_bounded(plan, id, &mut hops)
 }
@@ -1978,9 +1982,9 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
             }
         }
         PlanNode::String { coerce: true, .. } => {
-            Absent::Value(Cow::Owned(Json::from("undefined")), true)
+            Absent::Value(Cow::Owned(Json::from("undefined")), false)
         }
-        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), true),
+        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), false),
         PlanNode::String { coerce: false, .. }
         | PlanNode::Number { .. }
         | PlanNode::BigInt { .. }
@@ -2006,12 +2010,6 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
         | PlanNode::Host { .. }
         | PlanNode::Unsupported => Absent::Fail,
     }
-}
-
-/// Whether a node supplies a concrete value for absent input. Ordinary
-/// default/wrapper traversal only borrows plan values and allocates nothing.
-pub(crate) fn has_default(plan: &CompiledPlan, id: NodeId) -> bool {
-    matches!(absent_result(plan, id), Absent::Value(..))
 }
 
 fn write_pair(key: &str, out: &mut OutputBuffer, first: &mut bool) {
@@ -2518,6 +2516,28 @@ pub(crate) fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
         NumberFormat::Float64 => (f64::MIN, f64::MAX),
         NumberFormat::Safeint => (-MAX_SAFE_INT, MAX_SAFE_INT),
     }
+}
+
+fn bigint_format_bounds(fmt: BigIntFormat) -> (i128, i128) {
+    match fmt {
+        BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
+        BigIntFormat::Uint64 => (0, u64::MAX.into()),
+    }
+}
+
+/// Range-checks `n` against a bigint format in integer space, matching the
+/// `util.BIGINT_FORMAT_RANGES` comparison the DOM walk performs. The scan
+/// path calls this too: f64 bounds collapse `i64::MAX` and `2^63` (and
+/// `u64::MAX` and `2^64`) onto one representable value, so comparing in f64
+/// would over-accept boundary literals both real paths reject.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "f64->i128 is exact for every integral f64 and saturates beyond i128 range, matching the DOM walk's `n as i128`"
+)]
+pub(crate) fn bigint_format_in_range(fmt: BigIntFormat, n: f64) -> bool {
+    let (min, max) = bigint_format_bounds(fmt);
+    let exact = n as i128;
+    exact >= min && exact <= max
 }
 
 #[cfg(test)]
