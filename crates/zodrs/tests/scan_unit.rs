@@ -594,6 +594,41 @@ fn defer_tuple_discunion_required_tail() {
 }
 
 #[test]
+fn clean_absent_shared_lazy_cycle_field() {
+    // The shared lazy node sits inside its own union and is also a field: a
+    // traversal-order DFS memoizes it required mid-cycle, but the union's
+    // optionality is established by the non-cyclic optional branch, so the
+    // least fixed point marks the lazy optin — matching zod, which accepts
+    // `{"x":"ok"}` for `object({x: union[opt(str), L], y: L})`.
+    let plan = r#"[
+        {"k":"object","keys":["x","y"],"values":[1,4],"mode":"strip","catchall":null},
+        {"k":"union","options":[2,4]},
+        {"k":"optional","inner":3},
+        {"k":"string","checks":[]},
+        {"k":"lazy","inner":1}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"x":"ok"}"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"{"x":"ok"}"#), 0);
+}
+
+#[test]
+fn defer_absent_pure_lazy_cycle_field() {
+    // With no optional-claiming member the fixed point stays all-required —
+    // the same verdict the old back-edge rule gave. The missing-input walk
+    // then recurses through the lazy cycle until the hop budget runs out and
+    // defers to JS rather than emitting a fabricated `nonoptional` (zod
+    // itself overflows evaluating `optin` here, so there is no oracle).
+    let plan = r#"[
+        {"k":"object","keys":["x","y"],"values":[1,4],"mode":"strip","catchall":null},
+        {"k":"string","checks":[]},
+        {"k":"union","options":[1,3]},
+        {"k":"lazy","inner":2},
+        {"k":"lazy","inner":2}
+    ]"#;
+    assert_eq!(validate_status(plan, br#"{"x":"ok"}"#), 3);
+}
+
+#[test]
 fn clean_absent_discunion_optional_field() {
     // The object tail takes the same gate: an optin discunion field drops out
     // cleanly; the classifier itself reports Fail on the unmodeled node, so

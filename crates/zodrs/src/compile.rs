@@ -422,71 +422,57 @@ pub fn compile(plan_json: &str) -> Result<CompiledPlan, CompileError> {
 /// schemas accept `undefined` input; nullable, lazy, and readonly wrappers
 /// delegate to their inner type; unions and pipes aggregate across their
 /// branches. Tuple validation reads these flags to place the optional tail.
+///
+/// Recursive lazy schemas make the plan cyclic, so optionality is a system
+/// of equations, not a tree fold. Every kind's flags are a monotone function
+/// of its children's flags (constant, delegate, or disjunction), so the
+/// least fixed point is reached by iterating from all-required until stable;
+/// it is order-independent, claims optional only when a non-cyclic path
+/// establishes it, and leaves purely cyclic claims required — the same
+/// answer a DFS back-edge produced, without memoizing mid-cycle verdicts.
 fn compute_optionality(nodes: &[PlanNode], dispatch: &mut [NodeDispatch]) {
-    let mut memo: Vec<Option<(bool, bool)>> = vec![None; nodes.len()];
-    let mut visiting = vec![false; nodes.len()];
-    for (id, d) in dispatch.iter_mut().enumerate() {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "arena indices are NodeId-valued by construction"
-        )]
-        let id = id as NodeId;
-        let (optin, optout) = optionality(nodes, &mut memo, &mut visiting, id);
+    let mut flags = vec![(false, false); nodes.len()];
+    loop {
+        let mut changed = false;
+        for id in 0..flags.len() {
+            let next = optionality_of(&nodes[id], &flags);
+            if next != flags[id] {
+                flags[id] = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for (d, &(optin, optout)) in dispatch.iter_mut().zip(&flags) {
         d.optin_optional = optin;
         d.optout_optional = optout;
     }
 }
 
-fn optionality(
-    nodes: &[PlanNode],
-    memo: &mut [Option<(bool, bool)>],
-    visiting: &mut [bool],
-    id: NodeId,
-) -> (bool, bool) {
-    if let Some(done) = memo[id as usize] {
-        return done;
-    }
-    // A cycle can only arise through a recursive lazy schema, whose
-    // optionality is decided by the structural wrapper around it, so the
-    // back-edge itself is treated as required.
-    if visiting[id as usize] {
-        return (false, false);
-    }
-    visiting[id as usize] = true;
-    let flags = match &nodes[id as usize] {
+fn optionality_of(node: &PlanNode, flags: &[(bool, bool)]) -> (bool, bool) {
+    let at = |id: NodeId| flags[id as usize];
+    match node {
         PlanNode::Optional { .. } | PlanNode::ExactOptional { .. } => (true, true),
         PlanNode::Default { .. } | PlanNode::Prefault { .. } => (true, false),
-        PlanNode::Catch { inner, .. } => (true, optionality(nodes, memo, visiting, *inner).1),
+        PlanNode::Catch { inner, .. } => (true, at(*inner).1),
         PlanNode::Nullable { inner } | PlanNode::Lazy { inner } | PlanNode::Readonly { inner } => {
-            optionality(nodes, memo, visiting, *inner)
+            at(*inner)
         }
-        PlanNode::Union { options } => {
-            let mut flags = (false, false);
-            for opt in options {
-                let (optin, optout) = optionality(nodes, memo, visiting, *opt);
-                flags.0 |= optin;
-                flags.1 |= optout;
-            }
-            flags
-        }
-        PlanNode::DiscUnion { map, .. } => {
-            let mut flags = (false, false);
-            for (_, opt) in map {
-                let (optin, optout) = optionality(nodes, memo, visiting, *opt);
-                flags.0 |= optin;
-                flags.1 |= optout;
-            }
-            flags
-        }
-        PlanNode::Pipe { a, b } => (
-            optionality(nodes, memo, visiting, *a).0,
-            optionality(nodes, memo, visiting, *b).1,
-        ),
+        PlanNode::Union { options } => options
+            .iter()
+            .fold((false, false), |acc, opt| {
+                (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
+            }),
+        PlanNode::DiscUnion { map, .. } => map
+            .iter()
+            .fold((false, false), |acc, (_, opt)| {
+                (acc.0 | at(*opt).0, acc.1 | at(*opt).1)
+            }),
+        PlanNode::Pipe { a, b } => (at(*a).0, at(*b).1),
         _ => (false, false),
-    };
-    visiting[id as usize] = false;
-    memo[id as usize] = Some(flags);
-    flags
+    }
 }
 
 fn node_checks(node: &PlanNode) -> Option<&[Check]> {
