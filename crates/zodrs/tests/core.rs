@@ -531,15 +531,27 @@ fn record_validates_values() {
 #[test]
 fn lazy_cycle_validates_nested() {
     // node0: lazy(1); node1: optional(2); node2: object{child:0}
+    // mirrors `z.lazy(() => z.object({ child: S.optional() }))`: child optional.
     let compiled = plan(&json!([
         {"k":"lazy","inner":1},
         {"k":"optional","inner":2},
-        {"k":"object","keys":["child"],"values":[0],"optional":[false],"mode":"strip","catchall":null}
+        {"k":"object","keys":["child"],"values":[0],"optional":[true],"mode":"strip","catchall":null}
     ]));
     // This plan is not actually self-consistent (child:0 -> lazy(1) -> optional(2)),
-    // but it exercises the back-edge traversal without panic.
+    // but it exercises the back-edge traversal without panic. zod rejects the
+    // input with invalid_type at ["child","child"]: the inner 1 reaches the
+    // object node through two lazy hops and type-mismatches.
     let v = validate(&compiled, br#"{"child":{"child":1}}"#);
-    assert!(matches!(v.status, 0 | 2), "{v:?}");
+    assert_eq!(v.status, 2, "expected invalid: {v:?}");
+    let iss = issues(&v.payload);
+    assert_eq!(iss.len(), 1, "got {iss:?}");
+    assert_eq!(iss[0]["code"], "invalid_type");
+    assert_eq!(iss[0]["expected"], "object");
+    assert_eq!(iss[0]["path"], json!(["child", "child"]));
+
+    // A valid nesting passes through the same back-edge cleanly.
+    let v = validate(&compiled, br#"{"child":{"child":{}}}"#);
+    assert_eq!(v.status, 0, "expected clean: {v:?}");
 }
 
 // ------------------------------------------------------------------------

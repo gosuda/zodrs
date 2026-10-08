@@ -166,6 +166,13 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Marks the verdict dirty and exits the current container level.
+    fn dirty_exit(&mut self) -> bool {
+        self.dirty_hint = true;
+        self.depth -= 1;
+        true
+    }
+
     fn peek(&self) -> Option<u8> {
         self.b.get(self.i).copied()
     }
@@ -810,8 +817,7 @@ impl<'a> Scanner<'a> {
             'entries: loop {
                 self.ws();
                 if self.dirty_hint {
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 let Some(k) = self.key_token() else {
                     // Escaped or malformed key: the DOM walk decides.
@@ -851,14 +857,10 @@ impl<'a> Scanner<'a> {
                     // Duplicates and out-of-order keys are reordered or
                     // collapsed on rewrite: the object validates dirty.
                     if last_schema_i.is_some_and(|l| schema_i <= l) {
-                        self.dirty_hint = true;
-                        self.depth -= 1;
-                        return true;
+                        return self.dirty_exit();
                     }
                     if seen_catchall {
-                        self.dirty_hint = true;
-                        self.depth -= 1;
-                        return true;
+                        return self.dirty_exit();
                     }
                     last_schema_i = Some(schema_i);
                     seen |= 1 << schema_i;
@@ -868,9 +870,7 @@ impl<'a> Scanner<'a> {
                     }
                 } else if k == b"__proto__" {
                     // Dropped on output: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 } else if let Some(catchall_id) = catchall {
                     seen_catchall = true;
                     if !self.value(catchall_id) {
@@ -883,9 +883,7 @@ impl<'a> Scanner<'a> {
                     break;
                 } else {
                     // strip/passthrough rewrite the output: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 self.ws();
                 match self.peek() {
@@ -1208,15 +1206,11 @@ impl<'a> Scanner<'a> {
                 self.ws();
                 if k == b"__proto__" {
                     // Dropped key rewrites the input: the record validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 if entries.contains(&k) {
                     // Duplicate key collapsed to last-wins: validates dirty.
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 // Bound the quadratic duplicate check. Beyond 128 entries the
                 // scan would cost O(n^2) on its zero-alloc hot path (see
@@ -1224,9 +1218,7 @@ impl<'a> Scanner<'a> {
                 // clean records defer to the DOM walk, which collapses via
                 // HashMap O(n) and remains correct.
                 if entries.len() >= 128 {
-                    self.dirty_hint = true;
-                    self.depth -= 1;
-                    return true;
+                    return self.dirty_exit();
                 }
                 entries.push(k);
                 if string_key {
