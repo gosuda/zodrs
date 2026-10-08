@@ -308,11 +308,15 @@ absent. This matches the TS and Rust issue-construction paths. In contrast,
 therefore reports `{}` and `{ a: undefined }` as different successful results
 (`compare.ts:100–133`).
 
-### Known payload/trace divergence classes
+### Historical payload/trace divergence classes (all fixed)
 
-Each class is grounded in the source files that produce the divergent payloads.
-The fuzz harness classifies mismatches by `caseKind|diffTag` signatures; the
-classes below map to the source-level root causes.
+The classes below document the 12 root causes the fuzz found on 2026-08-07,
+describing each as it existed before its fix. They are kept for provenance —
+none are live divergences; `KNOWN-MISMATCHES.json` is empty and the gate
+passes.
+Each class is grounded in the source files that produced the divergent
+payloads. The fuzz harness classifies mismatches by `caseKind|diffTag`
+signatures; the classes below map to the source-level root causes.
 
 #### P1. Issue field key insertion order
 
