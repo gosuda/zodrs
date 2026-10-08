@@ -229,9 +229,15 @@ fn defer_depth_129() {
 }
 
 #[test]
-fn clean_int64_max() {
+fn defer_int64_max_literal() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"int64"}]}]"#;
-    assert_eq!(scan(plan, b"9223372036854775807"), Scan::Clean);
+    // "9223372036854775807" is unrepresentable in f64: the parsed value is
+    // exactly 2^63, which exceeds i64::MAX — the DOM walk and zod reject it.
+    // An f64-bound comparison would clean a literal the real path rejects.
+    assert_eq!(scan(plan, b"9223372036854775807"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"9223372036854775807"), 2);
+    assert_eq!(scan(plan, b"9223372036854775808"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"9223372036854775808"), 2);
 }
 
 #[test]
@@ -245,11 +251,14 @@ fn defer_int64_over() {
 }
 
 #[test]
-fn clean_uint64_max() {
+fn defer_uint64_max_literal() {
     let plan = r#"[{"k":"number","checks":[{"c":"bigint_format","v":"uint64"}]}]"#;
-    // 2^64 - 1 = 18446744073709551615; scanner uses f64 bounds so this probes
-    // the 19-digit parse path and the lossy 2^64 boundary.
-    assert_eq!(scan(plan, b"18446744073709551615"), Scan::Clean);
+    // "18446744073709551615" parses as f64 2^64, which exceeds u64::MAX —
+    // both reject paths must see a Defer, not a Clean over-acceptance.
+    assert_eq!(scan(plan, b"18446744073709551615"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"18446744073709551615"), 2);
+    assert_eq!(scan(plan, b"18446744073709551616"), Scan::Defer);
+    assert_eq!(validate_status(plan, b"18446744073709551616"), 2);
 }
 
 #[test]

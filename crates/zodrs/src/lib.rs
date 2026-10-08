@@ -7,7 +7,6 @@
 pub mod compile;
 pub mod formats;
 pub mod issue;
-pub mod jsonschema;
 pub mod plan;
 /// Byte-scanner fast path. Exposed for integration tests; not a stable API.
 #[doc(hidden)]

@@ -411,47 +411,11 @@ impl<'a> Scanner<'a> {
             // The verdict is already Defer; spare the remaining work.
             return true;
         }
+        if let Some(result) = self.leaf(id) {
+            return result;
+        }
         match self.node(id) {
             PlanNode::Any | PlanNode::Unknown => self.skip_value(),
-            PlanNode::Null => self.eat(b"null"),
-            PlanNode::Boolean { coerce } => {
-                if *coerce {
-                    self.dirty_hint = true; // coercion semantics live in the DOM walk
-                    return false;
-                }
-                self.eat(b"true") || self.eat(b"false")
-            }
-            PlanNode::Literal { values } | PlanNode::Enum { values } => self.literal(values),
-            PlanNode::String { checks, coerce } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                if checks.is_empty() {
-                    // No checks: content is irrelevant, so escapes and even
-                    // invalid UTF-8 need no decoding here — the JS wrapper's
-                    // `JSON.parse` reproduces the exact same value on either
-                    // verdict path.
-                    return self.skip_string();
-                }
-                let Some(s) = self.string_token() else {
-                    // Escaped content: zod may validate it (clean or with a
-                    // rewrite); the scan cannot model it.
-                    self.dirty_hint = true;
-                    return false;
-                };
-                self.string_checks(id, s)
-            }
-            PlanNode::Number { coerce, .. } => {
-                if *coerce {
-                    self.dirty_hint = true;
-                    return false;
-                }
-                let Some(n) = self.number_token() else {
-                    return false;
-                };
-                self.number_checks(id, n)
-            }
             PlanNode::Object { .. } => self.object(id),
             PlanNode::Array { element, .. } => {
                 let element = *element;
@@ -589,7 +553,15 @@ impl<'a> Scanner<'a> {
             | PlanNode::Nan
             | PlanNode::Symbol
             | PlanNode::Host { .. } => false,
-            PlanNode::Unsupported => {
+            // Leaf kinds dispatch through `leaf` above; this arm is unreachable.
+            PlanNode::String { .. }
+            | PlanNode::Number { .. }
+            | PlanNode::Boolean { .. }
+            | PlanNode::Null
+            | PlanNode::Literal { .. }
+            | PlanNode::Enum { .. }
+            | PlanNode::Unsupported => {
+                debug_assert!(false, "leaf kinds handled by leaf()");
                 self.dirty_hint = true;
                 false
             }
@@ -719,15 +691,7 @@ impl<'a> Scanner<'a> {
                 }
                 Check::MultipleOf { v } => float_multiple_of(n, v.as_f64().unwrap_or(1.0)),
                 Check::NumberFormat { v } => number_format_scan(*v, n),
-                Check::BigIntFormat { v } => {
-                    let (min, max) = match v {
-                        crate::plan::BigIntFormat::Int64 => {
-                            (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_807.0)
-                        }
-                        crate::plan::BigIntFormat::Uint64 => (0.0, 18_446_744_073_709_551_615.0),
-                    };
-                    n >= min && n <= max
-                }
+                Check::BigIntFormat { v } => crate::validate::bigint_format_in_range(*v, n),
                 Check::Property { .. } | Check::Unsupported => {
                     self.dirty_hint = true;
                     false
@@ -752,9 +716,15 @@ impl<'a> Scanner<'a> {
                     return Some(false);
                 }
                 if checks.is_empty() {
+                    // No checks: content is irrelevant, so escapes and even
+                    // invalid UTF-8 need no decoding here — the JS wrapper's
+                    // `JSON.parse` reproduces the exact same value on either
+                    // verdict path.
                     return Some(self.skip_string());
                 }
                 let Some(s) = self.string_token() else {
+                    // Escaped content: zod may validate it (clean or with a
+                    // rewrite); the scan cannot model it.
                     self.dirty_hint = true;
                     return Some(false);
                 };

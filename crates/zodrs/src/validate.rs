@@ -948,7 +948,7 @@ impl<'p> Validator<'p> {
         }
     }
 
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
         reason = "f64->i128 is exact for every integral f64; the bound back-cast only feeds the issue payload, which zod reports at the same f64 precision"
@@ -959,10 +959,7 @@ impl<'p> Validator<'p> {
         // `util.BIGINT_FORMAT_RANGES`. An f64 bound literal cannot: `i64::MAX`
         // and `2^63` collapse onto one f64, so `n <= max` in f64 would accept
         // the overflowing `2^63` that zod rejects.
-        let (min, max): (i128, i128) = match fmt {
-            BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
-            BigIntFormat::Uint64 => (0, u64::MAX.into()),
-        };
+        let (min, max): (i128, i128) = bigint_format_bounds(fmt);
         let exact = n as i128;
         if exact < min {
             self.too_small("bigint", min as f64, true, false);
@@ -2518,6 +2515,28 @@ pub(crate) fn number_format_range(fmt: NumberFormat) -> (f64, f64) {
         NumberFormat::Float64 => (f64::MIN, f64::MAX),
         NumberFormat::Safeint => (-MAX_SAFE_INT, MAX_SAFE_INT),
     }
+}
+
+fn bigint_format_bounds(fmt: BigIntFormat) -> (i128, i128) {
+    match fmt {
+        BigIntFormat::Int64 => (i64::MIN.into(), i64::MAX.into()),
+        BigIntFormat::Uint64 => (0, u64::MAX.into()),
+    }
+}
+
+/// Range-checks `n` against a bigint format in integer space, matching the
+/// `util.BIGINT_FORMAT_RANGES` comparison the DOM walk performs. The scan
+/// path calls this too: f64 bounds collapse `i64::MAX` and `2^63` (and
+/// `u64::MAX` and `2^64`) onto one representable value, so comparing in f64
+/// would over-accept boundary literals both real paths reject.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "f64->i128 is exact for every integral f64 and saturates beyond i128 range, matching the DOM walk's `n as i128`"
+)]
+pub(crate) fn bigint_format_in_range(fmt: BigIntFormat, n: f64) -> bool {
+    let (min, max) = bigint_format_bounds(fmt);
+    let exact = n as i128;
+    exact >= min && exact <= max
 }
 
 #[cfg(test)]
