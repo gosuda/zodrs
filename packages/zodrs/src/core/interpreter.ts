@@ -1,7 +1,7 @@
 import type { $ZodRawIssue, ParseContext } from "./errors.js";
 import { finalizeNested, ZodError } from "./errors.js";
 import { checkUrl, patternForFormat, testFormat } from "./formats.js";
-import { optinOf, optoutOf } from "./introspect.js";
+import { optinOf, optoutOf, transformingHostOp } from "./introspect.js";
 import type {
   HostRuntimeCheck,
   RuntimeCheck,
@@ -614,7 +614,7 @@ function hostResult(node: SchemaNode & { readonly kind: "host" }, input: unknown
   if ((context.issues?.length ?? 0) > before) return FAIL;
   // $ZodTransform always marks the payload as a fallback value, which lets an
   // outer `optional` clobber it when the original input was undefined.
-  if (node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode") {
+  if (transformingHostOp(node.op)) {
     context.fallback = (context.fallback ?? 0) + 1;
   }
   return applyChecksSync(node, result, context, path);

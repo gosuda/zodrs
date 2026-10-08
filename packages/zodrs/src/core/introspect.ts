@@ -1,6 +1,6 @@
-import type { FormatId, SchemaNode } from "./nodes.js";
+import type { FormatId, HostOperation, SchemaNode } from "./nodes.js";
 import { patternForFormat } from "./formats.js";
-import { escapeRegex } from "./util.js";
+import { BIGINT_FORMAT_RANGES, NUMBER_FORMAT_RANGES, escapeRegex } from "./util.js";
 
 /**
  * Lazy `_zod` introspection mirrors Zod v4.4.3: `values`, `pattern`, `optin`,
@@ -11,6 +11,15 @@ import { escapeRegex } from "./util.js";
  * read contributes `undefined`, which bottoms cyclic evaluations out at the
  * least fixed point instead of overflowing the stack.
  */
+
+/**
+ * Host ops that produce a new value — Zod's $ZodTransform-family. Drives the
+ * interpreter's catch-fallback marker and the JSON-Schema input-mode
+ * examples/default scrub.
+ */
+export function transformingHostOp(op: HostOperation): boolean {
+  return op === "transform" || op === "preprocess" || op === "codec_decode" || op === "codec_encode";
+}
 
 const valuesCache = new WeakMap<SchemaNode, ReadonlySet<unknown> | undefined>();
 const patternCache = new WeakMap<SchemaNode, RegExp | undefined>();
@@ -64,23 +73,12 @@ export function bagOf(node: SchemaNode): CheckBag {
         bag = { ...bag, multipleOf: typeof check.v === "string" ? BigInt(check.v) : check.v };
         break;
       case "number_format": {
-        const ranges: Readonly<Record<string, readonly [number, number]>> = {
-          safeint: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
-          int32: [-2147483648, 2147483647],
-          uint32: [0, 4294967295],
-          float32: [-3.4028234663852886e38, 3.4028234663852886e38],
-          float64: [-Number.MAX_VALUE, Number.MAX_VALUE],
-        };
-        const range = ranges[check.v];
+        const range = NUMBER_FORMAT_RANGES[check.v as keyof typeof NUMBER_FORMAT_RANGES];
         bag = { ...bag, format: check.v, ...(range ? { minimum: range[0], maximum: range[1] } : {}) };
         break;
       }
       case "bigint_format": {
-        const ranges: Readonly<Record<string, readonly [bigint, bigint]>> = {
-          int64: [BigInt("-9223372036854775808"), BigInt("9223372036854775807")],
-          uint64: [BigInt(0), BigInt("18446744073709551615")],
-        };
-        const range = ranges[check.v];
+        const range = BIGINT_FORMAT_RANGES[check.v as keyof typeof BIGINT_FORMAT_RANGES];
         bag = { ...bag, format: check.v, ...(range ? { minimum: range[0], maximum: range[1] } : {}) };
         break;
       }
@@ -141,7 +139,6 @@ export function valuesOf(node: SchemaNode): ReadonlySet<unknown> | undefined {
 function computeValues(node: SchemaNode): ReadonlySet<unknown> | undefined {
   switch (node.kind) {
     case "undefined":
-    case "void":
       return new Set([undefined]);
     case "null":
       return new Set([null]);
@@ -233,8 +230,6 @@ function computePattern(node: SchemaNode): RegExp | undefined {
       const inner = patternOf(node.inner);
       return inner ? new RegExp(`^(${cleanSource(inner.source)}|null)$`) : undefined;
     }
-    case "readonly":
-      return patternOf(node.inner);
     case "lazy": {
       // Delegate like Zod's $ZodLazy; guard cycles from recursive schemas.
       if (lazyPatternInProgress.has(node)) return undefined;
@@ -361,9 +356,6 @@ function computePropValues(node: SchemaNode): Readonly<Record<string, ReadonlySe
       return propValues;
     }
     case "readonly":
-    case "default":
-    case "prefault":
-    case "catch":
       return propValuesOf(node.inner);
     case "pipe":
       return propValuesOf(node.a);
