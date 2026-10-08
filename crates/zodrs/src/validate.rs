@@ -1889,15 +1889,22 @@ enum Missing {
     Cycle,
 }
 
-/// A conservative, allocation-light missing-input probe used only by the byte
-/// scanner. The DOM validator owns semantic missing evaluation.
-enum Absent<'a> {
+/// A conservative, allocation-light missing-input probe used by the byte
+/// scanner. The DOM validator owns semantic missing evaluation via
+/// [`Validator::eval_missing`]; this must classify every node into the same
+/// verdict family that walk would reach, modulo issue emission and the
+/// concrete re-validation of `Prefault` payloads (a prefault value that
+/// fails its inner still materializes here — the scan only needs to know
+/// whether a value exists, and defers anything else to the DOM).
+pub(crate) enum Absent<'a> {
     /// Validates cleanly with `undefined` output (the slot drops out of the
-    /// tuple output).
+    /// object output).
     Undefined,
     /// Validates cleanly with a concrete JSON value (defaults, catches). The
-    /// flag marks a catch fallback: canonical `handleOptionalResult` swallows
-    /// it back to `undefined` under an `Optional` wrapper.
+    /// flag marks a catch fallback — zod's `fallback` flag, which only a
+    /// fired `catch` sets: canonical `handleOptionalResult` swallows it back
+    /// to `undefined` under an `Optional` wrapper. Coerced values do NOT set
+    /// it; an optional-wrapped coercion materializes like a default.
     Value(Cow<'a, Json>, bool),
     /// Emits issues on `undefined` input.
     Fail,
@@ -1905,7 +1912,7 @@ enum Absent<'a> {
     Cycle,
 }
 
-fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
+pub(crate) fn absent_result(plan: &CompiledPlan, id: NodeId) -> Absent<'_> {
     let mut hops = ABSENT_MAX_HOPS;
     absent_result_bounded(plan, id, &mut hops)
 }
@@ -1975,9 +1982,9 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
             }
         }
         PlanNode::String { coerce: true, .. } => {
-            Absent::Value(Cow::Owned(Json::from("undefined")), true)
+            Absent::Value(Cow::Owned(Json::from("undefined")), false)
         }
-        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), true),
+        PlanNode::Boolean { coerce: true } => Absent::Value(Cow::Owned(Json::from(false)), false),
         PlanNode::String { coerce: false, .. }
         | PlanNode::Number { .. }
         | PlanNode::BigInt { .. }
@@ -2003,12 +2010,6 @@ fn absent_result_bounded<'a>(plan: &'a CompiledPlan, id: NodeId, hops: &mut usiz
         | PlanNode::Host { .. }
         | PlanNode::Unsupported => Absent::Fail,
     }
-}
-
-/// Whether a node supplies a concrete value for absent input. Ordinary
-/// default/wrapper traversal only borrows plan values and allocates nothing.
-pub(crate) fn has_default(plan: &CompiledPlan, id: NodeId) -> bool {
-    matches!(absent_result(plan, id), Absent::Value(..))
 }
 
 fn write_pair(key: &str, out: &mut OutputBuffer, first: &mut bool) {

@@ -786,6 +786,7 @@ impl<'a> Scanner<'a> {
         let PlanNode::Object {
             keys,
             values,
+            optional,
             mode,
             catchall,
             ..
@@ -910,16 +911,22 @@ impl<'a> Scanner<'a> {
         if seen.count_ones() as usize == keys.len() {
             return true;
         }
-        // Absent schema keys: a default/prefault/catch value materializes on
-        // rewrite (validates dirty); anything else is a hard missing-input
-        // failure.
+        // Absent schema keys resolve through the shared missing-input
+        // classifier: `Undefined` drops out of the output (still clean),
+        // `Value` materializes on rewrite (validates dirty). Both require the
+        // schema flag that marks the key optional on input; without it the
+        // DOM walk emits `nonoptional` instead, so the scan defers.
         for (schema_i, _) in keys.iter().enumerate() {
             if seen & (1 << schema_i) == 0 {
-                if crate::validate::has_default(self.plan, values[schema_i]) {
-                    self.dirty_hint = true;
-                    return true;
+                use crate::validate::{Absent, absent_result};
+                match absent_result(self.plan, values[schema_i]) {
+                    Absent::Undefined if optional[schema_i] => {}
+                    Absent::Value(..) if optional[schema_i] => {
+                        self.dirty_hint = true;
+                        return true;
+                    }
+                    _ => return false,
                 }
-                return false;
             }
         }
         true

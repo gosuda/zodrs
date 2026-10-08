@@ -442,3 +442,115 @@ fn utf16_includes_past_end_empty_succeeds() {
         "JS .includes('', 5) on 'abc' is true"
     );
 }
+#[test]
+fn clean_absent_optional_field() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Clean,
+        "absent optional key drops out of the output"
+    );
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
+}
+
+#[test]
+fn clean_absent_optional_nested() {
+    let plan = r#"[
+        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
+        {"k":"object","keys":["b"],"values":[2],"optional":[true],"mode":"strip","catchall":null},
+        {"k":"optional","inner":3},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":{}}"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"{"a":{}}"#), 0);
+}
+
+#[test]
+fn defer_absent_required_field() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
+}
+
+#[test]
+fn defer_absent_optional_default() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"default","inner":4,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Defer,
+        "absent optional default materializes on rewrite"
+    );
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 1);
+}
+
+#[test]
+fn clean_absent_optional_catch() {
+    // A fired catch is zod's only `fallback`: handleOptionalResult swallows
+    // it to `undefined` under Optional, so the key drops out cleanly.
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"catch","inner":4,"value":5},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Clean);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 0);
+}
+
+#[test]
+fn defer_absent_optional_coerce_union() {
+    // Union opts in via its optional member; the coerce branch fires on the
+    // absent input and materializes "undefined". Coerced values are not
+    // catch fallbacks: Optional does not swallow them (zod returns
+    // {"b":"undefined"}). A flag mis-set on the coerce arm would swallow the
+    // value and wrongly report Clean.
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"optional","inner":3},
+        {"k":"union","options":[4,5]},
+        {"k":"string","checks":[],"coerce":true},
+        {"k":"optional","inner":6},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(
+        scan(plan, br#"{"a":1}"#),
+        Scan::Defer,
+        "optional-wrapped union materializes the coerced branch"
+    );
+    let verdict = validate(&compile(plan).unwrap(), br#"{"a":1}"#);
+    assert_eq!(verdict.status, 1);
+    assert_eq!(
+        verdict.payload.as_deref(),
+        Some(r#"{"a":1,"b":"undefined"}"#)
+    );
+}
+
+#[test]
+fn defer_absent_nonoptional() {
+    let plan = r#"[
+        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
+        {"k":"number","checks":[]},
+        {"k":"nonoptional","inner":3},
+        {"k":"optional","inner":4},
+        {"k":"number","checks":[]}
+    ]"#;
+    assert_eq!(scan(plan, br#"{"a":1}"#), Scan::Defer);
+    assert_eq!(validate_status(plan, br#"{"a":1}"#), 2);
+}
