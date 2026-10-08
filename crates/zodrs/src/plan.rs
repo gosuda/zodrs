@@ -169,8 +169,6 @@ pub enum PlanNode {
         keys: Vec<String>,
         /// Child schema index corresponding to each key.
         values: Vec<NodeId>,
-        /// Whether each shape key may be absent.
-        optional: Vec<bool>,
         /// Unknown-key policy when no catchall is present.
         mode: ObjectMode,
         /// Schema applied to unknown values, if any.

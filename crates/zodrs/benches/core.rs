@@ -11,7 +11,7 @@ use sonic_rs::Value as Json;
 use zodrs::issue::{Issue, PathSegRef, issues_to_value};
 use zodrs::{compile, issues_to_json, validate};
 
-const ORDINARY_PLAN: &str = r#"[{"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]}]"#;
+const ORDINARY_PLAN: &str = r#"[{"k":"object","keys":["a","b"],"values":[1,3],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]},{"k":"optional","inner":2}]"#;
 const ORDINARY_INPUT: &[u8] = br#"{"a":"hello","b":5}"#;
 
 const SIG1_PLAN: &str = include_str!("../tests/testdata/sig1-plan.json");

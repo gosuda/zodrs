@@ -9,6 +9,7 @@
 import { ZodError, $ZodRealError } from "../core/errors.js";
 import type { $ZodErrorMap, $ZodIssue, ParseContext } from "../core/errors.js";
 import * as coreModule from "../core/index.js";
+import { optinOf, optoutOf } from "../core/introspect.js";
 import { cloneNode, node } from "../core/nodes.js";
 import type { FormatId, HostFunction, MetadataBag, ObjectNode, RuntimeCheck, SchemaNode } from "../core/nodes.js";
 import type { SafeParseResult } from "../core/parse.js";
@@ -210,33 +211,10 @@ function computeBag(schemaNode: SchemaNode): MetadataBag {
   return bag;
 }
 
-// Optionality mirrors Zod core: wrappers propagate, defaults are input-optional,
-// unions are optional when any option is, pipes defer to the relevant side.
+// Optionality mirrors Zod core via the shared introspection table (weak-map
+// memoized and cycle-guarded there); mini exposes the same flags on `_zod`.
 function optFlag(schemaNode: SchemaNode, which: "optin" | "optout"): "optional" | undefined {
-  switch (schemaNode.kind) {
-    case "optional":
-      return "optional";
-    case "default":
-    case "prefault":
-      return which === "optin" ? "optional" : undefined;
-    case "catch":
-      return which === "optin" ? "optional" : optFlag(schemaNode.inner, "optout");
-    case "nullable":
-    case "readonly":
-    case "promise":
-      return optFlag(schemaNode.inner, which);
-    case "lazy":
-      return optFlag(schemaNode.getter(), which);
-    case "union":
-    case "discunion":
-      return schemaNode.options.some((option) => optFlag(option, which) === "optional") ? "optional" : undefined;
-    case "pipe":
-      return optFlag(which === "optin" ? schemaNode.a : schemaNode.b, which);
-    case "host":
-      return schemaNode.op === "transform" && which === "optin" ? "optional" : undefined;
-    default:
-      return undefined;
-  }
+  return which === "optin" ? optinOf(schemaNode) : optoutOf(schemaNode);
 }
 
 // ---------------------------------------------------------------------------

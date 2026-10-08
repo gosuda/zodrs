@@ -44,12 +44,7 @@ fn output(verdict: &zodrs::Verdict) -> Json {
 
 #[test]
 fn round_trip_object_string_min_array_int() {
-    let plan_json = json!([
-        {"k":"object","keys":["a","b"],"values":[1,3],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[{"c":"min_length","v":3}]},
-        {"k":"number","checks":[{"c":"number_format","v":"int32"}]},
-        {"k":"array","element":2,"checks":[]}
-    ]);
+    let plan_json = json!([{"k":"object","keys":["a","b"],"values":[1,3],"mode":"strip","catchall":null},{"k":"string","checks":[{"c":"min_length","v":3}]},{"k":"number","checks":[{"c":"number_format","v":"int32"}]},{"k":"array","element":2,"checks":[]}]);
     let compiled = plan(&plan_json);
     assert_eq!(compiled.nodes().len(), 4);
     assert_eq!(compiled.root(), 0);
@@ -267,11 +262,9 @@ fn string_keywords(
 // ------------------------------------------------------------------------
 
 fn user_plan() -> zodrs::CompiledPlan {
-    plan(&json!([
-        {"k":"object","keys":["name","age"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[{"c":"min_length","v":3}]},
-        {"k":"number","checks":[{"c":"gt","v":0,"inclusive":false}]}
-    ]))
+    plan(
+        &json!([{"k":"object","keys":["name","age"],"values":[1,2],"mode":"strip","catchall":null},{"k":"string","checks":[{"c":"min_length","v":3}]},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":false}]}]),
+    )
 }
 
 #[test]
@@ -321,12 +314,9 @@ fn object_key_reorder_sets_dirty() {
 // dirty: default applied for a missing key
 #[test]
 fn object_default_applied_sets_dirty() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["name","role"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]},
-        {"k":"default","inner":3,"value":"user"},
-        {"k":"string","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["name","role"],"values":[1,4],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"default","inner":3,"value":"user"},{"k":"string","checks":[]},{"k":"optional","inner":2}]),
+    );
     let v = validate(&compiled, br#"{"name":"Ada"}"#);
     assert_eq!(v.status, 1);
     assert_eq!(output(&v), json!({"name":"Ada","role":"user"}));
@@ -344,10 +334,9 @@ fn overwrite_trim_sets_dirty() {
 // strict mode: unrecognized_keys
 #[test]
 fn object_strict_unrecognized_keys() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["name"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"string","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["name"],"values":[1],"mode":"strict","catchall":null},{"k":"string","checks":[]}]),
+    );
     let v = validate(&compiled, br#"{"name":"Ada","extra":1}"#);
     assert_issue(
         &v,
@@ -358,10 +347,9 @@ fn object_strict_unrecognized_keys() {
 // passthrough retains unknowns (dirty) in output
 #[test]
 fn object_passthrough_retains_unknown() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["name"],"values":[1],"optional":[false],"mode":"passthrough","catchall":null},
-        {"k":"string","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["name"],"values":[1],"mode":"passthrough","catchall":null},{"k":"string","checks":[]}]),
+    );
     let v = validate(&compiled, br#"{"name":"Ada","extra":1}"#);
     assert_eq!(v.status, 1);
     let out = output(&v);
@@ -375,10 +363,9 @@ fn object_passthrough_retains_unknown() {
 // packages/zodrs/src/core/plan.ts.
 #[test]
 fn proto_key_is_ordinary_data() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["__proto__"],"values":[1],"mode":"strict","catchall":null},{"k":"number","checks":[]}]),
+    );
     assert!(!compiled.json_eligible);
     let v = validate(&compiled, br#"{"__proto__":1}"#);
     assert_eq!(v.status, 3, "defers to the TS path: {v:?}");
@@ -477,14 +464,9 @@ fn union_nonfinite_failed_branch_does_not_force_fallback() {
     // following string branch is clean and matches the input. An outer default
     // makes the overall output dirty, so without restoring nonfinite the leaked
     // flag would force a fallback (3); with the fix it returns a valid rewrite.
-    let compiled = plan(&json!([
-        {"k":"object","keys":["u","d"],"values":[1,4],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"union","options":[2,3]},
-        {"k":"number","coerce":true,"checks":[{"c":"lt","v":10,"inclusive":true}]},
-        {"k":"string","checks":[]},
-        {"k":"default","inner":5,"value":0,"dynamic":false},
-        {"k":"number","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["u","d"],"values":[1,6],"mode":"strip","catchall":null},{"k":"union","options":[2,3]},{"k":"number","coerce":true,"checks":[{"c":"lt","v":10,"inclusive":true}]},{"k":"string","checks":[]},{"k":"default","inner":5,"value":0,"dynamic":false},{"k":"number","checks":[]},{"k":"optional","inner":4}]),
+    );
     let v = validate(&compiled, br#"{"u":"Infinity"}"#);
     assert_eq!(
         v.status, 1,
@@ -499,15 +481,9 @@ fn union_nonfinite_failed_branch_does_not_force_fallback() {
 
 #[test]
 fn discriminated_union_dispatches() {
-    let compiled = plan(&json!([
-        {"k":"discunion","key":"type","map":[["a",1],["b",2]]},
-        {"k":"object","keys":["type","x"],"values":[3,4],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"object","keys":["type","y"],"values":[5,6],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"literal","values":["a"]},
-        {"k":"string","checks":[]},
-        {"k":"literal","values":["b"]},
-        {"k":"number","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"discunion","key":"type","map":[["a",1],["b",2]]},{"k":"object","keys":["type","x"],"values":[3,4],"mode":"strip","catchall":null},{"k":"object","keys":["type","y"],"values":[5,6],"mode":"strip","catchall":null},{"k":"literal","values":["a"]},{"k":"string","checks":[]},{"k":"literal","values":["b"]},{"k":"number","checks":[]}]),
+    );
     assert_eq!(validate(&compiled, br#"{"type":"b","y":1}"#).status, 0,);
     // dispatch must select the "b" branch; a wrong dispatch would reject the shape.
     let bad = validate(&compiled, br#"{"type":"b","y":"nope"}"#);
@@ -532,11 +508,9 @@ fn record_validates_values() {
 fn lazy_cycle_validates_nested() {
     // node0: lazy(1); node1: optional(2); node2: object{child:0}
     // mirrors `z.lazy(() => z.object({ child: S.optional() }))`: child optional.
-    let compiled = plan(&json!([
-        {"k":"lazy","inner":1},
-        {"k":"optional","inner":2},
-        {"k":"object","keys":["child"],"values":[0],"optional":[true],"mode":"strip","catchall":null}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"lazy","inner":1},{"k":"optional","inner":2},{"k":"object","keys":["child"],"values":[3],"mode":"strip","catchall":null},{"k":"optional","inner":0}]),
+    );
     // This plan is not actually self-consistent (child:0 -> lazy(1) -> optional(2)),
     // but it exercises the back-edge traversal without panic. zod rejects the
     // input with invalid_type at ["child","child"]: the inner 1 reaches the
@@ -560,10 +534,9 @@ fn lazy_cycle_validates_nested() {
 
 #[test]
 fn host_node_poisons_eligibility() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["x"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"host","inner":null,"fn":0}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["x"],"values":[1],"mode":"strip","catchall":null},{"k":"host","inner":null,"fn":0}]),
+    );
     assert!(!compiled.json_eligible);
     let v = validate(&compiled, br#"{"x":1}"#);
     assert_eq!(v.status, 3);
@@ -583,11 +556,9 @@ fn unparseable_input_falls_back() {
 #[test]
 fn k2_duplicate_keys_last_wins() {
     // z.string().min(3) at key "name"; duplicate name -> last value "Ada" wins.
-    let compiled = plan(&json!([
-        {"k":"object","keys":["name","age"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[{"c":"min_length","v":3}]},
-        {"k":"number","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["name","age"],"values":[1,2],"mode":"strip","catchall":null},{"k":"string","checks":[{"c":"min_length","v":3}]},{"k":"number","checks":[]}]),
+    );
     // First value "A" fails min(3); last value "Ada" passes. Must succeed.
     let v = validate(&compiled, br#"{"name":"A","name":"Ada","age":36}"#);
     assert_eq!(v.status, 1, "collapsed dup keys rewrite the input: {v:?}");
@@ -614,11 +585,9 @@ fn k4_catch_fires_on_failure() {
     assert_eq!(output(&v), json!("dflt"));
 
     // Nested: strictObject({}).catch({}) at key b; [1,2] fails -> b becomes {}.
-    let nested = plan(&json!([
-        {"k":"object","keys":["b"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"catch","inner":2,"value":{}},
-        {"k":"object","keys":[],"values":[],"optional":[],"mode":"strict","catchall":null}
-    ]));
+    let nested = plan(
+        &json!([{"k":"object","keys":["b"],"values":[1],"mode":"strip","catchall":null},{"k":"catch","inner":2,"value":{}},{"k":"object","keys":[],"values":[],"mode":"strict","catchall":null}]),
+    );
     let nv = validate(&nested, br#"{"b":[1,2]}"#);
     assert_eq!(nv.status, 1);
     assert_eq!(output(&nv), json!({"b":{}}));
@@ -649,10 +618,9 @@ fn k5_regex_issue_has_pattern() {
 // K6: strict objects skip __proto__ in the unrecognized-keys scan.
 #[test]
 fn k6_strict_skips_proto() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["a"],"values":[1],"mode":"strict","catchall":null},{"k":"number","checks":[]}]),
+    );
     // __proto__ present as unknown key: not flagged, dropped from output.
     let v = validate(&compiled, br#"{"a":1,"__proto__":2}"#);
     assert_eq!(v.status, 1, "proto dropped -> rewritten: {v:?}");
@@ -662,13 +630,9 @@ fn k6_strict_skips_proto() {
 // K7: no-match discriminated union emits the full discriminator issue.
 #[test]
 fn k7_discriminator_issue_shape() {
-    let compiled = plan(&json!([
-        {"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},
-        {"k":"object","keys":["kind"],"values":[3],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"object","keys":["kind"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"literal","values":["dog"]},
-        {"k":"literal","values":["cat"]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},{"k":"object","keys":["kind"],"values":[3],"mode":"strip","catchall":null},{"k":"object","keys":["kind"],"values":[4],"mode":"strip","catchall":null},{"k":"literal","values":["dog"]},{"k":"literal","values":["cat"]}]),
+    );
     let v = validate(&compiled, br#"{"kind":"fish"}"#);
     assert_issue(
         &v,
@@ -688,21 +652,18 @@ fn k7_discriminator_issue_shape() {
 #[test]
 fn k8_missing_key_expected_per_node() {
     // Missing object-typed key -> invalid_type expected "object".
-    let obj = plan(&json!([
-        {"k":"object","keys":["inner"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"object","keys":["x"],"values":[2],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let obj = plan(
+        &json!([{"k":"object","keys":["inner"],"values":[1],"mode":"strip","catchall":null},{"k":"object","keys":["x"],"values":[2],"mode":"strip","catchall":null},{"k":"number","checks":[]}]),
+    );
     assert_issue(
         &validate(&obj, b"{}"),
         &json!({"code":"invalid_type","expected":"object","path":["inner"]}),
     );
 
     // Missing enum key -> invalid_value with the values, not invalid_type.
-    let en = plan(&json!([
-        {"k":"object","keys":["role"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"enum","values":["admin","user"]}
-    ]));
+    let en = plan(
+        &json!([{"k":"object","keys":["role"],"values":[1],"mode":"strip","catchall":null},{"k":"enum","values":["admin","user"]}]),
+    );
     assert_issue(
         &validate(&en, b"{}"),
         &json!({"code":"invalid_value","values":["admin","user"],"path":["role"]}),
@@ -712,17 +673,15 @@ fn k8_missing_key_expected_per_node() {
 // K9: the empty string is an ordinary object key.
 #[test]
 fn k9_empty_string_key() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":[""],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"number","checks":[{"c":"number_format","v":"int32"}]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":[""],"values":[1],"mode":"strict","catchall":null},{"k":"number","checks":[{"c":"number_format","v":"int32"}]}]),
+    );
     // Present "" value validates cleanly (no spurious unrecognized_keys / missing).
     assert_eq!(validate(&compiled, br#"{"":36}"#).status, 0);
     // "" enum violation at the "" path is reported, not silently accepted.
-    let en = plan(&json!([
-        {"k":"object","keys":[""],"values":[1],"optional":[false],"mode":"strict","catchall":null},
-        {"k":"enum","values":["a","b"]}
-    ]));
+    let en = plan(
+        &json!([{"k":"object","keys":[""],"values":[1],"mode":"strict","catchall":null},{"k":"enum","values":["a","b"]}]),
+    );
     assert_issue(
         &validate(&en, br#"{"":"z"}"#),
         &json!({"code":"invalid_value","values":["a","b"],"path":[""]}),
@@ -791,28 +750,25 @@ fn record_proto_key_skipped_in_check_and_output() {
 fn object_unknown_proto_dropped_in_all_modes() {
     for mode in ["strip", "passthrough", "strict"] {
         let obj = plan(&json!([
-            {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":mode,"catchall":null},
+            {"k":"object","keys":["a"],"values":[1],"mode":mode,"catchall":null},
             {"k":"string","checks":[]}
         ]));
         let v = validate(&obj, br#"{"a":"x","__proto__":1}"#);
         assert_eq!(output(&v), json!({"a": "x"}), "mode {mode}");
     }
     // Catchall does not validate or retain __proto__ either.
-    let ca = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":2},
-        {"k":"string","checks":[]},
-        {"k":"number","checks":[]}
-    ]));
+    let ca = plan(
+        &json!([{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":2},{"k":"string","checks":[]},{"k":"number","checks":[]}]),
+    );
     let v = validate(&ca, br#"{"a":"x","__proto__":"not-a-number"}"#);
     assert_eq!(output(&v), json!({"a": "x"}));
 }
 
 #[test]
 fn object_shape_key_named_proto_defers_to_the_ts_path() {
-    let obj = plan(&json!([
-        {"k":"object","keys":["__proto__"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]}
-    ]));
+    let obj = plan(
+        &json!([{"k":"object","keys":["__proto__"],"values":[1],"mode":"strip","catchall":null},{"k":"string","checks":[]}]),
+    );
     // The scanner cannot tell an absent `__proto__` from the inherited one the
     // TS walk reads, so the whole plan stays off the byte path either way.
     assert!(!obj.json_eligible);
@@ -827,10 +783,9 @@ fn object_shape_key_named_proto_defers_to_the_ts_path() {
 
 #[test]
 fn duplicate_key_keeps_first_position_with_last_value() {
-    let obj = plan(&json!([
-        {"k":"object","keys":["b","a"],"values":[1,1],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let obj = plan(
+        &json!([{"k":"object","keys":["b","a"],"values":[1,1],"mode":"strip","catchall":null},{"k":"number","checks":[]}]),
+    );
     let v = validate(&obj, br#"{"b":1,"a":2,"b":3}"#);
     assert_eq!(v.status, 1, "duplicate collapse rewrites: {v:?}");
     let payload = v.payload.as_deref().unwrap();
@@ -956,11 +911,9 @@ fn tuple_absent_nullable_of_optional_is_swallowed() {
 
 #[test]
 fn object_issues_follow_schema_key_order() {
-    let obj = plan(&json!([
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]},
-        {"k":"number","checks":[]}
-    ]));
+    let obj = plan(
+        &json!([{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[]}]),
+    );
     let v = validate(&obj, br#"{"b":"x","a":1}"#);
     assert_eq!(v.status, 2);
     let got = issues(&v.payload);
@@ -993,10 +946,9 @@ fn object_issues_follow_schema_key_order() {
 fn negative_zero_rewrite_defers_to_js_path() {
     // A dirty parse whose input carries -0 cannot rewrite it faithfully
     // (sonic-rs normalizes -0 to 0.0), so the verdict defers (status 3).
-    let obj = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let obj = plan(
+        &json!([{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"number","checks":[]}]),
+    );
     let v = validate(&obj, br#"{"a":-0,"extra":1}"#);
     assert_eq!(v.status, 3, "-0 with a dirty rewrite defers: {v:?}");
 
@@ -1005,11 +957,9 @@ fn negative_zero_rewrite_defers_to_js_path() {
     assert_eq!(v.status, 0, "clean parse keeps the bytes: {v:?}");
 
     // A "-0" inside a string is not a number token and must not defer.
-    let obj2 = plan(&json!([
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]},
-        {"k":"number","checks":[]}
-    ]));
+    let obj2 = plan(
+        &json!([{"k":"object","keys":["a","b"],"values":[1,2],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[]}]),
+    );
     let v = validate(&obj2, br#"{"a":"-0","b":1,"extra":2}"#);
     assert_eq!(output(&v), json!({"a": "-0", "b": 1}));
 }
@@ -1082,13 +1032,9 @@ fn union_flatten_single_type_match() {
 
 #[test]
 fn union_sub_issue_relative_paths() {
-    let p = plan(&json!([
-        {"k":"union","options":[1,3]},
-        {"k":"object","keys":["name"],"values":[2],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]},
-        {"k":"object","keys":["name"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"number","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"union","options":[1,3]},{"k":"object","keys":["name"],"values":[2],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"object","keys":["name"],"values":[4],"mode":"strip","catchall":null},{"k":"number","checks":[]}]),
+    );
     let v = validate(&p, br#"{"name":true}"#);
     assert_eq!(v.status, 2, "expected invalid: {v:?}");
     let iss = issues(&v.payload);
@@ -1145,13 +1091,9 @@ fn format_issue_includes_pattern_and_key_order() {
 
 #[test]
 fn discunion_note_field_and_key_order() {
-    let p = plan(&json!([
-        {"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},
-        {"k":"object","keys":["kind"],"values":[3],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"object","keys":["kind"],"values":[4],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"literal","values":["dog"]},
-        {"k":"literal","values":["cat"]}
-    ]));
+    let p = plan(
+        &json!([{"k":"discunion","key":"kind","map":[["dog",1],["cat",2]]},{"k":"object","keys":["kind"],"values":[3],"mode":"strip","catchall":null},{"k":"object","keys":["kind"],"values":[4],"mode":"strip","catchall":null},{"k":"literal","values":["dog"]},{"k":"literal","values":["cat"]}]),
+    );
     let v = validate(&p, br#"{"kind":"fish"}"#);
     assert_eq!(v.status, 2, "expected invalid: {v:?}");
     let iss = issues(&v.payload);
@@ -1173,23 +1115,17 @@ fn discunion_note_field_and_key_order() {
 
 #[test]
 fn object_default_optional_applies() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"optional","inner":2},
-        {"k":"default","inner":3,"value":"x","dynamic":false},
-        {"k":"string","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[4],"mode":"strip","catchall":null},{"k":"optional","inner":2},{"k":"default","inner":3,"value":"x","dynamic":false},{"k":"string","checks":[]},{"k":"optional","inner":1}]),
+    );
     assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
 }
 
 #[test]
 fn object_catch_optional_omits() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"optional","inner":2},
-        {"k":"catch","inner":3,"value":"caught","dynamic":false},
-        {"k":"string","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[4],"mode":"strip","catchall":null},{"k":"optional","inner":2},{"k":"catch","inner":3,"value":"caught","dynamic":false},{"k":"string","checks":[]},{"k":"optional","inner":1}]),
+    );
     let v = validate(&p, br"{}");
     assert_eq!(v.status, 0, "expected clean/omitted: {v:?}");
     assert!(v.payload.is_none());
@@ -1197,34 +1133,25 @@ fn object_catch_optional_omits() {
 
 #[test]
 fn object_default_nullable_applies() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"nullable","inner":2},
-        {"k":"default","inner":3,"value":"x","dynamic":false},
-        {"k":"string","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[4],"mode":"strip","catchall":null},{"k":"nullable","inner":2},{"k":"default","inner":3,"value":"x","dynamic":false},{"k":"string","checks":[]},{"k":"optional","inner":1}]),
+    );
     assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
 }
 
 #[test]
 fn object_union_wraps_default() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"union","options":[2,3]},
-        {"k":"number","checks":[]},
-        {"k":"default","inner":4,"value":"x","dynamic":false},
-        {"k":"string","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[5],"mode":"strip","catchall":null},{"k":"union","options":[2,3]},{"k":"number","checks":[]},{"k":"default","inner":4,"value":"x","dynamic":false},{"k":"string","checks":[]},{"k":"optional","inner":1}]),
+    );
     assert_eq!(output(&validate(&p, br"{}")), json!({"a": "x"}));
 }
 
 #[test]
 fn object_bare_optional_omits() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[true],"mode":"strip","catchall":null},
-        {"k":"optional","inner":2},
-        {"k":"string","checks":[]}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[3],"mode":"strip","catchall":null},{"k":"optional","inner":2},{"k":"string","checks":[]},{"k":"optional","inner":1}]),
+    );
     let v = validate(&p, br"{}");
     assert_eq!(v.status, 0, "expected clean/omitted: {v:?}");
     assert!(v.payload.is_none());
@@ -1232,10 +1159,9 @@ fn object_bare_optional_omits() {
 
 #[test]
 fn cyclic_lazy_object_falls_back() {
-    let p = plan(&json!([
-        {"k":"object","keys":["a"],"values":[1],"optional":[false],"mode":"strip","catchall":null},
-        {"k":"lazy","inner":1}
-    ]));
+    let p = plan(
+        &json!([{"k":"object","keys":["a"],"values":[1],"mode":"strip","catchall":null},{"k":"lazy","inner":1}]),
+    );
     let v = validate(&p, br"{}");
     assert_eq!(v.status, 3, "expected fallback for cyclic lazy: {v:?}");
     let v = validate(&p, br#"{"a":1}"#);
@@ -1326,11 +1252,9 @@ fn raw_plan_ineligible_kinds(#[case] plan_json: Json) {
 
 #[test]
 fn representative_ordinary_json_plan_stays_eligible() {
-    let compiled = plan(&json!([
-        {"k":"object","keys":["a","b"],"values":[1,2],"optional":[false,true],"mode":"strip","catchall":null},
-        {"k":"string","checks":[]},
-        {"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]}
-    ]));
+    let compiled = plan(
+        &json!([{"k":"object","keys":["a","b"],"values":[1,3],"mode":"strip","catchall":null},{"k":"string","checks":[]},{"k":"number","checks":[{"c":"gt","v":0,"inclusive":true}]},{"k":"optional","inner":2}]),
+    );
     assert!(compiled.json_eligible, "ordinary JSON plan stays eligible");
     let v = validate(&compiled, br#"{"a":"hello","b":5}"#);
     assert_eq!(v.status, 0, "expected clean canonical input");

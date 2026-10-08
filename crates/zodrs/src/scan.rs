@@ -786,7 +786,6 @@ impl<'a> Scanner<'a> {
         let PlanNode::Object {
             keys,
             values,
-            optional,
             mode,
             catchall,
             ..
@@ -914,14 +913,17 @@ impl<'a> Scanner<'a> {
         // Absent schema keys resolve through the shared missing-input
         // classifier: `Undefined` drops out of the output (still clean),
         // `Value` materializes on rewrite (validates dirty). Both require the
-        // schema flag that marks the key optional on input; without it the
-        // DOM walk emits `nonoptional` instead, so the scan defers.
+        // field schema to accept absent input (optin_optional); without it
+        // the DOM walk emits `nonoptional` instead, so the scan defers.
         for (schema_i, _) in keys.iter().enumerate() {
             if seen & (1 << schema_i) == 0 {
                 use crate::validate::{Absent, absent_result};
-                match absent_result(self.plan, values[schema_i]) {
-                    Absent::Undefined if optional[schema_i] => {}
-                    Absent::Value(..) if optional[schema_i] => {
+                match (
+                    absent_result(self.plan, values[schema_i]),
+                    self.dispatch(values[schema_i]).optin_optional,
+                ) {
+                    (Absent::Undefined, true) => {}
+                    (Absent::Value(..), true) => {
                         self.dirty_hint = true;
                         return true;
                     }
@@ -1309,13 +1311,7 @@ mod tests {
 
     #[test]
     fn fast_path_recovers_after_absent_key_gap() -> Result<(), crate::CompileError> {
-        let plan = r#"[
-            {"k":"object","keys":["a","b","c","d"],"values":[1,2,3,4],"optional":[false,true,false,false],"mode":"passthrough","catchall":null},
-            {"k":"string","checks":[]},
-            {"k":"string","checks":[]},
-            {"k":"string","checks":[]},
-            {"k":"string","checks":[]}
-        ]"#;
+        let plan = r#"[{"k":"object","keys":["a","b","c","d"],"values":[1,5,3,4],"mode":"passthrough","catchall":null},{"k":"string","checks":[]},{"k":"string","checks":[]},{"k":"string","checks":[]},{"k":"string","checks":[]},{"k":"optional","inner":2}]"#;
         let compiled = compile(plan)?;
 
         assert_eq!(

@@ -7,7 +7,7 @@ declare const URL: {
 };
 declare const atob: (data: string) => string;
 
-const PATTERNS: Readonly<Record<string, RegExp>> = {
+export const PATTERNS: Readonly<Record<string, RegExp>> = {
   cuid: /^[cC][0-9a-z]{6,}$/,
   cuid2: /^[0-9a-z]+$/,
   ulid: /^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$/,
@@ -43,10 +43,14 @@ const PATTERNS: Readonly<Record<string, RegExp>> = {
   hex: /^[0-9a-fA-F]*$/,
 };
 
-const DATE = /^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))$/;
+/** Unanchored date source — also the JSON Schema `pattern` atom. */
+export const DATE_SOURCE =
+  "(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))";
 
-function timeSource(params: Readonly<Record<string, unknown>>): string {
-  const precision = typeof params["precision"] === "number" ? params["precision"] : null;
+const DATE = new RegExp(`^${DATE_SOURCE}$`);
+
+/** Time-of-day pattern source for a `precision` parameter value. */
+export function timeSource(precision: unknown): string {
   const hhmm = "(?:[01]\\d|2[0-3]):[0-5]\\d";
   if (typeof precision === "number") {
     if (precision === -1) return hhmm;
@@ -56,23 +60,86 @@ function timeSource(params: Readonly<Record<string, unknown>>): string {
   return `${hhmm}(?::[0-5]\\d(?:\\.\\d+)?)?`;
 }
 
-function datetimeRegex(params: Readonly<Record<string, unknown>>): RegExp {
+/** Anchored datetime pattern source honoring local/offset/precision params. */
+export function datetimePattern(params: Readonly<Record<string, unknown>>): string {
   const opts = ["Z"];
   if (params["local"] === true) opts.push("");
   if (params["offset"] === true) opts.push("([+-](?:[01]\\d|2[0-3]):[0-5]\\d)");
-  return new RegExp(`^${DATE.source.slice(1, -1)}T(?:${timeSource(params)}(?:${opts.join("|")}))$`);
+  return `^${DATE_SOURCE}T(?:${timeSource(params["precision"])}(?:${opts.join("|")}))$`;
 }
 
-function hashPattern(format: string, encoding: string): RegExp | undefined {
-  const lengths: Readonly<Record<string, readonly [number, number, string]>> = {
-    md5: [32, 22, "=="], sha1: [40, 27, "="], sha256: [64, 43, "="], sha384: [96, 64, ""], sha512: [128, 86, "=="],
-  };
-  const entry = lengths[format];
+/** [hex length, base64 length, padding] per hash format. */
+export const HASH_LENGTHS: Readonly<Record<string, readonly [number, number, string]>> = {
+  md5: [32, 22, "=="], sha1: [40, 27, "="], sha256: [64, 43, "="], sha384: [96, 64, ""], sha512: [128, 86, "=="],
+};
+
+/** Anchored pattern source for a hash format in a given encoding, or undefined for non-hash formats. */
+export function hashFormatPattern(format: string, encoding: string): string | undefined {
+  const entry = HASH_LENGTHS[format];
   if (!entry) return undefined;
   const [hex, b64, padding] = entry;
-  if (encoding === "hex") return new RegExp(`^[0-9a-fA-F]{${hex}}$`);
-  if (encoding === "base64url") return new RegExp(`^[A-Za-z0-9_-]{${b64}}$`);
-  return new RegExp(`^[A-Za-z0-9+/]{${b64}}${escapeRegex(padding)}$`);
+  if (encoding === "hex") return `^[0-9a-fA-F]{${hex}}$`;
+  if (encoding === "base64url") return `^[A-Za-z0-9_-]{${b64}}$`;
+  return `^[A-Za-z0-9+/]{${b64}}${escapeRegex(padding)}$`;
+}
+
+/** Anchored pattern source for a MAC address with the given delimiter. */
+export function macPattern(delimiter: string): string {
+  const d = escapeRegex(delimiter);
+  return `^(?:[0-9A-F]{2}${d}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${d}){5}[0-9a-f]{2}$`;
+}
+
+// Parameterized formats build regexes per (format, params) pair. `testFormat`
+// can run once per parsed element, so compiled patterns are memoized — keyed
+// on the params that shape the pattern, not the whole wire params (an `error`
+// message must not mint a new entry), and bounded so schema churn cannot grow
+// the module-global table without limit.
+const dynamicCache = new Map<string, RegExp | undefined>();
+const DYNAMIC_CACHE_LIMIT = 512;
+
+function dynamicKey(format: FormatId, params: Readonly<Record<string, unknown>>): string {
+  switch (format) {
+    case "time":
+      return `time ${params["precision"]}`;
+    case "datetime":
+      return `datetime ${params["precision"]} ${params["local"]} ${params["offset"]}`;
+    case "mac":
+      return `mac ${params["delimiter"]}`;
+    default:
+      return `${format} ${params["enc"]}`;
+  }
+}
+
+function dynamicPattern(format: FormatId, params: Readonly<Record<string, unknown>>): RegExp | undefined {
+  switch (format) {
+    case "time":
+      return new RegExp(`^${timeSource(params["precision"])}$`);
+    case "datetime":
+      return new RegExp(datetimePattern(params));
+    case "mac": {
+      const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";
+      return new RegExp(macPattern(delimiter));
+    }
+    case "md5":
+    case "sha1":
+    case "sha256":
+    case "sha384":
+    case "sha512": {
+      const encoding = typeof params["enc"] === "string" ? params["enc"] : "hex";
+      const source = hashFormatPattern(format, encoding);
+      return source === undefined ? undefined : new RegExp(source);
+    }
+    default:
+      return undefined;
+  }
+}
+
+function cachedPattern(format: FormatId, params: Readonly<Record<string, unknown>>): RegExp | undefined {
+  const key = dynamicKey(format, params);
+  if (dynamicCache.has(key)) return dynamicCache.get(key);
+  const re = dynamicPattern(format, params);
+  if (dynamicCache.size < DYNAMIC_CACHE_LIMIT) dynamicCache.set(key, re);
+  return re;
 }
 
 function isValidBase64(data: string): boolean {
@@ -193,19 +260,17 @@ export function testFormat(format: FormatId, input: string, params: Readonly<Rec
     }
   }
   if (format === "date") return DATE.test(input);
-  if (format === "time") {
-    return new RegExp(`^${timeSource(params)}$`).test(input);
-  }
-  if (format === "datetime") {
-    return datetimeRegex(params).test(input);
-  }
-  if (format === "mac") {
-    const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";
-    return new RegExp(`^(?:[0-9A-F]{2}${escapeRegex(delimiter)}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapeRegex(delimiter)}){5}[0-9a-f]{2}$`).test(input);
-  }
-  if (format === "md5" || format === "sha1" || format === "sha256" || format === "sha384" || format === "sha512") {
-    const encoding = typeof params["enc"] === "string" ? params["enc"] : "hex";
-    return hashPattern(format, encoding)?.test(input) ?? false;
+  if (
+    format === "time"
+    || format === "datetime"
+    || format === "mac"
+    || format === "md5"
+    || format === "sha1"
+    || format === "sha256"
+    || format === "sha384"
+    || format === "sha512"
+  ) {
+    return cachedPattern(format, params)?.test(input) ?? false;
   }
   return PATTERNS[format]?.test(input) ?? false;
 }
@@ -225,22 +290,18 @@ export function patternForFormat(format: FormatId, params: Readonly<Record<strin
       return PATTERNS["base64url"];
     case "date":
       return DATE;
+    // Exposed `pattern` values get a fresh RegExp per schema: the memoized
+    // instances serve the internal testFormat hot path only, so a consumer
+    // mutating one schema's pattern cannot leak state into another's.
     case "time":
-      return new RegExp(`^${timeSource(params)}$`);
     case "datetime":
-      return datetimeRegex(params);
-    case "mac": {
-      const delimiter = typeof params["delimiter"] === "string" ? params["delimiter"] : ":";
-      return new RegExp(`^(?:[0-9A-F]{2}${escapeRegex(delimiter)}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapeRegex(delimiter)}){5}[0-9a-f]{2}$`);
-    }
+    case "mac":
     case "md5":
     case "sha1":
     case "sha256":
     case "sha384":
-    case "sha512": {
-      const encoding = typeof params["enc"] === "string" ? params["enc"] : "hex";
-      return hashPattern(format, encoding);
-    }
+    case "sha512":
+      return dynamicPattern(format, params);
     default:
       return PATTERNS[format];
   }

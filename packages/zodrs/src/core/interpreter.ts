@@ -140,6 +140,9 @@ function backfillPaths(context: ValidationContext, before: number, path: Propert
 
 const literalSets = new WeakMap<SchemaNode, ReadonlySet<unknown>>();
 
+/** Check objects are wire-stable per schema, so compiled `regex` checks can be cached instead of rebuilt per parse. */
+const checkRegexes = new WeakMap<object, RegExp>();
+
 function literalSet(node: SchemaNode & { readonly kind: "literal" }): ReadonlySet<unknown> {
   let accepted = literalSets.get(node);
   if (!accepted) {
@@ -292,11 +295,22 @@ function applyChecksSync(node: SchemaNode, initial: unknown, context: Validation
           }
           break;
         }
-        case "regex":
-          if (typeof value === "string" && !new RegExp(check.src, check.flags).test(value)) {
-            checkPayloadIssues(context, node, path, { origin: "string", code: "invalid_format", format: "regex", pattern: `/${check.src}/${check.flags}` }, value, runtime);
+        case "regex": {
+          let expression = checkRegexes.get(check);
+          if (!expression) {
+            expression = new RegExp(check.src, check.flags);
+            checkRegexes.set(check, expression);
+          }
+          // `g`/`y` flags advance lastIndex: reset before testing, matching the
+          // compiled leaf in codegen.
+          if (typeof value === "string") {
+            if (check.flags.includes("g") || check.flags.includes("y")) expression.lastIndex = 0;
+            if (!expression.test(value)) {
+              checkPayloadIssues(context, node, path, { origin: "string", code: "invalid_format", format: "regex", pattern: `/${check.src}/${check.flags}` }, value, runtime);
+            }
           }
           break;
+        }
         case "starts_with":
           if (typeof value === "string" && !value.startsWith(check.v)) checkPayloadIssues(context, node, path, { origin: "string", code: "invalid_format", format: "starts_with", prefix: check.v }, value, runtime);
           break;
