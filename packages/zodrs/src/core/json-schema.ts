@@ -879,7 +879,7 @@ function processNode(schema: SchemaLike, node: SchemaNode, seen: Seen, ctx: GenC
     }
 
     case "host": {
-      if (node.op === "transform" || node.op === "preprocess" || node.op === "codec_decode" || node.op === "codec_encode") {
+      if (transformingHostOp(node.op)) {
         if (ctx.io === "input" && node.inner !== null) {
           const inner = nodeToSchema(node.inner, ctx);
           process(inner, ctx, params);
