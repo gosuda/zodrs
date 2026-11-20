@@ -17,7 +17,7 @@ permissions:
 jobs:
   verify:
     if: github.repository == 'metaphorics/zodrs'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 180
     permissions:
       contents: read
@@ -479,7 +479,7 @@ jobs:
   publish:
     needs: [verify, build-native]
     if: github.repository == 'metaphorics/zodrs'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 60
     environment: release
     permissions:
@@ -938,7 +938,7 @@ jobs:
   verify-public:
     needs: publish
     if: github.repository == 'metaphorics/zodrs'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
