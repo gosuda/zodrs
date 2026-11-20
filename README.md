@@ -190,4 +190,6 @@ pnpm exec lefthook install
 
 MIT
 
+---
+
 [![Built with Depot](https://depot.dev/badges/built-with-depot.svg)](https://depot.dev?utm_source=gosuda)
