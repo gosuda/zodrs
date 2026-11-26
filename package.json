@@ -15,6 +15,6 @@
     "@emnapi/runtime": "1.11.3",
     "oxlint": "1.78.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.10"
+    "vitest": "5.0.0"
   }
 }
